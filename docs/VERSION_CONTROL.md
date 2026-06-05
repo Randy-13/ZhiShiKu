@@ -44,6 +44,14 @@ git branch -M main
 git push -u origin main
 ```
 
+Or run the helper script from the repository root:
+
+```powershell
+.\tools\push_github.ps1
+```
+
+The helper pushes `main`, `legacy-web`, and `workbench-web`.
+
 If the repository already exists, verify the URL before pushing:
 
 ```bash
