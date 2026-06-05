@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>设置中心 - 知识酷</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260601-settings" />
+  </head>
+  <body>
+    <main class="settings-shell">
+      <aside class="app-rail" aria-label="知识酷主导航">
+        <div class="app-brand">
+          <strong>知识酷</strong>
+          <span>Research OS</span>
+        </div>
+        <nav class="app-nav" aria-label="工作区">
+          <a class="app-nav-item" data-shell-section="collect" href="/collect"><span>收集</span><small>读取信息并保存原料</small></a>
+          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并构建关系网</small></a>
+          <a class="app-nav-item" data-shell-section="mine" href="/mine"><span>挖掘</span><small>多视角解读重点知识</small></a>
+          <a class="app-nav-item" data-shell-section="create" href="/create"><span>创作</span><small>引用三库生成成品</small></a>
+          <a class="app-nav-item active" data-shell-section="settings" href="/settings"><span>设置中心</span><small>模型、ASR、图片与视角模板</small></a>
+        </nav>
+      </aside>
+
+      <section class="settings-workspace">
+        <div class="topbar">
+          <div>
+            <h1>设置中心</h1>
+            <p>统一查看模型、转写、图片生成和环境配置状态。编辑能力会逐步从旧弹窗迁移到这里。</p>
+          </div>
+          <a class="button-link" href="/">返回知识工作台</a>
+        </div>
+
+        <section class="panel settings-overview-panel">
+          <div class="panel-header">
+            <div>
+              <span class="queue-kicker">Settings overview</span>
+              <h2>系统能力状态</h2>
+            </div>
+            <span id="settingsOverviewMeta">加载中</span>
+          </div>
+          <div id="settingsOverviewList" class="settings-overview-list">
+            <div class="queue empty">正在读取设置概览...</div>
+          </div>
+        </section>
+
+        <section class="panel settings-actions-panel">
+          <div class="panel-header">
+            <div>
+              <span class="queue-kicker">Edit surfaces</span>
+              <h2>配置入口</h2>
+            </div>
+          </div>
+          <div class="settings-action-grid">
+            <a class="settings-action-card" href="/#openApiSettings">
+              <strong>LLM API</strong>
+              <span>知识提炼、图谱、写作使用的主模型配置</span>
+            </a>
+            <a class="settings-action-card" href="/collect/media">
+              <strong>ASR</strong>
+              <span>音视频转写和字幕生成配置</span>
+            </a>
+            <a class="settings-action-card" href="/create">
+              <strong>图片 API</strong>
+              <span>封面图和文章配图生成配置</span>
+            </a>
+          </div>
+        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/settings.js?v=20260601-settings"></script>
+  </body>
+</html>

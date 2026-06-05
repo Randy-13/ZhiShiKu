@@ -1,0 +1,1 @@
+"""FigureLearning application package."""

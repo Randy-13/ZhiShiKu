@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>知识酷</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260601-mining" />
+  </head>
+  <body data-active-shell-section="collect">
+    <main class="app-shell">
+      <aside class="app-rail" aria-label="知识酷主导航">
+        <div class="app-brand">
+          <strong>知识酷</strong>
+          <span>Research OS</span>
+        </div>
+        <nav class="app-nav" aria-label="工作区">
+          <a class="app-nav-item active" data-shell-section="collect" href="/collect"><span>收集</span><small>读取信息并保存原料</small></a>
+          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并构建关系网</small></a>
+          <a class="app-nav-item" data-shell-section="mine" href="/mine"><span>挖掘</span><small>多视角解读重点知识</small></a>
+          <a class="app-nav-item" data-shell-section="create" href="/create"><span>创作</span><small>引用三库生成成品</small></a>
+          <a class="app-nav-item" id="openGlobalSettings" data-shell-section="settings" href="/settings"><span>设置中心</span><small id="settingsOverviewStatus">模型、ASR、图片与视角模板</small></a>
+        </nav>
+      </aside>
+      <section class="workspace">
+        <div class="topbar">
+          <div>
+            <h1>知识酷</h1>
+            <p>多源输入 -> 知识提炼 / 策略挖掘 -> Markdown -> 知识入网 -> 知识拉取</p>
+          </div>
+          <div class="topbar-actions">
+            <label class="global-search" aria-label="全局搜索">
+              <span>搜索</span>
+              <input type="search" placeholder="材料 / 知识 / 节点 / 作品" />
+            </label>
+            <button id="openApiSettings" type="button">API 设置</button>
+            <button id="refreshKnowledge" class="icon-button" title="刷新知识列表" aria-label="刷新知识列表">
+              <span aria-hidden="true">R</span>
+            </button>
+          </div>
+        </div>
+
+        <nav class="primary-mode-tabs" aria-label="工作模式">
+          <button id="refineModeTab" type="button" class="primary-mode-tab active">提炼</button>
+          <button id="miningModeTab" type="button" class="primary-mode-tab">挖掘</button>
+        </nav>
+
+        <section id="refineWorkspace" class="mode-workspace active">
+        <div class="workflow-stage collect-stage">
+          <div class="stage-heading">
+            <span class="stage-kicker">01 收集</span>
+            <h2>把材料放进本轮工作台</h2>
+            <p>文本、截图、文档、音视频和链接都先归一为材料，再进入学习处理。</p>
+          </div>
+          <div class="material-type-grid" aria-label="材料类型">
+            <button class="material-type-card" data-material-type="text" type="button">
+              <strong>文本</strong>
+              <span>键入、粘贴或临时记录</span>
+            </button>
+            <button class="material-type-card active" data-material-type="screenshot" type="button">
+              <strong>截图</strong>
+              <span>网页、报告、社媒图片</span>
+            </button>
+            <button class="material-type-card" data-material-type="document" type="button">
+              <strong>文档</strong>
+              <span>PDF、Word、Markdown、TXT</span>
+            </button>
+            <button class="material-type-card" data-material-type="media" type="button">
+              <strong>音视频</strong>
+              <span>转写为字幕和段落</span>
+            </button>
+            <button class="material-type-card" data-material-type="link" type="button">
+              <strong>链接</strong>
+              <span>解析为可处理材料</span>
+            </button>
+          </div>
+          <div class="toolbar material-plan-actions">
+            <button id="planLearningMaterials" type="button">生成学习计划</button>
+          </div>
+          <section id="unifiedLearningPlan" class="panel unified-learning-plan hidden" aria-live="polite">
+            <div class="panel-header">
+              <div>
+                <span class="queue-kicker">Learning plan</span>
+                <h2>本轮材料学习计划</h2>
+              </div>
+              <span id="unifiedLearningPlanMeta">未生成</span>
+            </div>
+            <div id="unifiedLearningPlanList" class="material-plan-list"></div>
+          </section>
+        </div>
+        <nav class="input-tabs" aria-label="知识输入方式">
+          <button id="screenshotInputTab" type="button" class="input-tab active" data-input-tab="screenshots">截图获取</button>
+          <button id="fileInputTab" type="button" class="input-tab" data-input-tab="files">文件获取</button>
+          <button id="mediaInputTab" type="button" class="input-tab">音视频获取</button>
+        </nav>
+
+        <section id="textInputPane" class="input-pane" data-input-pane="text">
+          <div class="workflow-stage learn-stage inline-stage">
+            <div class="stage-heading compact-stage-heading">
+              <span class="stage-kicker">02 学习</span>
+              <h2>记录文本材料</h2>
+              <p>把临时想法、网页摘录或手动笔记先收入材料队列，后续统一进入知识学习。</p>
+            </div>
+          </div>
+          <section class="panel material-input-panel">
+            <label class="material-input-label" for="textMaterialInput">文本材料</label>
+            <textarea id="textMaterialInput" class="paste-box" rows="6" placeholder="粘贴或输入一段材料，可以是网页摘录、会议笔记、临时观点。"></textarea>
+            <div class="toolbar">
+              <button id="addTextMaterial" type="button" class="primary">加入文本材料</button>
+              <button id="clearTextMaterials" type="button">清空文本材料</button>
+            </div>
+            <div class="panel-header">
+              <div>
+                <span class="queue-kicker">Material queue</span>
+                <h2>本轮文本材料</h2>
+              </div>
+              <span id="textMaterialCount">0 段</span>
+            </div>
+            <div id="textMaterialQueue" class="queue empty">暂无文本材料</div>
+          </section>
+        </section>
+
+        <section id="screenshotInputPane" class="input-pane active" data-input-pane="screenshots">
+          <div class="workflow-stage learn-stage inline-stage">
+            <div class="stage-heading compact-stage-heading">
+              <span class="stage-kicker">02 学习</span>
+              <h2>审阅队列并生成知识</h2>
+              <p>本轮截图会合并为一组知识输入，生成后进入右侧知识库和后续入网流程。</p>
+            </div>
+          </div>
+          <div id="dropzone" class="dropzone" tabindex="0">
+            <input id="fileInput" type="file" accept="image/*" multiple hidden />
+            <div class="dropzone-main">
+              <div class="drop-icon" aria-hidden="true">+</div>
+              <div>
+                <strong>拖入一组截图</strong>
+                <span>也可以点击选择文件；当前队列会作为一轮知识输入合并分析</span>
+              </div>
+            </div>
+          </div>
+
+          <textarea
+            id="pasteBox"
+            class="paste-box"
+            rows="3"
+            placeholder="点击这里后直接 Ctrl+V 粘贴截图。可以连续粘贴多张，当前队列会作为一轮知识输入。"
+          ></textarea>
+
+          <div class="toolbar">
+            <button id="chooseFiles" type="button">选择截图</button>
+            <button id="clearQueue" type="button">清空本轮</button>
+            <button id="generateKnowledge" type="button" class="primary">生成提炼结果</button>
+          </div>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div class="queue-header-left">
+                <span class="queue-kicker">Material queue</span>
+                <h2>本轮图片队列</h2>
+                <div class="parser-mode-switch" role="group" aria-label="截图解析方式">
+                  <button id="localOcrMode" type="button" class="mode-button active">本地 PaddleOCR 解析</button>
+                  <button id="aiVisionMode" type="button" class="mode-button">AI 智能解析</button>
+                </div>
+              </div>
+              <div class="queue-metrics">
+                <span id="analysisTime" class="analysis-time">分析时间：--</span>
+                <span id="queueCount">0 张</span>
+              </div>
+            </div>
+            <div id="queue" class="queue empty">暂无图片</div>
+          </section>
+        </section>
+
+        <section id="fileInputPane" class="input-pane" data-input-pane="files">
+          <div class="workflow-stage learn-stage inline-stage">
+            <div class="stage-heading compact-stage-heading">
+              <span class="stage-kicker">02 学习</span>
+              <h2>审阅文件、规划分段并生成知识</h2>
+              <p>长文档先进入规划步骤，确认主题范围后再生成结构化知识文件。</p>
+            </div>
+          </div>
+          <div id="documentDropzone" class="dropzone" tabindex="0">
+            <input id="documentInput" type="file" accept=".md,.markdown,.txt,.docx,.pdf" multiple hidden />
+            <div class="dropzone-main">
+              <div class="drop-icon" aria-hidden="true">+</div>
+              <div>
+                <strong>拖入一组文件</strong>
+                <span>支持 Markdown、TXT、Word .docx、PDF；当前队列会作为一轮知识输入合并分析</span>
+              </div>
+            </div>
+          </div>
+
+            <div class="toolbar">
+              <button id="chooseDocuments" type="button">选择文件</button>
+              <button id="clearDocumentQueue" type="button">清空本轮</button>
+              <button id="planFileKnowledge" type="button">生成规划</button>
+              <button id="generateFileKnowledge" type="button" class="primary">生成提炼结果</button>
+            </div>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="queue-kicker">Material queue</span>
+                <h2>本轮文件队列</h2>
+              </div>
+              <div class="queue-metrics">
+                <span id="fileAnalysisTime" class="analysis-time">分析时间：--</span>
+                <span id="documentQueueCount">0 个</span>
+              </div>
+              </div>
+              <div id="documentQueue" class="queue empty">暂无文件</div>
+            </section>
+
+            <section id="documentPlanPanel" class="panel document-plan-panel hidden">
+              <div class="panel-header">
+                <h2>知识文件规划</h2>
+                <span id="documentPlanMeta">未生成规划</span>
+              </div>
+              <div id="documentPlanSummary" class="muted">长 PDF 可先拆分主题，再选择需要生成的知识文件。</div>
+              <div id="documentPlanList" class="plan-list"></div>
+              <div class="toolbar">
+                <button id="generatePlannedKnowledge" type="button" class="primary">生成选中知识文件</button>
+              </div>
+            </section>
+        </section>
+
+        <section id="linkInputPane" class="input-pane" data-input-pane="link">
+          <div class="workflow-stage learn-stage inline-stage">
+            <div class="stage-heading compact-stage-heading">
+              <span class="stage-kicker">02 学习</span>
+              <h2>收集链接材料</h2>
+              <p>先把网页、视频、研报或社媒链接收入材料队列，后续统一解析为可学习材料。</p>
+            </div>
+          </div>
+          <section class="panel material-input-panel">
+            <label class="material-input-label" for="linkMaterialInput">链接材料</label>
+            <textarea id="linkMaterialInput" class="paste-box" rows="5" placeholder="每行一个链接，例如网页、Bilibili、抖音、研报地址。"></textarea>
+            <div class="toolbar">
+              <button id="addLinkMaterial" type="button" class="primary">加入链接材料</button>
+              <button id="clearLinkMaterials" type="button">清空链接材料</button>
+            </div>
+            <div class="panel-header">
+              <div>
+                <span class="queue-kicker">Material queue</span>
+                <h2>本轮链接材料</h2>
+              </div>
+              <span id="linkMaterialCount">0 条</span>
+            </div>
+            <div id="linkMaterialQueue" class="queue empty">暂无链接材料</div>
+          </section>
+        </section>
+
+        </section>
+
+        <section id="miningWorkspace" class="mode-workspace mining-workspace">
+          <section class="panel mining-project-panel">
+            <div class="panel-header">
+              <div>
+                <h2>挖掘项目</h2>
+                <span>先选择或创建一个策略学习项目</span>
+              </div>
+              <button id="createMiningProject" type="button" class="primary">新建项目</button>
+            </div>
+            <div class="mining-project-create">
+              <input id="newMiningProjectName" type="text" placeholder="例如：某作者短视频话术学习" />
+            </div>
+            <div id="miningProjectList" class="mining-project-list empty">暂无挖掘项目</div>
+          </section>
+
+          <section id="miningProjectWorkspace" class="panel mining-detail-panel">
+            <div class="panel-header">
+              <div>
+                <h2 id="miningProjectTitle">未选择项目</h2>
+                <span id="miningProjectStatus">创建或选择项目后开始学习</span>
+              </div>
+              <button id="saveMiningProjectName" type="button">重命名</button>
+            </div>
+            <input id="miningProjectName" class="mining-title-input" type="text" placeholder="项目名称" />
+
+            <div class="strategy-card">
+              <strong>创作策略学习</strong>
+              <span>通过作者的文章、截图、音视频或字幕，学习可解释的写文/短视频话术策略。</span>
+            </div>
+
+            <div class="mining-source-grid">
+              <section class="mining-source-box">
+                <h3>文章文件</h3>
+                <input id="miningDocumentInput" type="file" accept=".md,.markdown,.txt,.docx,.pdf" multiple hidden />
+                <button id="chooseMiningDocuments" type="button">上传文章文件</button>
+              </section>
+              <section class="mining-source-box">
+                <h3>截图</h3>
+                <input id="miningImageInput" type="file" accept="image/*" multiple hidden />
+                <button id="chooseMiningImages" type="button">上传截图</button>
+              </section>
+              <section class="mining-source-box">
+                <h3>音视频 / 字幕</h3>
+                <input id="miningMediaInput" type="file" accept=".mp3,.m4a,.wav,.aac,.flac,.mp4,.mov,.mkv,.webm,.srt,.vtt,.ass" multiple hidden />
+                <button id="chooseMiningMedia" type="button">上传音视频</button>
+              </section>
+              <section class="mining-source-box">
+                <h3>音视频链接</h3>
+                <textarea id="miningMediaUrlInput" rows="3" placeholder="每行一个 Bilibili / 抖音等链接"></textarea>
+                <button id="attachMiningMediaUrls" type="button">解析并加入</button>
+              </section>
+            </div>
+
+            <div class="toolbar">
+              <button id="learnCreationStrategy" type="button" class="primary">学习创作策略</button>
+              <span id="miningBusyStatus" class="analysis-time">-</span>
+            </div>
+
+            <div class="mining-result-grid">
+              <section>
+                <div class="panel-header compact-panel-header">
+                  <h3>学习素材</h3>
+                  <span id="miningSourceCount">0 个</span>
+                </div>
+                <div id="miningSourceList" class="queue empty">暂无素材</div>
+              </section>
+              <section>
+                <div class="panel-header compact-panel-header">
+                  <h3>当前策略</h3>
+                  <span id="miningVersionCount">0 版</span>
+                </div>
+                <pre id="miningStrategyPreview" class="markdown-preview mining-strategy-preview">尚未形成策略。</pre>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section id="createWorkspace" class="mode-workspace create-workspace" aria-label="创作模块">
+          <section class="panel creation-project-panel">
+            <div class="panel-header">
+              <div>
+                <h2>创作项目</h2>
+                <span>从原料库、重点库、视角库引用内容，生成可发布成品</span>
+              </div>
+              <button id="openLegacyWriterTool" type="button" class="primary">打开文章工作流</button>
+            </div>
+            <div class="creation-type-grid" aria-label="创作类型">
+              <button class="creation-type-card active" data-creation-type="article" type="button">
+                <strong>文章</strong>
+                <span>选题、成文、修改、配图、美编、发布检查</span>
+              </button>
+              <button class="creation-type-card" data-creation-type="xhs" type="button">
+                <strong>小红书图文</strong>
+                <span>标题、封面、图文节奏与标签</span>
+              </button>
+              <button class="creation-type-card" data-creation-type="short-video" type="button">
+                <strong>短视频脚本</strong>
+                <span>钩子、分镜、口播和行动引导</span>
+              </button>
+              <button class="creation-type-card" data-creation-type="long-video" type="button">
+                <strong>长视频脚本</strong>
+                <span>结构、章节、资料引用和叙事线</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="panel creation-editor-panel">
+            <div class="panel-header">
+              <div>
+                <h2>创作引导模板</h2>
+                <span>文章类型已接入原写文工具；其他类型先保留项目骨架</span>
+              </div>
+            </div>
+            <div class="creation-flow">
+              <article class="creation-step active">
+                <strong>1. 选择引用材料</strong>
+                <span>从右侧全局库选择原料、重点或视角文件作为引用来源。</span>
+              </article>
+              <article class="creation-step active">
+                <strong>2. 生成选题与大纲</strong>
+                <span>文章工作流复用原写文工具的选题建议能力。</span>
+              </article>
+              <article class="creation-step active">
+                <strong>3. 生成与修改正文</strong>
+                <span>在文章工作流中完成正文、修订、配图、美编和发布检查。</span>
+              </article>
+            </div>
+          </section>
+        </section>
+
+      </section>
+
+      <aside class="sidebar">
+        <div class="context-label">
+          <strong>全局库</strong>
+          <span>原料库、重点库与视角库</span>
+        </div>
+        <nav class="library-tabs global-library-tabs" aria-label="全局库切换">
+          <button class="library-tab active" data-library-kind="raw" type="button">原料库</button>
+          <button class="library-tab" data-library-kind="focus" type="button">重点库</button>
+          <button class="library-tab" data-library-kind="perspective" type="button">视角库</button>
+        </nav>
+        <div class="global-library-meta">
+          <span id="globalLibraryStatus">默认显示当前模块可访问文件</span>
+          <button id="clearGlobalLibrarySelection" type="button">清空选择</button>
+        </div>
+        <section id="knowledgePanel" class="panel fill knowledge-panel">
+          <div class="panel-header">
+            <h2>知识文件</h2>
+            <div class="knowledge-header-actions">
+              <button id="ingestKnowledge" type="button">入网</button>
+              <button id="deleteNotIngestedKnowledge" type="button" class="danger-button">删除未入网</button>
+              <button id="openWriterTool" type="button">加入创作引用</button>
+              <span id="knowledgeCount">0 个</span>
+            </div>
+          </div>
+          <div class="knowledge-filters">
+            <input id="knowledgeKeyword" type="search" placeholder="关键词：标题 / 标签 / 路径" aria-label="知识文件关键词" />
+            <div class="date-filter-row">
+              <input id="knowledgeDateFrom" type="date" aria-label="开始日期" />
+              <input id="knowledgeDateTo" type="date" aria-label="结束日期" />
+            </div>
+            <button id="clearKnowledgeFilters" type="button">清除筛选</button>
+          </div>
+          <div id="knowledgeResizeHint" class="resize-hint">拖动底部横条可调整整栏高度</div>
+          <div id="knowledgeList" class="knowledge-list empty">暂无知识文件</div>
+          <div class="resize-hint">双击知识文件可打开 Markdown 预览。</div>
+          <div
+            id="knowledgePanelHandle"
+            class="knowledge-panel-handle"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="拖动调整知识栏高度"
+          ></div>
+        </section>
+      </aside>
+    </main>
+
+    <section id="learnKnowledgeWorkspace" class="viewer learn-knowledge-workspace" aria-label="学习知识关系区">
+      <article class="panel graph-panel">
+        <div class="panel-header">
+          <h2>知识关系网</h2>
+          <input id="graphSearch" class="graph-search" type="search" placeholder="搜索节点" aria-label="搜索知识关系网节点" />
+          <div class="graph-actions">
+            <button id="refreshGraph" type="button">待入网节点</button>
+            <button id="resetGraphView" type="button">整理图谱</button>
+            <button id="rebuildGraph" type="button">重建图谱</button>
+          </div>
+        </div>
+        <div id="graphCanvas" class="graph-browser" role="application" aria-label="知识关系网文件夹浏览">
+          <nav id="graphBreadcrumbs" class="graph-breadcrumbs" aria-label="知识网路径"></nav>
+          <div id="graphFolders" class="graph-folders"></div>
+        </div>
+        <aside id="graphDetail" class="graph-detail">点击节点进入下一层，Esc 返回上一层。</aside>
+      </article>
+      <article id="retrievalPanel" class="panel retrieval-panel">
+        <div class="panel-header">
+          <h2>知识拉取</h2>
+          <span id="retrievalStatus">基于本地知识网回答</span>
+        </div>
+        <div id="retrievalMessages" class="retrieval-messages">
+          <article class="retrieval-message assistant">你可以问：我收集了哪些有关于长鑫科技的信息？</article>
+        </div>
+        <form id="retrievalForm" class="retrieval-form">
+          <textarea id="retrievalQuestion" rows="3" placeholder="输入你想从知识网拉取的问题"></textarea>
+          <button id="sendRetrieval" type="submit" class="primary">发送</button>
+        </form>
+      </article>
+    </section>
+
+    <div id="markdownModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="markdownModalTitle">
+      <section class="modal-card markdown-modal-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="markdownModalTitle">Markdown 预览</h2>
+            <span id="previewTitle">未选择</span>
+          </div>
+          <div class="modal-actions">
+            <button id="copyMarkdown" type="button">复制</button>
+            <button id="closeMarkdownModal" type="button" class="icon-button" aria-label="关闭 Markdown 预览">x</button>
+          </div>
+        </div>
+        <pre id="markdownPreview" class="markdown-preview">选择一个知识文件查看内容。</pre>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <div id="apiSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="apiSettingsTitle">
+      <section class="modal-card api-settings-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="apiSettingsTitle">API 设置</h2>
+            <span id="apiSettingsStatus">未加载</span>
+          </div>
+          <button id="closeApiSettings" type="button" class="icon-button" aria-label="关闭 API 设置">x</button>
+        </div>
+
+        <div class="api-settings-grid">
+          <aside class="api-settings-list">
+            <label>
+              已保存配置
+              <select id="apiSettingSelect"></select>
+            </label>
+            <div id="apiEditMode" class="api-edit-mode">当前未选择配置</div>
+            <div class="api-setting-actions">
+              <button id="newApiSetting" type="button">新增配置</button>
+              <button id="activateApiSetting" type="button">设为当前</button>
+            </div>
+            <button id="deleteApiSetting" type="button">删除配置</button>
+            <section class="api-log-panel">
+              <div class="api-log-header">
+                <strong>运行日志</strong>
+                <button id="clearApiLogs" type="button">清空</button>
+              </div>
+              <div id="apiLogList" class="api-log-list" aria-live="polite">暂无日志</div>
+            </section>
+          </aside>
+
+          <form id="apiSettingForm" class="api-setting-form">
+            <label>
+              模板
+              <select id="apiTemplateSelect"></select>
+            </label>
+            <label>
+              配置名称
+              <input id="apiName" type="text" autocomplete="off" />
+            </label>
+            <label>
+              API 类型
+              <select id="apiProvider">
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI</option>
+                <option value="compatible">OpenAI 兼容中转站</option>
+              </select>
+            </label>
+            <label>
+              Base URL
+              <input id="apiBaseUrl" type="url" autocomplete="off" />
+            </label>
+            <label>
+              模型名称
+              <input id="apiModel" type="text" autocomplete="off" />
+            </label>
+            <label>
+              API Key
+              <input id="apiKey" type="password" autocomplete="new-password" />
+            </label>
+            <div class="form-pair">
+              <label>
+                Timeout
+                <input id="apiTimeout" type="number" min="10" step="10" />
+              </label>
+              <label>
+                Max retries
+                <input id="apiMaxRetries" type="number" min="0" max="5" step="1" />
+              </label>
+            </div>
+            <div class="api-form-actions">
+              <button id="testApiSetting" type="button">测试连接</button>
+              <button id="saveApiSettingButton" type="submit" class="primary">保存并启用</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/app.js?v=20260601-mining"></script>
+  </body>
+</html>

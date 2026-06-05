@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>&#30693;&#35782;&#37239; - &#38899;&#35270;&#39057;&#33719;&#21462;</title>
+    <link rel="stylesheet" href="/static/media.css?v=20260531i" />
+  </head>
+  <body>
+    <main class="media-shell">
+      <aside class="app-rail" aria-label="知识酷主导航">
+        <div class="app-brand">
+          <strong>知识酷</strong>
+          <span>Research OS</span>
+        </div>
+        <nav class="app-nav" aria-label="工作区">
+          <a class="app-nav-item active" data-shell-section="collect" href="/collect"><span>收集</span><small>读取信息并保存原料</small></a>
+          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并构建关系网</small></a>
+          <a class="app-nav-item" data-shell-section="mine" href="/mine"><span>挖掘</span><small>多视角解读重点知识</small></a>
+          <a class="app-nav-item" data-shell-section="create" href="/create"><span>创作</span><small>引用三库生成成品</small></a>
+          <a class="app-nav-item" data-shell-section="settings" href="/settings"><span>设置中心</span><small>模型、ASR、图片与视角模板</small></a>
+        </nav>
+      </aside>
+      <section class="media-workspace-shell">
+      <header class="topbar">
+        <div>
+          <h1>&#38899;&#35270;&#39057;&#33719;&#21462;</h1>
+          <p>Bilibili &#31283;&#23450;&#35299;&#26512;&#65292;&#25238;&#38899;&#23613;&#21147;&#35299;&#26512;&#65292;&#35270;&#39057;&#21495;&#20808;&#36208;&#26412;&#22320;&#25991;&#20214;&#65307;&#29983;&#25104;&#32467;&#26524;&#36827;&#20837;&#30693;&#35782;&#37239;&#20027;&#24211;&#12290;</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="openAsrSettings" type="button">ASR &#35774;&#32622;</button>
+          <button id="openHome" type="button">&#36820;&#22238;&#30693;&#35782;&#37239;</button>
+          <button id="refreshKnowledge" type="button">&#21047;&#26032;&#30693;&#35782;&#24211;</button>
+        </div>
+      </header>
+
+      <section class="media-grid">
+        <section class="panel source-panel">
+          <div class="panel-header">
+            <h2>&#38142;&#25509;&#35299;&#26512;</h2>
+            <span>Bilibili / &#25238;&#38899; / &#35270;&#39057;&#21495;</span>
+          </div>
+          <textarea id="urlInput" rows="5" placeholder="&#27599;&#34892;&#19968;&#20010;&#38142;&#25509;&#65292;&#20363;&#22914;&#65306;
+https://www.bilibili.com/video/BV1A7V36BEc9?t=25.8"></textarea>
+          <div class="toolbar">
+            <button id="resolveUrls" class="primary" type="button">&#35299;&#26512;&#38142;&#25509;</button>
+            <button id="loadExamples" type="button">&#22635;&#20837;&#27979;&#35797;&#38142;&#25509;</button>
+          </div>
+
+          <div id="dropzone" class="dropzone" tabindex="0">
+            <input id="mediaInput" type="file" accept=".mp3,.m4a,.wav,.aac,.flac,.mp4,.mov,.mkv,.webm,.srt,.vtt,.ass" multiple hidden />
+            <div>
+              <strong>&#25302;&#20837;&#26412;&#22320;&#38899;&#35270;&#39057;&#25110;&#23383;&#24149;</strong>
+              <span>&#25903;&#25345; mp3/mp4/m4a/wav/webm/srt/vtt/ass</span>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <button id="chooseFiles" type="button">&#36873;&#25321;&#25991;&#20214;</button>
+            <button id="transcribeMedia" class="primary" type="button">&#23383;&#24149;&#25552;&#21462;</button>
+          </div>
+        </section>
+
+        <section class="panel queue-panel">
+          <div class="panel-header">
+            <h2>&#23186;&#20307;&#38431;&#21015;</h2>
+            <span id="queueCount">0 &#20010;</span>
+          </div>
+          <div id="queue" class="queue empty">&#26242;&#26080;&#23186;&#20307;</div>
+        </section>
+      </section>
+
+      <section class="panel dependency-panel">
+        <div class="panel-header">
+          <h2>&#29615;&#22659;&#26816;&#27979;</h2>
+          <span>&#25171;&#24320;&#39029;&#38754;&#26102;&#33258;&#21160;&#26816;&#26597;&#65306;B&#31449;&#23383;&#24149;&#12289;&#26412;&#22320;&#35270;&#39057;&#25277;&#38899;&#39057;&#12289;AI &#35821;&#38899;&#36716;&#25991;&#23383;&#12290;</span>
+        </div>
+        <div id="dependencyStatus" class="dependency-list">&#27491;&#22312;&#26816;&#26597;...</div>
+      </section>
+
+      <section class="asset-grid">
+        <section class="panel transcript-panel">
+          <div class="asset-header">
+            <div>
+              <h2>&#23383;&#24149;&#25991;&#20214;</h2>
+              <span id="transcriptCount">0 &#20010;</span>
+            </div>
+            <div class="toolbar compact-toolbar">
+              <button id="planMedia" type="button">&#29983;&#25104;&#35268;&#21010;</button>
+              <button id="generateKnowledge" class="primary" type="button">&#30693;&#35782;&#33719;&#21462;</button>
+              <button id="deleteTranscripts" type="button">&#21024;&#38500;</button>
+            </div>
+          </div>
+          <div class="transcript-workspace">
+            <div id="transcriptList" class="transcript-list empty">&#26242;&#26080;&#23383;&#24149;&#25991;&#20214;</div>
+            <section id="planPanel" class="plan-panel">
+              <div class="panel-header">
+                <h2>&#29983;&#25104;&#35268;&#21010;</h2>
+                <span id="planMeta">&#26410;&#29983;&#25104;&#35268;&#21010;</span>
+              </div>
+              <div id="planList" class="plan-list empty">&#35831;&#20808;&#21246;&#36873;&#23383;&#24149;&#24182;&#29983;&#25104;&#35268;&#21010;</div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel knowledge-panel">
+          <div class="asset-header">
+            <div>
+              <h2>&#30693;&#35782;&#25991;&#20214;</h2>
+              <span id="knowledgeCount">0 &#20010;</span>
+            </div>
+          </div>
+          <div id="knowledgeList" class="knowledge-list empty">&#26242;&#26080;&#30693;&#35782;&#25991;&#20214;</div>
+        </section>
+      </section>
+      </section>
+    </main>
+
+    <div id="transcriptModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="transcriptModalTitle">
+      <section class="modal-card transcript-modal-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="transcriptModalTitle">&#23383;&#24149;&#39044;&#35272;</h2>
+            <span id="transcriptPreviewTitle">&#26410;&#36873;&#25321;</span>
+          </div>
+          <button id="closeTranscriptModal" type="button" class="icon-button" aria-label="&#20851;&#38381;">x</button>
+        </div>
+        <pre id="transcriptFullPreview" class="full-transcript-preview">&#21452;&#20987;&#23383;&#24149;&#25991;&#20214;&#26597;&#30475;&#20869;&#23481;&#12290;</pre>
+      </section>
+    </div>
+
+    <div id="asrSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="asrSettingsTitle">
+      <section class="modal-card settings-modal-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="asrSettingsTitle">ASR &#35774;&#32622;</h2>
+            <span id="asrSettingsStatus">&#29992;&#20110;&#25238;&#38899;&#12289;&#26412;&#22320;&#35270;&#39057;&#31561;&#26080;&#23383;&#24149;&#22330;&#26223;&#30340;&#38899;&#39057;&#36716;&#20889;</span>
+          </div>
+          <button id="closeAsrSettings" type="button" class="icon-button" aria-label="&#20851;&#38381;">x</button>
+        </div>
+        <form id="asrSettingsForm" class="settings-form">
+          <label>
+            <span>Provider</span>
+            <select id="asrProvider">
+              <option value="dashscope">DashScope Fun-ASR</option>
+              <option value="compatible">OpenAI compatible</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input id="asrBaseUrl" type="url" placeholder="https://dashscope.aliyuncs.com/api/v1" required />
+          </label>
+          <label>
+            <span>Model</span>
+            <input id="asrModel" type="text" placeholder="paraformer-v2" required />
+          </label>
+          <label>
+            <span>API Key</span>
+            <input id="asrApiKey" type="password" placeholder="&#30041;&#31354;&#34920;&#31034;&#20445;&#25345;&#21407; Key" autocomplete="off" />
+          </label>
+          <label>
+            <span>Timeout</span>
+            <input id="asrTimeout" type="number" min="1" step="1" value="300" />
+          </label>
+          <div class="settings-actions">
+            <button id="testAsrSettings" type="button">&#26816;&#27979;&#37197;&#32622;</button>
+            <button id="saveAsrSettings" class="primary" type="submit">&#20445;&#23384;&#35774;&#32622;</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/media.js?v=20260531i"></script>
+  </body>
+</html>

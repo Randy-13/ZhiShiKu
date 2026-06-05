@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>写文工具</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/writer.css" />
+  </head>
+  <body>
+    <main class="writer-page">
+      <aside class="app-rail" aria-label="知识酷主导航">
+        <div class="app-brand">
+          <strong>知识酷</strong>
+          <span>Research OS</span>
+        </div>
+        <nav class="app-nav" aria-label="工作区">
+          <a class="app-nav-item" data-shell-section="collect" href="/collect"><span>收集</span><small>读取信息并保存原料</small></a>
+          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并构建关系网</small></a>
+          <a class="app-nav-item" data-shell-section="mine" href="/mine"><span>挖掘</span><small>多视角解读重点知识</small></a>
+          <a class="app-nav-item active" data-shell-section="create" href="/create"><span>创作</span><small>引用三库生成成品</small></a>
+          <a class="app-nav-item" data-shell-section="settings" href="/settings"><span>设置中心</span><small>模型、ASR、图片与视角模板</small></a>
+        </nav>
+      </aside>
+      <section class="writer-workspace-shell">
+      <header class="writer-topbar">
+        <div>
+          <h1>写文工具</h1>
+          <p>知识文件 -> 选题建议 -> 公众号文章 -> 配图 -> 美编 -> 草稿箱</p>
+        </div>
+        <div class="writer-top-actions">
+          <button id="openImageApiSettings" type="button">图片 API 设置</button>
+          <a class="button-link" href="/">返回知识库</a>
+        </div>
+      </header>
+
+      <section class="writer-layout">
+        <aside class="writer-left">
+          <section class="panel writer-knowledge-panel">
+            <div class="panel-header">
+              <h2>所选知识文件</h2>
+              <span id="selectedKnowledgeCount">0 个</span>
+            </div>
+            <div id="writerKnowledgeList" class="writer-list empty">正在加载...</div>
+            <pre id="writerMarkdownPreview" class="writer-markdown-preview">选择左侧知识文件查看 Markdown。</pre>
+          </section>
+
+          <section class="panel writer-topic-panel">
+            <div class="panel-header">
+              <h2>选题建议</h2>
+              <button id="generateWriterTopics" type="button">生成选题建议</button>
+            </div>
+            <div id="writerTopicList" class="writer-topic-list empty">暂无选题建议</div>
+          </section>
+        </aside>
+
+        <section class="panel writer-main">
+          <div class="panel-header writer-main-header">
+            <div>
+              <h2>文章生成与修改</h2>
+            </div>
+          </div>
+
+          <div class="writer-work-tabs" role="tablist">
+            <button id="directoryWorkTab" type="button">目录</button>
+            <button id="articleWorkTab" class="active" type="button">文章</button>
+            <button id="imageWorkTab" type="button">配图</button>
+            <button id="formatWorkTab" type="button">美编</button>
+            <button id="publishWorkTab" type="button">发布</button>
+            <button id="logWorkTab" type="button">运行日志</button>
+          </div>
+          <div id="writerWorkspace" class="writer-workspace-note">尚未创建工作目录</div>
+
+          <section id="directoryWorkbench" class="writer-workbench directory-workbench hidden">
+            <div class="panel-header">
+              <div>
+                <h3>工作目录</h3>
+                <span>读取已有工作文件，恢复中断的写作和发布流程。</span>
+              </div>
+              <div class="writer-stage-actions">
+                <button id="refreshWorkspaces" type="button">刷新目录</button>
+                <button id="continueWorkspace" type="button" class="primary">继续发布</button>
+              </div>
+            </div>
+            <div class="workspace-directory-grid">
+              <div id="workspaceList" class="workspace-list empty">暂无工作文件</div>
+              <div class="workspace-preview">
+                <div class="workspace-preview-header">
+                  <strong id="workspacePreviewTitle">未选择工作文件</strong>
+                  <span id="workspacePreviewStatus">-</span>
+                </div>
+                <div id="workspacePreviewChecks" class="workspace-checks"></div>
+                <textarea id="workspaceArticlePreview" class="article-editor workspace-article-preview" placeholder="选择工作文件后可预览和编辑 article.md。"></textarea>
+              </div>
+            </div>
+          </section>
+
+          <div id="articleWorkbench" class="writer-workbench">
+          <div class="stage-panel-header">
+            <div>
+              <h3>文章生成</h3>
+              <span>基于左侧选题和知识文件生成公众号 Markdown，并在下方继续修改。</span>
+            </div>
+            <button id="generateArticle" type="button" class="primary">生成文章</button>
+          </div>
+          <div class="writer-editor-grid">
+            <label class="writer-field">
+              文章标题
+              <input id="articleTitle" type="text" placeholder="生成文章后自动填充，也可手动修改" />
+            </label>
+            <label class="writer-field">
+              发布作者
+              <input id="articleAuthor" type="text" value="Bobo" />
+            </label>
+          </div>
+          <label class="writer-field digest-field">
+            <span>
+              摘要预览
+              <small id="digestByteCount">0 / 120 字节</small>
+            </span>
+            <div class="digest-editor-row">
+              <textarea id="articleDigest" rows="2" placeholder="为空时发布器会用标题生成摘要；建议控制在 120 字节以内。"></textarea>
+              <button id="truncateDigest" type="button">截断</button>
+            </div>
+          </label>
+
+          <div class="writer-tabs" role="tablist">
+            <button id="markdownTab" class="active" type="button">Markdown</button>
+          </div>
+
+          <textarea id="articleMarkdown" class="article-editor" placeholder="请选择选题后点击“生成文章”。"></textarea>
+
+          <section class="revision-panel">
+            <div class="panel-header">
+              <h3>修改交互</h3>
+              <span>可以要求改标题、补充段落、删减、加强判断或增加配图</span>
+            </div>
+            <div id="revisionMessages" class="revision-messages">
+              <article class="assistant">告诉我你想怎么改，我会基于当前文章和所选知识文件更新正文。</article>
+            </div>
+            <form id="revisionForm" class="revision-form">
+              <textarea id="revisionInstruction" rows="3" placeholder="例如：把第二部分改得更适合普通读者，并补一张产业链结构图"></textarea>
+              <button id="reviseArticle" type="submit" class="primary">修改文章</button>
+            </form>
+          </section>
+          </div>
+
+          <section id="imageWorkbench" class="writer-workbench image-workbench hidden">
+            <div class="panel-header">
+              <div>
+                <h3>封面与配图建议</h3>
+                <span>先生成/修改提示词，确认后再调用图片 API。</span>
+              </div>
+              <div class="writer-stage-actions">
+                <button id="suggestImages" type="button">生成配图建议</button>
+                <button id="confirmGenerateImages" type="button" class="primary">确认生成图片</button>
+              </div>
+            </div>
+            <label class="writer-field">
+              封面图提示词
+              <textarea id="coverPromptEditor" class="prompt-editor" rows="5" placeholder="生成文章后会自动填入，也可以先点击生成配图建议。"></textarea>
+            </label>
+            <label class="writer-field">
+              内容配图提示词（一行一张，建议 0-2 张）
+              <textarea id="contentPromptEditor" class="prompt-editor" rows="7" placeholder="没有必要时可以留空，避免浪费 token 和生图次数。"></textarea>
+            </label>
+            <div class="image-preview-header">
+              <h3>图片预览</h3>
+              <span id="imagePreviewStatus">暂无图片</span>
+            </div>
+            <div id="imagePreviewGrid" class="image-preview-grid empty">暂无图片</div>
+          </section>
+
+          <section id="formatWorkbench" class="writer-workbench format-workbench hidden">
+            <div class="stage-panel-header">
+              <div>
+                <h3>美编排版</h3>
+                <span>将当前 Markdown 转为微信公众号 HTML，并在发布前生成重点标注与图片路径修正。</span>
+              </div>
+              <button id="formatArticle" type="button" class="primary">美编排版</button>
+            </div>
+            <iframe id="htmlPreview" class="html-preview" title="公众号 HTML 预览"></iframe>
+          </section>
+
+          <section id="publishWorkbench" class="writer-workbench publish-workbench hidden">
+            <div class="stage-panel-header">
+              <div>
+                <h3>发布检查</h3>
+                <span>先完成美编排版，再转入草稿箱。发布默认作者为 Bobo。</span>
+              </div>
+              <button id="publishDraft" type="button" class="primary">转入草稿箱</button>
+            </div>
+            <p>流程遵循微信接口：access_token -> 上传封面素材 -> 上传正文图片 -> draft/add。</p>
+            <div class="publish-checklist">
+              <span>文章 Markdown</span>
+              <span id="checkMarkdown">未生成</span>
+              <span>封面图</span>
+              <span id="checkCover">未生成</span>
+              <span>HTML 排版</span>
+              <span id="checkHtml">未生成</span>
+            </div>
+            <div class="writer-stage-actions publish-actions">
+              <button id="checkWechatIp" type="button">检测IP/刷新Token</button>
+              <button id="preflightPublish" type="button">发布预检</button>
+            </div>
+            <div id="wechatIpResult" class="wechat-ip-result empty">尚未检测微信白名单 IP</div>
+            <div id="publishPreflight" class="publish-preflight empty">尚未执行发布预检</div>
+          </section>
+
+          <section id="logWorkbench" class="writer-workbench log-workbench hidden">
+            <div id="writerLogs" class="writer-logs">暂无日志</div>
+          </section>
+        </section>
+      </section>
+      </section>
+    </main>
+
+    <div id="imageApiModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="imageApiTitle">
+      <section class="modal-card image-api-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="imageApiTitle">图片 API 设置</h2>
+            <span id="imageApiStatus">未加载</span>
+          </div>
+          <button id="closeImageApiSettings" type="button" class="icon-button" aria-label="关闭图片 API 设置">x</button>
+        </div>
+        <div class="image-api-grid">
+          <aside class="image-api-list">
+            <label>
+              已保存配置
+              <select id="imageApiSelect"></select>
+            </label>
+            <div class="image-api-actions">
+              <button id="newImageApiSetting" type="button">新增配置</button>
+              <button id="activateImageApiSetting" type="button">设为当前</button>
+            </div>
+            <button id="deleteImageApiSetting" type="button">删除配置</button>
+            <section class="api-log-panel">
+              <div class="api-log-header">
+                <strong>运行日志</strong>
+                <button id="clearImageApiLogs" type="button">清空</button>
+              </div>
+              <div id="imageApiLogList" class="api-log-list" aria-live="polite">暂无日志</div>
+            </section>
+          </aside>
+          <form id="imageApiForm" class="image-api-form">
+            <label>
+              模板
+              <select id="imageApiTemplate"></select>
+            </label>
+            <label>
+              配置名称
+              <input id="imageApiName" type="text" />
+            </label>
+            <label>
+              Provider
+              <select id="imageApiProvider">
+                <option value="openai">OpenAI 图片 API</option>
+                <option value="compatible">OpenAI 兼容图片中转站</option>
+              </select>
+            </label>
+            <label>
+              Base URL
+              <input id="imageApiBaseUrl" type="url" />
+            </label>
+            <label>
+              模型名称
+              <input id="imageApiModel" type="text" />
+            </label>
+            <label>
+              API Key
+              <input id="imageApiKey" type="password" autocomplete="new-password" />
+            </label>
+            <div class="form-pair">
+              <label>
+                Size
+                <input id="imageApiSize" type="text" value="1024x1024" />
+              </label>
+              <label>
+                Quality
+                <input id="imageApiQuality" type="text" value="auto" />
+              </label>
+              <label>
+                Timeout
+                <input id="imageApiTimeout" type="number" value="120" min="10" step="10" />
+              </label>
+            </div>
+            <div class="api-form-actions">
+              <button id="testImageApi" type="button">测试配置</button>
+              <button id="saveImageApi" type="submit" class="primary">保存并启用</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/writer.js"></script>
+  </body>
+</html>
