@@ -328,6 +328,104 @@ def test_v2_raw_library_lists_saved_raw_markdown_files():
     assert match["source"]
 
 
+def test_v2_collect_raw_file_saves_markdown_and_manual_note():
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/raw-file",
+        json={
+            "material_type": "text",
+            "title": "Readable Raw Fixture",
+            "note": "manual note for original file",
+            "markdown": "# Readable Raw Fixture\n\nCollected readable body.",
+            "source": "collect-readable-fixture",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["ok"] is True, payload
+    item = payload["data"]["item"]
+    path = storage.ROOT / item["markdown_path"]
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "# Readable Raw Fixture" in text
+    assert "Collected readable body." in text
+    assert "manual note for original file" in text
+    assert item["source"] == "collect-readable-fixture"
+
+
+def test_v2_collect_readable_draft_extracts_web_link_before_save(monkeypatch):
+    monkeypatch.setattr(
+        api_v2,
+        "_extract_link_text",
+        lambda url, item: {
+            "title": "Readable Link Fixture",
+            "text": "Readable link body",
+            "source": "Example Source",
+            "author": "Fixture Author",
+            "published_at": "2026-06-05",
+            "link_type": "public_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "direct_fetch",
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={
+            "material_type": "web_link",
+            "title": "",
+            "items": [
+                {
+                    "url": "https://example.com/article",
+                    "title": "Example Article",
+                    "link_type": "public_webpage",
+                    "extraction_strategy": "direct_fetch",
+                    "access_status": "accessible",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True
+    assert payload["title"] == "Example Article"
+    assert "Readable link body" in payload["markdown"]
+    assert "Example Source" in payload["markdown"]
+    assert payload["source"] == "https://example.com/article"
+
+
+def test_v2_focus_library_lists_files_outside_repo_root(monkeypatch, tmp_path):
+    external_root = tmp_path / "external-runtime"
+    monkeypatch.setattr(storage, "STORAGE_ROOT", external_root)
+    monkeypatch.setattr(storage, "IMAGE_DIR", external_root / "images")
+    monkeypatch.setattr(storage, "DOCUMENT_DIR", external_root / "documents")
+    monkeypatch.setattr(storage, "KNOWLEDGE_DIR", external_root / "knowledge")
+    monkeypatch.setattr(storage, "MEDIA_DIR", external_root / "media")
+    monkeypatch.setattr(storage, "MINING_DIR", external_root / "mining")
+    storage.init_storage()
+
+    dated_dir = storage.KNOWLEDGE_DIR / "2026-06-05"
+    dated_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = dated_dir / "external_focus_fixture.md"
+    markdown_path.write_text(
+        "# External Focus Fixture\n\n- 状态: 已提炼\n\nFocus body.",
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app())
+    response = client.get("/api/v2/libraries/focus/files")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    match = next(item for item in items if item["title"] == "External Focus Fixture")
+    assert match["library"] == "focus"
+    assert match["markdown_path"].endswith("knowledge\\2026-06-05\\external_focus_fixture.md")
+
+
 def test_v2_learn_refines_then_saves_focus_markdown_from_raw_library(monkeypatch):
     def fake_generate_knowledge_from_text(raw_text: str, setting=None):
         assert "raw source body for learning" in raw_text

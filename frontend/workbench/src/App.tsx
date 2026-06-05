@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BookOpen, Boxes, Cog, Feather, Inbox, Pickaxe } from "lucide-react";
 import { api, materialFromUpload, rawMaterialGroupKey } from "./api";
-import type { LibraryKind } from "./api";
+import type { LibraryKind, ReadableDraftInput } from "./api";
 import type {
   ActivityEvent,
   CreationDraft,
@@ -67,19 +67,21 @@ export default function App() {
   const [selectedLearningMaterialId, setSelectedLearningMaterialId] = useState<string>();
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<string>();
+  const [collectDraft, setCollectDraft] = useState<ReadableDraftInput>();
   const [knowledgeDraft, setKnowledgeDraft] = useState<KnowledgeDraft>();
   const [miningResult, setMiningResult] = useState<MiningResult>();
   const [draft, setDraft] = useState<CreationDraft>(() => initialDraft());
   const [writerProjects, setWriterProjects] = useState<WriterProject[]>([]);
   const [writerState, setWriterState] = useState<WriterProjectState>();
   const [selectedWriterProjectId, setSelectedWriterProjectId] = useState<string>();
-  const [selectedWriterKnowledgeIds, setSelectedWriterKnowledgeIds] = useState<number[]>([]);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [search, setSearch] = useState("");
   const [libraryRailBucket, setLibraryRailBucket] = useState<LibraryBucket>("original");
   const [libraryRailQuery, setLibraryRailQuery] = useState("");
   const [libraryRailCheckedIds, setLibraryRailCheckedIds] = useState<string[]>([]);
   const [isDeletingKnowledge, setIsDeletingKnowledge] = useState(false);
+  const [isCollectingReadable, setIsCollectingReadable] = useState(false);
+  const [isSavingRawDraft, setIsSavingRawDraft] = useState(false);
   const [isLearning, setIsLearning] = useState(false);
   const [isWriting, setIsWriting] = useState(false);
 
@@ -171,11 +173,9 @@ export default function App() {
       const state = await api.writerProject(nextId);
       setWriterState(state);
       setSelectedWriterProjectId(state.project.id);
-      setSelectedWriterKnowledgeIds([]);
     } else {
       setWriterState(undefined);
       setSelectedWriterProjectId(undefined);
-      setSelectedWriterKnowledgeIds([]);
     }
   }, [selectedWriterProjectId]);
 
@@ -246,7 +246,6 @@ export default function App() {
 
   const filteredMaterials = useMemo(() => filterBySearch(materials, search), [materials, search]);
   const filteredLearningQueue = useMemo(() => filterBySearch(learningQueue, search), [learningQueue, search]);
-  const filteredKnowledge = useMemo(() => filterBySearch(knowledge, search), [knowledge, search]);
   const libraryRailKnowledge = useMemo(
     () => knowledge.filter((item) => (item.library ?? "focus") === libraryRailBucket),
     [knowledge, libraryRailBucket],
@@ -379,7 +378,6 @@ export default function App() {
       }
       setMaterials((current) => current.filter((item) => !idSet.has(item.id)));
       setSelectedMaterialId((current) => (current && idSet.has(current) ? undefined : current));
-      setLibraryRailBucket("original");
       setSelectedKnowledgeId(results[0]?.item.id);
       await refreshLibraries();
       const errorCount = results.reduce((total, result) => total + (result.errors?.length ?? 0), 0);
@@ -402,26 +400,135 @@ export default function App() {
     }
   }, [addActivity, language, materials, refreshLibraries, selectedMaterial]);
 
-  const queueForLearning = useCallback((_ids?: string[]) => {
-    const ids = _ids;
-    throw new Error("Collect no longer queues materials directly into Learn. Save to Originals first, then add from the right rail.");
-    const requestedIds = ids?.length ? ids : selectedMaterial ? [selectedMaterial.id] : [];
-    if (!requestedIds.length) return;
-    const idSet = new Set(requestedIds);
-    const queuedItems = materials.filter((item) => idSet.has(item.id) && item.status !== "error");
-    if (!queuedItems.length) return;
-    const queued = queuedItems.map((item) => ({ ...item, status: "queued" as const }));
-    setLearningQueue((current) => {
-      const existing = new Set(current.map((item) => item.id));
-      return [...current, ...queued.filter((item) => !existing.has(item.id))];
-    });
-    setMaterials((current) => current.filter((item) => !idSet.has(item.id)));
-    setSelectedMaterialId((current) => (current && idSet.has(current) ? undefined : current));
-    setSelectedLearningMaterialId(queued[0]?.id);
-    setActiveWorkspace("learn");
-    window.history.replaceState(null, "", "#/learn");
-    addActivity({ title: "加入学习队列", detail: `已加入 ${queued.length} 个素材`, workspace: "learn", status: "done" });
-  }, [addActivity, materials, selectedMaterial]);
+  const resolveLinksV2 = useCallback(
+    async (urls: string[]) => {
+      const existing = new Set(materials.map((item) => item.source));
+      for (const url of urls) {
+        if (existing.has(url)) continue;
+        if (looksLikeMediaUrl(url)) {
+          try {
+            const resolved = await api.resolveMediaUrl(url);
+            if (!resolved) throw new Error("Legacy backend did not return media metadata.");
+            const material = materialFromUpload("media", resolved, url);
+            insertMaterial(material);
+            if (material.backendId) {
+              api.transcribeMedia([material.backendId]).catch(() => undefined);
+            }
+          } catch (error) {
+            createMaterial({
+              type: "link",
+              title: url,
+              source: url,
+              error: error instanceof Error ? error.message : "Media link resolution failed",
+            });
+          }
+          continue;
+        }
+
+        try {
+          const inspected = await api.inspectLink(url);
+          const noteParts = [
+            inspected?.notes ?? "",
+            inspected?.link_type ? `${language === "zh" ? "类型" : "Type"}: ${inspected.link_type}` : "",
+            inspected?.extraction_strategy
+              ? `${language === "zh" ? "提取方式" : "Strategy"}: ${inspected.extraction_strategy}`
+              : "",
+          ].filter(Boolean);
+          createMaterial({
+            type: "link",
+            title: inspected?.title?.trim() || url,
+            source: inspected?.final_url?.trim() || url,
+            note: noteParts.join(" | "),
+          });
+        } catch (error) {
+          createMaterial({
+            type: "link",
+            title: url,
+            source: url,
+            note:
+              error instanceof Error
+                ? error.message
+                : language === "zh"
+                  ? "网页链接检查失败，后续仍可尝试生成原文。"
+                  : "Link inspection failed, but you can still try generating the readable original.",
+          });
+        }
+      }
+    },
+    [createMaterial, insertMaterial, language, materials],
+  );
+
+  const generateCollectReadableDraft = useCallback(
+    async (ids?: string[]) => {
+      const requestedIds = ids?.length ? ids : selectedMaterial ? [selectedMaterial.id] : [];
+      if (!requestedIds.length) return;
+      const idSet = new Set(requestedIds);
+      const selectedItems = materials.filter((item) => idSet.has(item.id) && item.status !== "error");
+      if (!selectedItems.length) return;
+
+      setIsCollectingReadable(true);
+      setMaterials((current) =>
+        current.map((item) => (idSet.has(item.id) ? { ...item, status: "learning", error: undefined } : item)),
+      );
+
+      try {
+        const draft = await api.createReadableDraft(selectedItems, textExtractionMode);
+        setCollectDraft(draft);
+        setMaterials((current) =>
+          current.map((item) => (idSet.has(item.id) ? { ...item, status: "ready", error: undefined } : item)),
+        );
+        addActivity({
+          title: draft.title,
+          detail: language === "zh" ? "已生成可编辑原文草稿，请确认后加入原文库。" : "Readable original draft generated.",
+          workspace: "collect",
+          status: "done",
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Readable original generation failed";
+        setMaterials((current) =>
+          current.map((item) => (idSet.has(item.id) ? { ...item, status: "error", error: detail } : item)),
+        );
+        addActivity({
+          title: language === "zh" ? "生成原文失败" : "Generate original failed",
+          detail,
+          workspace: "collect",
+          status: "error",
+        });
+      } finally {
+        setIsCollectingReadable(false);
+      }
+    },
+    [addActivity, language, materials, selectedMaterial, textExtractionMode],
+  );
+
+  const saveCollectDraftToOriginalLibrary = useCallback(async () => {
+    if (!collectDraft) return;
+    setIsSavingRawDraft(true);
+    try {
+      const item = await api.saveRawDraft(collectDraft);
+      const sourceIdSet = new Set(collectDraft.sourceIds);
+      setCollectDraft(undefined);
+      setSelectedKnowledgeId(item.id);
+      setMaterials((current) => current.filter((material) => !sourceIdSet.has(material.id)));
+      setSelectedMaterialId((current) => (current && sourceIdSet.has(current) ? undefined : current));
+      await refreshLibraries();
+      addActivity({
+        title: item.title,
+        detail: language === "zh" ? "原文文件已加入原文库。" : "Original file saved to Originals.",
+        workspace: "collect",
+        status: "done",
+      });
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "加入原文库失败" : "Add to Originals failed",
+        detail: error instanceof Error ? error.message : "Save raw draft failed",
+        workspace: "collect",
+        status: "error",
+      });
+    } finally {
+      setIsSavingRawDraft(false);
+    }
+  }, [addActivity, collectDraft, language, refreshLibraries]);
 
   const deleteMaterials = useCallback((ids: string[]) => {
     if (!ids.length) return;
@@ -430,34 +537,6 @@ export default function App() {
     setSelectedMaterialId((current) => (current && idSet.has(current) ? undefined : current));
     addActivity({ title: "删除素材", detail: `已从素材队列删除 ${ids.length} 个素材`, workspace: "collect", status: "done" });
   }, [addActivity]);
-
-  const addRawFilesToLearning = useCallback((ids: string[]) => {
-    const idSet = new Set(ids);
-    const selectedRawFiles = knowledge.filter((item) => idSet.has(item.id) && item.library === "original" && item.markdownPath);
-    if (!selectedRawFiles.length) return;
-    const queued = selectedRawFiles.map<SourceMaterial>((item) => ({
-      id: item.id,
-      type: "text",
-      title: item.title,
-      source: item.markdownPath ?? item.id,
-      status: "queued",
-      note: item.note,
-    }));
-    setLearningQueue((current) => {
-      const existing = new Set(current.map((item) => item.id));
-      return [...current, ...queued.filter((item) => !existing.has(item.id))];
-    });
-    setSelectedLearningMaterialId(queued[0]?.id);
-    setLibraryRailCheckedIds([]);
-    setActiveWorkspace("learn");
-    window.history.replaceState(null, "", "#/learn");
-    addActivity({
-      title: "加入学习队列",
-      detail: `已从原文库加入 ${queued.length} 个文件，下一步提炼核心知识簇。`,
-      workspace: "learn",
-      status: "done",
-    });
-  }, [addActivity, knowledge]);
 
   const generateKnowledge = useCallback(async (ids: string[]) => {
     const idSet = new Set(ids);
@@ -622,7 +701,6 @@ export default function App() {
     }
     setKnowledge((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
     setSelectedKnowledgeId(item.id);
-    if (isFocusDraft) setLibraryRailBucket("focus");
     setKnowledgeDraft(undefined);
     refreshLibraries().catch(() => undefined);
     addActivity({ title: item.title, detail: language === "zh" ? "知识草稿已确认入库" : "Knowledge draft committed to library", workspace: "library", status: "done" });
@@ -647,28 +725,6 @@ export default function App() {
     [addActivity, language, selectedKnowledge],
   );
 
-  const importMiningKnowledge = useCallback(() => {
-    if (!selectedKnowledge) return;
-    setActiveWorkspace("mine");
-    window.history.replaceState(null, "", "#/mine");
-    addActivity({
-      title: selectedKnowledge.title,
-      detail: language === "zh" ? "已导入挖掘区，可选择视角并运行挖掘。" : "Imported to Mine. Choose a lens and run mining.",
-      workspace: "mine",
-      status: "done",
-    });
-  }, [addActivity, language, selectedKnowledge]);
-
-  const useForCreation = useCallback(() => {
-    if (!selectedKnowledge) return;
-    if (selectedKnowledge.backendId) {
-      setSelectedWriterKnowledgeIds((current) =>
-        current.includes(selectedKnowledge.backendId!) ? current : [...current, selectedKnowledge.backendId!],
-      );
-    }
-    selectWorkspace("create");
-  }, [selectWorkspace, selectedKnowledge]);
-
   const runWriterAction = useCallback(
     async (title: string, action: () => Promise<WriterProjectState>) => {
       setIsWriting(true);
@@ -677,7 +733,6 @@ export default function App() {
         setWriterState(state);
         setSelectedWriterProjectId(state.project.id);
         await refreshWriterProjects(state.project.id);
-        setSelectedWriterKnowledgeIds([]);
         addActivity({ title, detail: state.project.workspace, workspace: "create", status: "done" });
       } catch (error) {
         addActivity({
@@ -711,23 +766,11 @@ export default function App() {
     [language, runWriterAction, selectWorkspace],
   );
 
-  const toggleWriterKnowledge = useCallback((knowledgeId: number) => {
-    setSelectedWriterKnowledgeIds((current) =>
-      current.includes(knowledgeId) ? current.filter((id) => id !== knowledgeId) : [...current, knowledgeId],
-    );
-  }, []);
-
   const requireProjectId = useCallback(() => {
     const projectId = selectedWriterProjectId ?? writerState?.project.id;
     if (!projectId) throw new Error(language === "zh" ? "请先创建或选择写文项目" : "Create or select a writing project first");
     return projectId;
   }, [language, selectedWriterProjectId, writerState]);
-
-  const importWriterKnowledge = useCallback(() => {
-    runWriterAction(language === "zh" ? "导入项目参考材料" : "Import project references", () =>
-      api.confirmWriterKnowledge(requireProjectId(), selectedWriterKnowledgeIds),
-    );
-  }, [language, requireProjectId, runWriterAction, selectedWriterKnowledgeIds]);
 
   const generateWriterTopics = useCallback(() => {
     runWriterAction(language === "zh" ? "生成选题建议" : "Generate topic suggestions", () => api.generateWriterProjectTopics(requireProjectId()));
@@ -806,12 +849,6 @@ export default function App() {
       });
     }
   }, [addActivity, language, t, textExtractionMode]);
-
-  const ingestKnowledge = useCallback(async () => {
-    if (!selectedKnowledge?.backendId) return;
-    await api.ingestKnowledge([selectedKnowledge.backendId]);
-    setKnowledge((current) => current.map((item) => (item.id === selectedKnowledge.id ? { ...item, status: "ingested" } : item)));
-  }, [selectedKnowledge]);
 
   const saveKnowledgeEdit = useCallback(
     async (draft: { title: string; note: string; body: string }) => {
@@ -964,13 +1001,18 @@ export default function App() {
             t={t}
             materials={filteredMaterials}
             selectedMaterial={selectedMaterial}
+            readableDraft={collectDraft}
+            isGeneratingReadable={isCollectingReadable}
+            isSavingReadable={isSavingRawDraft}
             rightRail={knowledgeRail}
             onSelectMaterial={setSelectedMaterialId}
             onCreateMaterial={createMaterial}
             onUploadFiles={uploadFiles}
             onPasteImages={pasteImages}
-            onResolveLinks={resolveLinks}
-            onSaveToOriginalLibrary={saveMaterialsToOriginalLibrary}
+            onResolveLinks={resolveLinksV2}
+            onGenerateReadableDraft={generateCollectReadableDraft}
+            onUpdateReadableDraft={setCollectDraft}
+            onSaveReadableDraft={saveCollectDraftToOriginalLibrary}
             onDeleteMaterials={deleteMaterials}
           />
         );
@@ -980,7 +1022,6 @@ export default function App() {
             t={t}
             queue={filteredLearningQueue}
             selectedMaterial={selectedLearningMaterial}
-            knowledgePreview={selectedKnowledge}
             knowledgeDraft={knowledgeDraft}
             isRunning={isLearning}
             rightRail={knowledgeRail}
@@ -995,11 +1036,8 @@ export default function App() {
           <MineWorkspace
             t={t}
             language={language}
-            knowledge={filteredKnowledge}
-            selectedKnowledge={selectedKnowledge}
             result={miningResult}
             rightRail={knowledgeRail}
-            onSelectKnowledge={setSelectedKnowledgeId}
             onRunMining={runMining}
           />
         );
@@ -1012,11 +1050,9 @@ export default function App() {
             writerProjects={writerProjects}
             writerState={writerState}
             selectedProjectId={selectedWriterProjectId}
-            selectedKnowledgeIds={selectedWriterKnowledgeIds}
             isRunning={isWriting}
             onCreateProject={createWriterProject}
             onSelectProject={selectWriterProject}
-            onImportKnowledge={importWriterKnowledge}
             onGenerateTopics={generateWriterTopics}
             onSelectTopic={selectWriterTopic}
             onGenerateDraft={generateWriterDraft}
@@ -1032,24 +1068,24 @@ export default function App() {
         return (
           <LibraryWorkspace
             t={t}
-            knowledge={filteredKnowledge}
+            activeBucket={libraryRailBucket}
+            rightRail={knowledgeRail}
             selectedKnowledge={selectedKnowledge}
-            onSelectKnowledge={setSelectedKnowledgeId}
             onSaveKnowledge={saveKnowledgeEdit}
-            onDeleteKnowledge={deleteKnowledgeFiles}
           />
         );
       case "settings":
         return (
-            <SettingsWorkspace
-              t={t}
-              language={language}
-              textExtractionMode={textExtractionMode}
-              activities={activities}
-              onLanguageChange={setLanguage}
-              onTextExtractionModeChange={setTextExtractionMode}
-              onSave={saveWorkbenchSettings}
-            />
+          <SettingsWorkspace
+            t={t}
+            language={language}
+            textExtractionMode={textExtractionMode}
+            activities={activities}
+            rightRail={knowledgeRail}
+            onLanguageChange={setLanguage}
+            onTextExtractionModeChange={setTextExtractionMode}
+            onSave={saveWorkbenchSettings}
+          />
         );
     }
   })();

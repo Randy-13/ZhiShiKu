@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import type { KnowledgeDraft, KnowledgeItem, SourceMaterial } from "../domain";
+import type { KnowledgeDraft, SourceMaterial } from "../domain";
 import type { Translator } from "../i18n";
 import { materialStatusLabel } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
@@ -10,7 +10,6 @@ export function LearnWorkspace({
   t,
   queue,
   selectedMaterial,
-  knowledgePreview,
   knowledgeDraft,
   isRunning,
   rightRail,
@@ -22,7 +21,6 @@ export function LearnWorkspace({
   t: Translator;
   queue: SourceMaterial[];
   selectedMaterial?: SourceMaterial;
-  knowledgePreview?: KnowledgeItem;
   knowledgeDraft?: KnowledgeDraft;
   isRunning: boolean;
   rightRail: ReactNode;
@@ -96,12 +94,6 @@ export function LearnWorkspace({
           </div>
           {knowledgeDraft ? (
             <KnowledgeDraftEditor t={t} draft={knowledgeDraft} onChange={onUpdateKnowledgeDraft} />
-          ) : knowledgePreview ? (
-            <article className="markdown-preview">
-              <h3>{knowledgePreview.title}</h3>
-              {knowledgePreview.note ? <p className="hint">{knowledgePreview.note}</p> : null}
-              <p>{knowledgePreview.body}</p>
-            </article>
           ) : (
             <EmptyState title={t("learn.preview.empty")} body={t("learn.preview.empty.body")} />
           )}

@@ -27,6 +27,8 @@ import writer_tools
 from markdown_writer import render_creation_strategy_markdown, render_knowledge_markdown
 from media_transcriber import transcribe_audio_url
 from schemas import DocumentPlanResult, DocumentPlanSegment, KnowledgeResult
+from src.api_v2 import router as api_v2_router
+from src.pages import router as pages_router
 from src.shared.frontend_app import FRONTEND_DIST, react_app_response
 from src.shared.navigation import replace_app_rail
 
@@ -2016,7 +2018,7 @@ def delete_not_ingested_knowledge(request: KnowledgeDeleteRequest) -> dict[str, 
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/knowledge/{knowledge_id}")
+@app.get("/api/knowledge/{knowledge_id:int}")
 def read_knowledge(knowledge_id: int) -> dict[str, object]:
     item = storage.get_knowledge_entry(knowledge_id)
     path = storage.resolve_root_path(item.get("markdown_path"))
@@ -2025,7 +2027,7 @@ def read_knowledge(knowledge_id: int) -> dict[str, object]:
     return {"item": item, "content": path.read_text(encoding="utf-8")}
 
 
-@app.post("/api/knowledge/{knowledge_id}")
+@app.post("/api/knowledge/{knowledge_id:int}")
 def update_knowledge(knowledge_id: int, request: KnowledgeUpdateRequest) -> dict[str, object]:
     title = request.title.strip() or "Untitled knowledge"
     note = request.note.strip()
@@ -3175,4 +3177,10 @@ def writer_publish_token_refresh() -> dict[str, object]:
         return writer_tools.refresh_wechat_access_token()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+if not getattr(app.state, "api_v2_contracts_mounted", False):
+    app.include_router(api_v2_router)
+    app.include_router(pages_router)
+    app.state.api_v2_contracts_mounted = True
 

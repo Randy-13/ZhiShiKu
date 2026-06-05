@@ -65,6 +65,20 @@ class CollectRawMarkdownRequest(BaseModel):
     items: list[CollectQueueItem]
 
 
+class CollectRawFileRequest(BaseModel):
+    material_type: str = "text"
+    title: str
+    note: str = ""
+    markdown: str
+    source: str = ""
+
+
+class CollectReadableDraftRequest(BaseModel):
+    material_type: str
+    title: str = ""
+    items: list[CollectQueueItem]
+
+
 class LearnRefineKnowledgeClusterRequest(BaseModel):
     raw_paths: list[str]
     title: str = ""
@@ -426,6 +440,71 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
         },
     )
     return success_payload(data={"ok": True, "item": item, "errors": errors, "polish": polish_meta["response"]})
+
+
+@router.post("/collect/raw-file")
+def collect_raw_file(request: CollectRawFileRequest) -> dict[str, object]:
+    title = request.title.strip() or _markdown_title(request.markdown) or "raw-material"
+    markdown = request.markdown.strip()
+    if not markdown:
+        return success_payload(data={"ok": False, "error": "原文 Markdown 不能为空"})
+
+    material_type = request.material_type.strip() or "text"
+    source = request.source.strip() or material_type
+    extra_meta = {"人工备注": request.note.strip()} if request.note.strip() else None
+    item = _write_raw_markdown(
+        material_type=material_type,
+        title=title,
+        body=markdown,
+        source=source,
+        extra_meta=extra_meta,
+    )
+    return success_payload(data={"ok": True, "item": item})
+
+
+@router.post("/collect/readable-draft")
+def collect_readable_draft(request: CollectReadableDraftRequest) -> dict[str, object]:
+    if not request.items:
+        return success_payload(data={"ok": False, "error": "待处理队列不能为空"})
+
+    material_type = request.material_type.strip()
+    title = request.title.strip() or _default_raw_title(material_type, request.items)
+    try:
+        body, sources, errors = _extract_queue_text(material_type, request.items)
+    except (KeyError, ValueError, OSError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+    if not body.strip():
+        error = "未提取到可生成原文草稿的文本"
+        if errors:
+            error = f"{error}：" + "；".join(errors[:3])
+        return success_payload(data={"ok": False, "error": error, "errors": errors})
+
+    body = _clean_raw_markdown_body(body)
+    polish_meta = _polish_raw_material(material_type, body, title)
+    if polish_meta["markdown"]:
+        body = polish_meta["markdown"]
+    if polish_meta["title"]:
+        title = polish_meta["title"]
+    title = _resolve_raw_title(request.title, title, body)
+
+    note_parts = []
+    if sources:
+        note_parts.append(f"来源材料：{'；'.join(sources[:5])}")
+    if errors:
+        note_parts.append(f"提取异常：{'；'.join(errors[:3])}")
+
+    return success_payload(
+        data={
+            "ok": True,
+            "title": title,
+            "note": " ".join(part for part in note_parts if part).strip(),
+            "markdown": body,
+            "source": "; ".join(sources)[:1000] if sources else material_type,
+            "errors": errors,
+            "polish": polish_meta["response"],
+        }
+    )
 
 
 @router.post("/learn/refine-knowledge-cluster")
@@ -891,7 +970,7 @@ def _library_file_payload(path: Path, library_id: str) -> dict[str, object]:
     title = _markdown_title(text) or path.stem
     meta = _markdown_meta(text)
     stat = path.stat()
-    relative_path = str(path.relative_to(storage.ROOT))
+    relative_path = storage.storage_relative(path)
     material_type = meta.get("材料类型") or meta.get("material_type") or ""
     tags = [material_type] if material_type else []
     return {

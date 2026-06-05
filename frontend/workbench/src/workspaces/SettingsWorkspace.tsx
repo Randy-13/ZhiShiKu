@@ -1,7 +1,7 @@
+import type { ReactNode } from "react";
 import type { ActivityEvent, Language, TextExtractionMode } from "../domain";
 import type { Translator } from "../i18n";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
-import { RightContext } from "../shell/RightContext";
 import { StatusBadge } from "../components/StatusBadge";
 
 export function SettingsWorkspace({
@@ -9,6 +9,7 @@ export function SettingsWorkspace({
   language,
   textExtractionMode,
   activities,
+  rightRail,
   onLanguageChange,
   onTextExtractionModeChange,
   onSave,
@@ -17,11 +18,11 @@ export function SettingsWorkspace({
   language: Language;
   textExtractionMode: TextExtractionMode;
   activities: ActivityEvent[];
+  rightRail: ReactNode;
   onLanguageChange: (language: Language) => void;
   onTextExtractionModeChange: (mode: TextExtractionMode) => void;
   onSave: () => void;
 }) {
-  const errorCount = activities.filter((event) => event.status === "error").length;
   return (
     <section className="workspace-layout">
       <div className="workspace-main">
@@ -92,13 +93,7 @@ export function SettingsWorkspace({
         </section>
       </div>
 
-      <RightContext title={t("common.context")}>
-        <div className="context-stack">
-          <StatusBadge tone="done">{t("topbar.ready")}</StatusBadge>
-          <StatusBadge tone={errorCount ? "error" : "muted"}>{errorCount ? `${errorCount} ${t("settings.runtimeLog.errors")}` : t("settings.runtimeLog.noErrors")}</StatusBadge>
-          <p>{t("settings.body")}</p>
-        </div>
-      </RightContext>
+      {rightRail}
     </section>
   );
 }

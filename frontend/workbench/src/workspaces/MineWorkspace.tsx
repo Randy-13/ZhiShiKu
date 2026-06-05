@@ -1,8 +1,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import type { KnowledgeItem, MiningResult } from "../domain";
+import type { MiningResult } from "../domain";
 import type { Translator } from "../i18n";
-import { EmptyState } from "../components/EmptyState";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 
 const zhRoles = ["投资人", "写作者", "研究员", "散户", "创业者"];
@@ -11,20 +10,14 @@ const enRoles = ["Investor", "Writer", "Researcher", "Retail reader", "Founder"]
 export function MineWorkspace({
   t,
   language,
-  knowledge,
-  selectedKnowledge,
   result,
   rightRail,
-  onSelectKnowledge,
   onRunMining,
 }: {
   t: Translator;
   language: "zh" | "en";
-  knowledge: KnowledgeItem[];
-  selectedKnowledge?: KnowledgeItem;
   result?: MiningResult;
   rightRail: ReactNode;
-  onSelectKnowledge: (id: string) => void;
   onRunMining: (role: string, question: string) => void;
 }) {
   const roles = language === "zh" ? zhRoles : enRoles;
@@ -43,8 +36,8 @@ export function MineWorkspace({
           title={t("mine.roles")}
           body={t("mine.body")}
           action={t("mine.primary")}
-          disabled={!selectedKnowledge}
-          disabledReason={t("mine.needSelect")}
+          disabled
+          disabledReason={language === "zh" ? "挖掘对象导入将后续单独接入。" : "Mining object import will be connected later."}
           onAction={() => onRunMining(role, question)}
         >
           <div className="input-row" role="group" aria-label={t("mine.roles")}>
@@ -59,27 +52,6 @@ export function MineWorkspace({
             <textarea value={question} onChange={(event) => setQuestion(event.target.value)} />
           </label>
         </PrimaryTaskPanel>
-
-        <section className="content-panel">
-          <h2>{t("mine.knowledge")}</h2>
-          {knowledge.length === 0 ? (
-            <EmptyState title={t("mine.empty")} body={t("mine.empty.body")} />
-          ) : (
-            <div className="queue-list">
-              {knowledge.map((item) => (
-                <button
-                  className={selectedKnowledge?.id === item.id ? "queue-row selected" : "queue-row"}
-                  type="button"
-                  key={item.id}
-                  onClick={() => onSelectKnowledge(item.id)}
-                >
-                  <strong>{item.title}</strong>
-                  <span>{item.status}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
 
         {result ? (
           <section className="content-panel">

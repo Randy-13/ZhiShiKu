@@ -31,4 +31,5 @@ frontend/workbench/dist/
 frontend/workbench/dev.*.log
 testusecase/
 workbench-debug.png
+.tmp-*.html
 *.url

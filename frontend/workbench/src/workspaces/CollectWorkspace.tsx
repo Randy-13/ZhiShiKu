@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
+import type { ReadableDraftInput } from "../api";
 import type { MaterialType, SourceMaterial } from "../domain";
 import type { Translator } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
@@ -18,25 +19,35 @@ export function CollectWorkspace({
   t,
   materials,
   selectedMaterial,
+  readableDraft,
+  isGeneratingReadable,
+  isSavingReadable,
   rightRail,
   onSelectMaterial,
   onCreateMaterial,
   onUploadFiles,
   onPasteImages,
   onResolveLinks,
-  onSaveToOriginalLibrary,
+  onGenerateReadableDraft,
+  onUpdateReadableDraft,
+  onSaveReadableDraft,
   onDeleteMaterials,
 }: {
   t: Translator;
   materials: SourceMaterial[];
   selectedMaterial?: SourceMaterial;
+  readableDraft?: ReadableDraftInput;
+  isGeneratingReadable: boolean;
+  isSavingReadable: boolean;
   rightRail: ReactNode;
   onSelectMaterial: (id: string) => void;
   onCreateMaterial: (item: Pick<SourceMaterial, "type" | "title" | "source">) => void;
   onUploadFiles: (type: MaterialType, files: File[]) => void;
   onPasteImages: (files: File[]) => void;
   onResolveLinks: (urls: string[]) => void;
-  onSaveToOriginalLibrary: (ids?: string[]) => void;
+  onGenerateReadableDraft: (ids?: string[]) => void;
+  onUpdateReadableDraft: (draft: ReadableDraftInput) => void;
+  onSaveReadableDraft: () => void;
   onDeleteMaterials: (ids: string[]) => void;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -51,6 +62,8 @@ export function CollectWorkspace({
     const visibleIds = new Set(materials.map((item) => item.id));
     setCheckedMaterialIds((current) => current.filter((id) => visibleIds.has(id)));
   }, [materials]);
+
+  const selectedIds = checkedMaterialIds.length ? checkedMaterialIds : selectedMaterial ? [selectedMaterial.id] : [];
 
   const handleDrop = (event: DragEvent<HTMLElement>, type: MaterialType) => {
     event.preventDefault();
@@ -255,24 +268,13 @@ export function CollectWorkspace({
                   <button
                     className="secondary-button"
                     type="button"
-                    disabled={!materials.some((item) => item.status !== "error")}
+                    disabled={!selectedIds.length || isGeneratingReadable}
                     onClick={() => {
-                      onSaveToOriginalLibrary(materials.filter((item) => item.status !== "error").map((item) => item.id));
+                      onGenerateReadableDraft(selectedIds);
                       setCheckedMaterialIds([]);
                     }}
                   >
-                    {t("collect.saveAllOriginals")}
-                  </button>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    disabled={!checkedMaterialIds.length}
-                    onClick={() => {
-                      onSaveToOriginalLibrary(checkedMaterialIds);
-                      setCheckedMaterialIds([]);
-                    }}
-                  >
-                    {t("collect.saveSelectedOriginals")}
+                    {isGeneratingReadable ? t("collect.generatingOriginal") : t("collect.generateOriginal")}
                   </button>
                 </div>
               </div>
@@ -287,6 +289,48 @@ export function CollectWorkspace({
                 }
               />
             </>
+          )}
+        </section>
+
+        <section className="content-panel">
+          <div className="section-heading">
+            <h2>{t("collect.preview")}</h2>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!readableDraft || isSavingReadable}
+              onClick={onSaveReadableDraft}
+            >
+              {isSavingReadable ? t("collect.savingOriginal") : t("collect.addToOriginalLibrary")}
+            </button>
+          </div>
+          {readableDraft ? (
+            <div className="knowledge-draft-editor">
+              <label>
+                <span>{t("collect.draft.title")}</span>
+                <input
+                  value={readableDraft.title}
+                  onChange={(event) => onUpdateReadableDraft({ ...readableDraft, title: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("collect.draft.note")}</span>
+                <input
+                  value={readableDraft.note}
+                  onChange={(event) => onUpdateReadableDraft({ ...readableDraft, note: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("collect.draft.body")}</span>
+                <textarea
+                  className="article-editor-large"
+                  value={readableDraft.body}
+                  onChange={(event) => onUpdateReadableDraft({ ...readableDraft, body: event.target.value })}
+                />
+              </label>
+            </div>
+          ) : (
+            <EmptyState title={t("collect.preview.empty")} body={t("collect.preview.empty.body")} />
           )}
         </section>
       </div>

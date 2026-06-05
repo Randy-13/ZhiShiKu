@@ -36,6 +36,25 @@ export type RawLibraryResult = {
   errors?: string[];
 };
 
+export type ReadableDraftInput = {
+  title: string;
+  note: string;
+  body: string;
+  sourceIds: string[];
+  materialType: string;
+  source: string;
+};
+
+type ReadableDraftPayload = {
+  ok?: boolean;
+  error?: string;
+  title?: string;
+  note?: string;
+  markdown?: string;
+  source?: string;
+  errors?: string[];
+};
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, init);
   if (!response.ok) {
@@ -142,6 +161,43 @@ function normalizeClipboardImage(file: File, index: number) {
   return new File([file], name, { type, lastModified: file.lastModified || Date.now() });
 }
 
+function localReadableDocument(materials: SourceMaterial[]): KnowledgeItem {
+  if (materials.length === 1) {
+    const material = materials[0];
+    const title = material.title.trim() || "未命名原文";
+    const body = material.source.trim()
+      ? `# ${title}\n\n${material.source.trim()}`
+      : `# ${title}\n\n${material.note ?? ""}`;
+    return {
+      id: `readable-${Date.now()}`,
+      title,
+      note: "本地文本原文草稿",
+      body,
+      sourceIds: [material.id],
+      status: "draft",
+      confidence: "medium",
+    };
+  }
+
+  const title = `${materials[0]?.title || "组合素材"} 等 ${materials.length} 个原文文档`;
+  const body = materials
+    .map((material, index) => {
+      const heading = material.title.trim() || `素材 ${index + 1}`;
+      return `## ${index + 1}. ${heading}\n\n${material.source.trim() || material.note || ""}`;
+    })
+    .join("\n\n---\n\n");
+
+  return {
+    id: `readable-${Date.now()}`,
+    title,
+    note: "多素材本地原文草稿",
+    body,
+    sourceIds: materials.map((item) => item.id),
+    status: "draft",
+    confidence: "medium",
+  };
+}
+
 export type UploadedItem = Record<string, unknown> & {
   id?: number;
   title?: string;
@@ -153,6 +209,19 @@ export type UploadedItem = Record<string, unknown> & {
   image_path?: string;
   page_count?: number;
   default_range?: string;
+};
+
+export type InspectedLink = {
+  url?: string;
+  final_url?: string;
+  title?: string;
+  link_type?: string;
+  extraction_strategy?: string;
+  access_status?: string;
+  source?: string;
+  notes?: string;
+  author?: string;
+  published_at?: string;
 };
 
 export type WriterAdvanceResult = {
@@ -236,6 +305,15 @@ export const api = {
     return payload.item ?? null;
   },
 
+  async inspectLink(url: string): Promise<InspectedLink | null> {
+    const payload = await requestJson<V2Payload<{ ok?: boolean; item?: InspectedLink }>>("/api/v2/collect/inspect-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    return payload.data?.item ?? null;
+  },
+
   transcribeMedia(mediaIds: number[]) {
     return requestJson<{ items?: Array<Record<string, unknown>> }>("/api/media/transcript", {
       method: "POST",
@@ -282,6 +360,103 @@ export const api = {
       item: toLibraryKnowledge({ ...(data.item ?? {}), library: "raw" }, Date.now()),
       errors: data.errors ?? [],
     };
+  },
+
+  async createReadableDraft(materials: SourceMaterial[], parserMode: TextExtractionMode): Promise<ReadableDraftInput> {
+    if (!materials.length) throw new Error("No material selected for readable draft.");
+    let readable: KnowledgeItem;
+    const textOnly = materials.every((material) => material.type === "text" && !material.backendId);
+    const backendReady = materials.every(
+      (material) => material.type === "text" || material.type === "link" || typeof material.backendId === "number",
+    );
+    if (textOnly) {
+      readable = localReadableDocument(materials);
+    } else if (backendReady) {
+      const payload = await requestJson<V2Payload<ReadableDraftPayload>>("/api/v2/collect/readable-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          material_type: rawMaterialType(materials),
+          title: materials.length === 1 ? materials[0]?.title ?? "" : "",
+          items: materials.map((material) => ({
+            id: material.backendId,
+            content: material.type === "text" ? material.source : "",
+            url: material.type === "link" || material.type === "media" ? material.source : "",
+            title: material.title,
+            link_type: "",
+            extraction_strategy: "",
+            access_status: material.status,
+          })),
+        }),
+      });
+      const data = assertV2Ok(payload);
+      readable = {
+        id: `readable-${Date.now()}`,
+        title: firstString(data.title, materials[0]?.title, "Readable document"),
+        note: firstString(data.note),
+        body: firstString(data.markdown),
+        sourceIds: materials.map((material) => material.id),
+        status: "draft",
+        confidence: "needsReview",
+      };
+    } else {
+      readable = await this.readableDocument(materials, parserMode);
+    }
+    const meta = await this
+      .knowledgeDraftMeta(materials, readable.body, "zh")
+      .catch(() => ({ title: readable.title, note: readable.note ?? "" }));
+    return {
+      title: meta.title?.trim() || readable.title || materials[0]?.title || "未命名原文",
+      note: meta.note?.trim() || readable.note || `来源素材：${materials.map((item) => item.title).join("、")}`,
+      body: readable.body,
+      sourceIds: materials.map((material) => material.id),
+      materialType: rawMaterialType(materials),
+      source: materials.map((material) => material.source || material.title).filter(Boolean).join("; "),
+    };
+  },
+
+  async saveRawDraft(draft: ReadableDraftInput): Promise<KnowledgeItem> {
+    const requestBody = {
+      material_type: draft.materialType,
+      title: draft.title,
+      note: draft.note,
+      markdown: draft.body,
+      source: draft.source,
+    };
+    try {
+      const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown> }>>(
+        "/api/v2/collect/raw-file",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        },
+      );
+      const data = assertV2Ok(payload);
+      return toLibraryKnowledge({ ...(data.item ?? {}), library: "raw" }, Date.now());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("Not Found") && !message.includes("404")) throw error;
+      const fallback = await this.createRawLibraryFile(
+        [
+          {
+            id: `draft-${Date.now()}`,
+            type: draft.materialType === "screenshot" ? "image" : draft.materialType === "document" ? "file" : draft.materialType === "web_link" ? "link" : draft.materialType === "media" ? "media" : "text",
+            title: draft.title,
+            source: draft.body,
+            status: "ready",
+            note: draft.note,
+          },
+        ],
+        draft.title,
+      );
+      return {
+        ...fallback.item,
+        title: draft.title || fallback.item.title,
+        note: draft.note || fallback.item.note,
+        body: draft.body,
+      };
+    }
   },
 
   async refineKnowledgeCluster(rawPaths: string[], title = ""): Promise<FocusDraftPayload> {

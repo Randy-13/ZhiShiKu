@@ -39,11 +39,9 @@ type Props = {
   writerProjects: WriterProject[];
   writerState?: WriterProjectState;
   selectedProjectId?: string;
-  selectedKnowledgeIds: number[];
   isRunning: boolean;
   onCreateProject: (name: string, projectType: string) => void;
   onSelectProject: (projectId: string) => void;
-  onImportKnowledge: () => void;
   onGenerateTopics: () => void;
   onSelectTopic: (topic: Record<string, unknown>) => void;
   onGenerateDraft: () => void;
@@ -62,11 +60,9 @@ export function CreateWorkspace({
   writerProjects,
   writerState,
   selectedProjectId,
-  selectedKnowledgeIds,
   isRunning,
   onCreateProject,
   onSelectProject,
-  onImportKnowledge,
   onGenerateTopics,
   onSelectTopic,
   onGenerateDraft,
@@ -87,14 +83,13 @@ export function CreateWorkspace({
   const labels = steps.map((item) => (language === "zh" ? item.zh : item.en));
   const currentIndex = stepIndex[step] ?? 0;
   const nextAction = writerState?.next_action ?? "";
-  const selectedBackendKnowledge = selectedKnowledgeIds.length;
   const projectKnowledge = project?.library_files ?? [];
   const topics = project?.topics ?? [];
   const articleMarkdown = markdownDraft || project?.article_markdown || "";
 
   const images = imageItems(project);
-  const primary = primaryAction(step, Boolean(project), selectedBackendKnowledge, isRunning, language, project, nextAction);
-  const guide = guideForState(language, project, step, nextAction, selectedBackendKnowledge);
+  const primary = primaryAction(step, Boolean(project), isRunning, language, project, nextAction);
+  const guide = guideForState(language, project, step, nextAction);
 
   useEffect(() => {
     setMarkdownDraft("");
@@ -166,7 +161,6 @@ export function CreateWorkspace({
             onAction={() =>
               runPrimary(step, {
                 nextAction,
-                onImportKnowledge,
                 onGenerateTopics,
                 onGenerateDraft,
                 onDraftImageAction: onSuggestImages,
@@ -199,7 +193,6 @@ export function CreateWorkspace({
                 step={step}
                 project={project}
                 projectKnowledge={projectKnowledge}
-                selectedKnowledgeCount={selectedBackendKnowledge}
                 topics={topics}
                 selectedTopic={project.topic}
                 isRunning={isRunning}
@@ -299,14 +292,12 @@ function WorkflowGuideCard({ language, guide }: { language: "zh" | "en"; guide: 
   );
 }
 
-function ProjectKnowledge({ language, files, selectedCount }: { language: "zh" | "en"; files: WriterProject["library_files"]; selectedCount: number }) {
+function ProjectKnowledge({ language, files }: { language: "zh" | "en"; files: WriterProject["library_files"] }) {
   return (
     <section className="project-section">
       <div className="section-heading">
         <h2>{language === "zh" ? "项目参考材料" : "Project references"}</h2>
-        <span>
-          {files?.length || selectedCount} {language === "zh" ? "项" : "items"}
-        </span>
+        <span>{files?.length || 0} {language === "zh" ? "项" : "items"}</span>
       </div>
       {files?.length ? (
         <div className="reference-list">
@@ -320,7 +311,7 @@ function ProjectKnowledge({ language, files, selectedCount }: { language: "zh" |
       ) : (
         <EmptyState
           title={language === "zh" ? "尚未导入知识" : "No references yet"}
-          body={language === "zh" ? "在右侧检索并勾选知识库文件，然后加入当前项目。" : "Search and select knowledge files on the right, then add them to this project."}
+          body={language === "zh" ? "项目导入入口已暂时移除，后续会在创作主工作区重新接入。" : "Project import is temporarily removed and will be reconnected in the creation workspace."}
         />
       )}
     </section>
@@ -472,7 +463,6 @@ function StageWorkspace({
   step,
   project,
   projectKnowledge,
-  selectedKnowledgeCount,
   topics,
   selectedTopic,
   isRunning,
@@ -488,7 +478,6 @@ function StageWorkspace({
   step: WriterStep;
   project: WriterProject;
   projectKnowledge: WriterProject["library_files"];
-  selectedKnowledgeCount: number;
   topics: Array<Record<string, unknown>>;
   selectedTopic?: Record<string, unknown> | null;
   isRunning: boolean;
@@ -503,10 +492,10 @@ function StageWorkspace({
   if (step === "created") {
     return (
       <div className="stage-stack">
-        <ProjectKnowledge language={language} files={projectKnowledge} selectedCount={selectedKnowledgeCount} />
+        <ProjectKnowledge language={language} files={projectKnowledge} />
         <div className="stage-hint">
           <span>{language === "zh" ? "下一步" : "Next"}</span>
-          <p>{language === "zh" ? "在右侧勾选知识文件后，点击主按钮加入当前项目。" : "Select reference files on the right, then use the main action to add them."}</p>
+          <p>{language === "zh" ? "知识导入会后续重新设计为创作区内的明确动作。" : "Knowledge import will be redesigned as an explicit creation workspace action."}</p>
         </div>
       </div>
     );
@@ -515,7 +504,7 @@ function StageWorkspace({
   if (step === "knowledge_confirmed") {
     return (
       <div className="stage-stack">
-        <ProjectKnowledge language={language} files={projectKnowledge} selectedCount={selectedKnowledgeCount} />
+        <ProjectKnowledge language={language} files={projectKnowledge} />
         <div className="stage-hint">
           <span>{language === "zh" ? "下一步" : "Next"}</span>
           <p>{language === "zh" ? "参考材料已经进入项目。点击主按钮生成选题建议。" : "References are now in this project. Use the main action to generate topic suggestions."}</p>
@@ -581,7 +570,7 @@ function StageWorkspace({
   );
 }
 
-function guideForState(language: "zh" | "en", project: WriterProject | undefined, step: WriterStep, nextAction: string, selectedKnowledgeCount: number) {
+function guideForState(language: "zh" | "en", project: WriterProject | undefined, step: WriterStep, nextAction: string) {
   if (!project) {
     return {
       title: language === "zh" ? "先创建项目" : "Create a project first",
@@ -594,15 +583,15 @@ function guideForState(language: "zh" | "en", project: WriterProject | undefined
   }
   if (step === "created") {
     return {
-      title: language === "zh" ? "加入知识库文件" : "Add reference files",
+      title: language === "zh" ? "项目参考材料待接入" : "Project references pending",
       body:
         language === "zh"
-          ? "在右侧检索并勾选知识库文件，然后加入当前项目。"
-          : "Search the knowledge library on the right, check files, and add them to this project.",
+          ? "右侧现在只作为全局知识列表展示，加入项目的交互会后续迁入创作主工作区。"
+          : "The right rail is now only the global library list. Project import will move into the creation workspace later.",
       checkpoints: [
-        language === "zh" ? `已勾选 ${selectedKnowledgeCount} 个文件` : `${selectedKnowledgeCount} selected files`,
-        language === "zh" ? "加入当前项目" : "Add to current project",
-        language === "zh" ? "随后生成选题建议" : "Then generate topic suggestions",
+        language === "zh" ? "保留当前项目" : "Keep the current project",
+        language === "zh" ? "等待导入入口接入" : "Wait for import action wiring",
+        language === "zh" ? "后续再生成选题建议" : "Generate topic suggestions later",
       ],
     };
   }
@@ -665,14 +654,14 @@ function guideForState(language: "zh" | "en", project: WriterProject | undefined
   };
 }
 
-function primaryAction(step: WriterStep, hasProject: boolean, selectedKnowledgeCount: number, isRunning: boolean, language: "zh" | "en", project?: WriterProject, nextAction?: string) {
+function primaryAction(step: WriterStep, hasProject: boolean, isRunning: boolean, language: "zh" | "en", project?: WriterProject, nextAction?: string) {
   if (isRunning) return { label: language === "zh" ? "处理中..." : "Working...", disabled: true, reason: "" };
   if (!hasProject) return { label: language === "zh" ? "先创建项目" : "Create project first", disabled: true, reason: language === "zh" ? "请先在中间创建项目。" : "Create a project in the center first." };
   if (step === "created") {
     return {
-      label: language === "zh" ? "加入项目" : "Add to project",
-      disabled: selectedKnowledgeCount === 0,
-      reason: selectedKnowledgeCount === 0 ? (language === "zh" ? "请先在右侧勾选知识库文件。" : "Select knowledge files on the right first.") : "",
+      label: language === "zh" ? "待接入" : "Pending",
+      disabled: true,
+      reason: language === "zh" ? "加入项目入口已暂时移除，后续单独接入。" : "Project import is temporarily removed and will be reconnected later.",
     };
   }
   return {
@@ -696,7 +685,6 @@ function runPrimary(
   step: WriterStep,
   actions: {
     nextAction?: string;
-    onImportKnowledge: () => void;
     onGenerateTopics: () => void;
     onGenerateDraft: () => void;
     onDraftImageAction: () => void;
@@ -706,8 +694,7 @@ function runPrimary(
     onPublish: () => void;
   },
 ) {
-  if (step === "created") actions.onImportKnowledge();
-  else if (step === "knowledge_confirmed") actions.onGenerateTopics();
+  if (step === "knowledge_confirmed") actions.onGenerateTopics();
   else if (step === "topic") actions.onGenerateDraft();
   else if (step === "draft" && actions.nextAction === "generate_images") actions.onGenerateImages();
   else if (step === "draft") actions.onDraftImageAction();
