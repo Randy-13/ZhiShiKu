@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,23 @@ from schemas import (
     WriterImageSuggestionResult,
     WriterRevisionResult,
 )
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+PERSPECTIVE_INTERPRETATION_PROMPT = PROMPTS_DIR / "perspective_interpretation.md"
+
+
+def _read_prompt_template(path: Path, fallback: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return fallback
+
+
+def _fill_template(template: str, values: dict[str, str]) -> str:
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace("{{" + key + "}}", value)
+    return rendered
 
 
 def current_setting(setting: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -345,29 +363,35 @@ def interpret_from_perspective(
                 ]
             )
         )
-    prompt = f"""
-你是“知识酷 Research OS”的挖掘模块。请按照给定视角解读材料，输出带视角标签、原文引用的分析结果。
-
-视角不是并列功能按钮，而是一个结构化观察框架。请严格服从下面的视角设定：
-视角名称：{perspective.get("name", "")}
-角色定位：{perspective.get("role", "")}
-关注对象：{perspective.get("target_subject", "")}
-核心目的：{perspective.get("purpose", "")}
-关注维度：{json.dumps(perspective.get("focus_dimensions", []), ensure_ascii=False)}
-判断问题：{json.dumps(perspective.get("analysis_questions", []), ensure_ascii=False)}
-输出风格：{perspective.get("output_style", "")}
-证据规则：{perspective.get("evidence_rule", "")}
-
-要求：
-1. 可以基于原料库或重点库文件解读；如果来自原料库，要保留对原文表达、创作逻辑、叙事节奏的观察。
-2. 不要把“信息量、创作逻辑、行业关联、就业相关、需求信号”等写成与视角并列的模块；它们只是当前视角关注内容的具体描述。
-3. 每条 findings 必须带 evidence_refs，使用 S1/S2 等来源编号。
-4. 不要补充材料外事实；不确定时写入 risks_and_limits。
-5. 输出应能保存到视角库，用于后续创作引用。
-
-材料：
-{chr(10).join(source_text)}
+    fallback = """
+You are the mining module of Knowledge Cool Research OS. Interpret the materials from the configured perspective.
+Perspective name: {{perspective_name}}
+Positioning: {{positioning}}
+Core goal: {{core_goal}}
+Stance: {{stance}}
+RTFC requirement: ground every judgment in the source materials, and include evidence_refs such as S1/S2 for each finding.
+Use a fixed five-part structure: criteria, core facts, deep analysis, risks/questions, and final action-oriented conclusion.
+Materials:
+{{source_text}}
 """
+    template = _read_prompt_template(PERSPECTIVE_INTERPRETATION_PROMPT, fallback)
+    prompt = _fill_template(
+        template,
+        {
+            "perspective_name": str(perspective.get("name", "")),
+            "positioning": str(perspective.get("positioning") or perspective.get("role", "")),
+            "core_goal": str(perspective.get("core_goal") or perspective.get("purpose", "")),
+            "stance": str(perspective.get("stance") or perspective.get("evidence_rule", "")),
+            "role": str(perspective.get("role", "")),
+            "target_subject": str(perspective.get("target_subject", "")),
+            "purpose": str(perspective.get("purpose", "")),
+            "focus_dimensions": json.dumps(perspective.get("focus_dimensions", []), ensure_ascii=False),
+            "analysis_questions": json.dumps(perspective.get("analysis_questions", []), ensure_ascii=False),
+            "output_style": str(perspective.get("output_style", "")),
+            "evidence_rule": str(perspective.get("evidence_rule", "")),
+            "source_text": chr(10).join(source_text),
+        },
+    )
     return parse_json_model(PerspectiveInterpretationResult, [{"role": "user", "content": prompt}], setting=setting)
 
 
@@ -475,6 +499,49 @@ def recognize_screenshots_with_ai(
         ) from exc
 
 
+def design_wechat_article_html(
+    markdown: str,
+    design_strategy: str = "",
+    setting: dict[str, Any] | None = None,
+) -> str:
+    resolved = current_setting(setting)
+    prompt = f"""
+你是微信公众号文章美编。请把下面的 Markdown 文章排版成可直接粘贴到微信公众号编辑器的完整 HTML。
+
+美编策略：
+{design_strategy.strip() or "公众号长文：克制、清晰、专业，适合科技/财经长文阅读。"}
+
+硬性要求：
+1. 只输出 HTML，不要 Markdown 代码围栏，不要解释。
+2. 保留原文标题、正文层级、图片和所有事实，不新增材料外内容。
+3. 图片路径必须沿用 Markdown 中的 src/path，不要改名、不要转成远程 URL。
+4. 允许使用 section、h1/h2/h3、p、blockquote、ul/ol、table、strong、span、img 等常规标签。
+5. 使用内联 style，适合微信公众号粘贴；整体宽度、行距、留白、重点句、引用块、分隔节奏要有明显美编效果。
+6. 不要使用 script、iframe、外链 CSS、复杂动画或微信公众号不兼容标签。
+7. 对重点段落可以做轻量强调，但不要把全文做成海报。
+
+Markdown：
+{markdown[:50000]}
+"""
+    try:
+        html_text = sdk_chat_completion([{"role": "user", "content": prompt}], json_mode=False, setting=resolved).strip()
+    except APIConnectionError:
+        html_text = curl_chat_completion([{"role": "user", "content": prompt}], json_mode=False, setting=resolved).strip()
+    except Exception as exc:
+        raise RuntimeError(explain_error(exc, resolved)) from exc
+
+    html_text = re.sub(r"^```(?:html)?\s*", "", html_text, flags=re.I).strip()
+    html_text = re.sub(r"\s*```$", "", html_text).strip()
+    if not html_text or "<" not in html_text:
+        raise RuntimeError("API 美编没有返回可用 HTML")
+    if "<html" not in html_text.lower():
+        html_text = (
+            "<!doctype html>\n<html lang=\"zh-CN\">\n<head><meta charset=\"utf-8\" /></head>\n"
+            f"<body>\n{html_text}\n</body>\n</html>"
+        )
+    return html_text
+
+
 def generate_topics(
     markdown_files: list[tuple[str, str]],
     setting: dict[str, Any] | None = None,
@@ -505,6 +572,7 @@ def generate_topics(
 def generate_wechat_article(
     topic: dict[str, Any],
     markdown_files: list[tuple[str, str]],
+    writing_strategy: str = "",
     setting: dict[str, Any] | None = None,
 ) -> WriterArticleResult:
     materials = []
@@ -526,6 +594,9 @@ def generate_wechat_article(
 8. content_image_prompts 仅在文章确实需要数据对比图、结构图或流程图时给 0 到 2 条。
 9. markdown 正文第一张图使用：![封面图](cover.png)
 10. digest 控制在 120 个中文字符以内，适合作为公众号摘要。
+
+项目写文策略：
+{writing_strategy.strip() or "使用系统默认公众号写文策略。"}
 
 选题：
 {topic_json}

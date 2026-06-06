@@ -52,6 +52,25 @@ export type MiningResult = {
   knowledgeId?: string;
 };
 
+export type PerspectiveProfile = {
+  id: string;
+  name: string;
+  positioning: string;
+  coreGoal: string;
+  stance: string;
+  readonly?: boolean;
+  origin?: "preset" | "custom" | string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type PerspectiveDraft = {
+  title: string;
+  markdown: string;
+  sourceFiles: Array<Record<string, string>>;
+  perspective: PerspectiveProfile;
+};
+
 export type CreationDraft = {
   id: string;
   title: string;
@@ -84,16 +103,20 @@ export type WriterProject = {
   created_at?: string;
   updated_at?: string;
   library_files?: Array<{
+    library?: "original" | "focus" | "perspective" | string;
     title?: string;
     knowledge_id?: number;
     markdown_path?: string;
   }>;
+  writing_strategy?: string;
+  design_strategy?: string;
   topics?: Array<Record<string, unknown>>;
   topic?: Record<string, unknown> | null;
   title?: string;
   digest?: string;
   cover_prompt?: string;
   content_image_prompts?: string[];
+  image_suggestion_rationale?: string;
   article_markdown?: string;
   html?: string;
   html_path?: string;
@@ -101,6 +124,9 @@ export type WriterProject = {
     cover?: { path?: string; prompt?: string };
     content_images?: Array<{ path?: string; prompt?: string }>;
     items?: Array<{ path?: string; prompt?: string }>;
+    errors?: Array<{ kind?: string; index?: number; message?: string }>;
+    partial?: boolean;
+    ok?: boolean;
   };
   preflight?: {
     ok?: boolean;

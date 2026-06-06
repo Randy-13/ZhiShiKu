@@ -63,6 +63,10 @@ class MediaUrlResolveRequest(BaseModel):
     url: str
 
 
+class BilibiliCookieLoginRequest(BaseModel):
+    url: str | None = None
+
+
 class MediaTranscriptRequest(BaseModel):
     media_ids: list[int]
 
@@ -240,6 +244,7 @@ class ImageApiSettingSaveRequest(BaseModel):
     api_key: str | None = None
     size: str | None = None
     quality: str | None = None
+    response_format: str | None = None
     timeout: float | None = None
     make_active: bool = True
 
@@ -251,6 +256,8 @@ class ImageApiSettingActiveRequest(BaseModel):
 class ImageApiSettingTestRequest(BaseModel):
     id: str | None = None
     setting: ImageApiSettingSaveRequest | None = None
+    real_test: bool = False
+    prompt: str | None = None
 
 
 class AsrSettingSaveRequest(BaseModel):
@@ -292,6 +299,7 @@ class WriterFormatRequest(BaseModel):
     workspace: str
     markdown: str | None = None
     theme: str = "tech"
+    design_strategy: str | None = None
 
 
 class WriterPublishRequest(BaseModel):
@@ -307,10 +315,14 @@ class WriterProjectCreateRequest(BaseModel):
     project_type: str = "article"
     description: str = ""
     knowledge_ids: list[int] = []
+    library_files: list[dict[str, object]] = []
+    writing_strategy: str = ""
+    design_strategy: str = ""
 
 
 class WriterProjectKnowledgeRequest(BaseModel):
     knowledge_ids: list[int]
+    library_files: list[dict[str, object]] = []
 
 
 class WriterProjectTopicRequest(BaseModel):
@@ -339,6 +351,7 @@ class WriterProjectImagesRequest(BaseModel):
 class WriterProjectFormatRequest(BaseModel):
     markdown: str | None = None
     theme: str = "tech"
+    design_strategy: str | None = None
 
 
 class WriterProjectPublishRequest(BaseModel):
@@ -589,13 +602,32 @@ def test_image_api_setting(request: ImageApiSettingTestRequest) -> dict[str, str
                 "api_key": (payload.get("api_key") or "").strip(),
                 "size": (payload.get("size") or "1024x1024").strip(),
                 "quality": (payload.get("quality") or "auto").strip(),
+                "response_format": (payload.get("response_format") or "").strip(),
                 "timeout": payload.get("timeout") or 120,
             }
         elif request.id:
             setting = image_api_settings.get_setting(request.id)
             if setting is None:
                 raise KeyError("Image API setting not found")
-        return image_api_settings.diagnose(setting)
+        diagnosis = image_api_settings.diagnose(setting)
+        if not request.real_test:
+            return diagnosis
+        if diagnosis.get("ok") != "true":
+            return diagnosis
+        output_dir = storage.ROOT / "writer" / "_api_tests"
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        output_path = output_dir / f"image_api_test_{stamp}.png"
+        result = writer_tools.generate_image(
+            request.prompt or "一张简洁的测试图，白色背景，中心写有少量简体中文文字：测试",
+            output_path,
+            setting=setting,
+        )
+        return {
+            **diagnosis,
+            "real_test": "true",
+            "generated_path": str(output_path.relative_to(storage.ROOT)),
+            "message": f"图片 API 字段诊断通过，并已真实生成测试图片：{result.get('path')}",
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -668,6 +700,24 @@ def upload_media_files(files: list[UploadFile] = File(...)) -> dict[str, object]
 @app.get("/api/media/dependencies")
 def media_dependencies() -> dict[str, object]:
     return media_parser.dependency_status()
+
+
+@app.get("/api/media/bilibili-cookies")
+def bilibili_cookie_status() -> dict[str, object]:
+    try:
+        return media_parser.bilibili_cookie_status()
+    except Exception as exc:
+        logger.exception("Bilibili cookie status check failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/media/bilibili-cookies/login")
+def open_bilibili_cookie_login(request: BilibiliCookieLoginRequest) -> dict[str, object]:
+    try:
+        return media_parser.launch_bilibili_cookie_login(request.url)
+    except Exception as exc:
+        logger.exception("Bilibili cookie login launch failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/media/transcripts")
@@ -1077,7 +1127,19 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
         if request.file_ids:
             files = storage.get_source_files(request.file_ids)
             titles.extend(str(item.get("original_name") or item.get("title") or f"file-{item['id']}") for item in files)
-            raw_blocks.append(document_parser.recognize_files(files, storage.ROOT))
+            prefer_visual = parser_mode == "ai_vision"
+            raw_blocks.append(
+                document_parser.recognize_files(
+                    files,
+                    storage.ROOT,
+                    visual_recognizer=lambda image_paths: deepseek_client.recognize_screenshots_with_ai(
+                        image_paths,
+                        setting=api_settings.active_setting(),
+                    ),
+                    prefer_visual=prefer_visual,
+                    storage_root=storage.STORAGE_ROOT,
+                )
+            )
 
         if request.media_ids:
             for media_id in request.media_ids:
@@ -2523,6 +2585,31 @@ def _writer_library_files(knowledge_ids: list[int]) -> list[dict[str, object]]:
     return files
 
 
+def _writer_library_files_from_refs(refs: list[dict[str, object]]) -> list[dict[str, object]]:
+    files: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        markdown_path = str(ref.get("markdown_path") or ref.get("markdownPath") or "").strip()
+        if not markdown_path:
+            continue
+        path = storage.resolve_root_path(markdown_path)
+        if not path or not path.exists():
+            continue
+        relative_path = storage.storage_relative(path)
+        if relative_path in seen:
+            continue
+        seen.add(relative_path)
+        files.append(
+            {
+                "library": str(ref.get("library") or "original"),
+                "knowledge_id": ref.get("knowledge_id") or ref.get("knowledgeId"),
+                "markdown_path": relative_path,
+                "title": str(ref.get("title") or path.stem),
+            }
+        )
+    return files
+
+
 def _writer_project_knowledge_ids(project: dict[str, object]) -> list[int]:
     ids: list[int] = []
     for item in project.get("library_files") or []:
@@ -2669,16 +2756,18 @@ def writer_projects() -> dict[str, object]:
 def writer_project_create(request: WriterProjectCreateRequest) -> dict[str, object]:
     try:
         default_name = ""
-        if request.knowledge_ids:
-            files = _writer_library_files(request.knowledge_ids)
+        files = _writer_library_files_from_refs(request.library_files) if request.library_files else _writer_library_files(request.knowledge_ids)
+        if files:
             default_name = str(files[0]["title"]) if files else ""
         project = writer_tools.create_project(
             request.name or default_name or "Untitled writing project",
             project_type=request.project_type,
             description=request.description,
+            writing_strategy=request.writing_strategy,
+            design_strategy=request.design_strategy,
         )
-        if request.knowledge_ids:
-            writer_tools.set_project_library_files(str(project["id"]), _writer_library_files(request.knowledge_ids))
+        if files:
+            writer_tools.set_project_library_files(str(project["id"]), files)
         return _writer_project_payload(str(project["id"]))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2698,10 +2787,13 @@ def writer_project_read(project_id: str) -> dict[str, object]:
 
 @app.post("/api/writer/projects/{project_id}/knowledge")
 def writer_project_confirm_knowledge(project_id: str, request: WriterProjectKnowledgeRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
+    if not request.knowledge_ids and not request.library_files:
         raise HTTPException(status_code=400, detail="Please select at least one knowledge file")
     try:
-        writer_tools.set_project_library_files(project_id, _writer_library_files(request.knowledge_ids))
+        files = _writer_library_files_from_refs(request.library_files) if request.library_files else _writer_library_files(request.knowledge_ids)
+        if not files:
+            raise HTTPException(status_code=400, detail="Selected knowledge files have no readable Markdown path")
+        writer_tools.set_project_library_files(project_id, files)
         return _writer_project_payload(project_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2749,7 +2841,12 @@ def writer_project_generate_draft(project_id: str, request: WriterProjectDraftRe
         if not isinstance(topic, dict) or not topic:
             raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨涓€涓€夐")
         setting = api_settings.active_setting()
-        result = deepseek_client.generate_wechat_article(topic, materials, setting=setting)
+        result = deepseek_client.generate_wechat_article(
+            topic,
+            materials,
+            writing_strategy=str(project.get("writing_strategy") or ""),
+            setting=setting,
+        )
         workspace = _writer_project_workspace(project_id)
         article_path = writer_tools.write_article(workspace, result.markdown)
         writer_tools.update_project(
@@ -2856,8 +2953,15 @@ def writer_project_generate_images(project_id: str, request: WriterProjectImages
 def writer_project_format(project_id: str, request: WriterProjectFormatRequest) -> dict[str, object]:
     try:
         workspace = _writer_project_workspace(project_id)
-        result = writer_tools.format_article(workspace, markdown=request.markdown, theme=request.theme)
-        writer_tools.update_project(project_id, html_path=result.get("path"), html_theme=request.theme)
+        project = writer_tools.load_project(project_id)
+        design_strategy = request.design_strategy if request.design_strategy is not None else str(project.get("design_strategy") or "")
+        result = writer_tools.format_article(
+            workspace,
+            markdown=request.markdown,
+            theme=request.theme,
+            design_strategy=design_strategy,
+        )
+        writer_tools.update_project(project_id, html_path=result.get("path"), html_theme=request.theme, design_strategy=design_strategy)
         return {**_writer_project_payload(project_id), "format": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2873,12 +2977,13 @@ def writer_project_publish_preflight(project_id: str, request: WriterProjectPubl
         title = request.title or str(project.get("title") or project.get("name") or "")
         digest = request.digest if request.digest is not None else project.get("digest")
         result = writer_tools.publish_preflight(workspace, title, author=request.author or "Bobo", digest=str(digest or ""), cover_path=request.cover_path)
+        safe_digest = result.get("digest", str(digest or ""))
         writer_tools.update_project(
             project_id,
             preflight=result,
             publish_title=title,
             publish_author=request.author or "Bobo",
-            publish_digest=digest,
+            publish_digest=safe_digest,
             publish_cover_path=request.cover_path,
         )
         return {**_writer_project_payload(project_id), "preflight": result}
@@ -2904,6 +3009,7 @@ def writer_project_publish(project_id: str, request: WriterProjectPublishRequest
             digest=str(digest or ""),
             cover_path=str(cover_path) if cover_path else None,
         )
+        digest = preflight.get("digest", str(digest or ""))
         if not preflight["ok"]:
             writer_tools.update_project(project_id, preflight=preflight)
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
@@ -3114,7 +3220,12 @@ def writer_file(path: str) -> FileResponse:
 def writer_format(request: WriterFormatRequest) -> dict[str, object]:
     try:
         workspace = writer_tools.resolve_workspace(request.workspace)
-        result = writer_tools.format_article(workspace, markdown=request.markdown, theme=request.theme)
+        result = writer_tools.format_article(
+            workspace,
+            markdown=request.markdown,
+            theme=request.theme,
+            design_strategy=request.design_strategy or "",
+        )
         return {"workspace": str(workspace.relative_to(storage.ROOT)), **result}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3131,13 +3242,14 @@ def writer_publish(request: WriterPublishRequest) -> dict[str, object]:
             digest=request.digest,
             cover_path=request.cover_path,
         )
+        digest = preflight.get("digest", request.digest or "")
         if not preflight["ok"]:
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
         result = writer_tools.publish_draft(
             workspace,
             request.title,
             author=request.author or "Bobo",
-            digest=request.digest,
+            digest=str(digest or ""),
             cover_path=request.cover_path,
         )
         return {"workspace": str(workspace.relative_to(storage.ROOT)), "preflight": preflight, **result}

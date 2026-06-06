@@ -84,3 +84,109 @@ def test_douyin_detail_excludes_chapter_recommendations_from_subtitle():
 
     assert media_parser.extract_douyin_platform_subtitle(detail) == ""
     assert media_parser.extract_douyin_audio_url(detail) == "https://example.com/audio.mp3"
+
+
+def test_ytdlp_cookie_source_reuses_project_auth_file(monkeypatch, tmp_path):
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
+    monkeypatch.setattr(media_parser.storage, "ROOT", tmp_path)
+    monkeypatch.setattr(media_parser.storage, "STORAGE_ROOT", tmp_path / "runtime")
+    cookie_file = tmp_path / "auth" / "bilibili.cookies.txt"
+    cookie_file.parent.mkdir()
+    cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    assert media_parser.ytdlp_cookie_source() == str(cookie_file)
+    state = media_parser.ytdlp_auth_state()
+    assert state.mode == "file"
+    assert state.exists
+
+
+def test_bilibili_login_error_with_existing_cookies_asks_to_refresh_file(tmp_path):
+    cookie_file = tmp_path / "bilibili.cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    state = media_parser.YtDlpAuthState("file", str(cookie_file), True, "test")
+
+    message = media_parser.explain_bilibili_subtitle_error(
+        "ERROR: [BiliBili] Subtitles are only available when logged in",
+        state,
+    )
+
+    assert "configured cookies were not accepted" in message
+    assert "tools/browser_state_to_netscape_cookies.py" in message
+    assert "anonymously" not in message
+
+
+def test_bilibili_login_error_without_cookies_points_to_old_converter():
+    message = media_parser.explain_bilibili_subtitle_error(
+        "ERROR: [BiliBili] Subtitles are only available when logged in",
+        media_parser.YtDlpAuthState("none"),
+    )
+
+    assert "auth/bilibili.cookies.txt" in message
+    assert "tools/browser_state_to_netscape_cookies.py" in message
+
+
+def test_browser_cookie_env_overrides_default_cookie_file(monkeypatch, tmp_path):
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, "edge")
+    monkeypatch.setattr(media_parser.storage, "ROOT", tmp_path)
+    monkeypatch.setattr(media_parser.storage, "STORAGE_ROOT", tmp_path / "runtime")
+    cookie_file = tmp_path / "auth" / "bilibili.cookies.txt"
+    cookie_file.parent.mkdir()
+    cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    state = media_parser.ytdlp_auth_state()
+
+    assert state.mode == "browser"
+    assert media_parser.ytdlp_auth_args() == ["--cookies-from-browser", "edge"]
+
+
+def test_write_transcript_uses_storage_relative_path(monkeypatch, tmp_path):
+    storage_root = tmp_path / "runtime"
+    monkeypatch.setattr(media_parser.storage, "STORAGE_ROOT", storage_root)
+    monkeypatch.setattr(media_parser.storage, "MEDIA_DIR", storage_root / "media")
+    updates = {}
+    monkeypatch.setattr(media_parser.storage, "update_media_source", lambda media_id, **fields: updates.update(fields))
+
+    path = media_parser.write_transcript({"id": 18, "title": "demo"}, "[00:00:01 - 00:00:02] hello", "platform_subtitle")
+
+    assert path.exists()
+    assert updates["transcript_path"].startswith("media")
+    assert not updates["transcript_path"].startswith(str(tmp_path))
+    assert updates["status"] == "transcribed"
+
+
+def test_bilibili_cookie_status_validates_required_keys(monkeypatch, tmp_path):
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
+    cookie_file = tmp_path / "bilibili.cookies.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tsecret",
+                ".bilibili.com\tTRUE\t/\tTRUE\t0\tDedeUserID\t123",
+                ".bilibili.com\tTRUE\t/\tTRUE\t0\tbili_jct\tcsrf",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(media_parser.YTDLP_COOKIES_FILE_ENV, str(cookie_file))
+
+    status = media_parser.bilibili_cookie_status()
+
+    assert status["ok"] is True
+    assert status["missing"] == []
+    assert status["cookie_count"] == 3
+
+
+def test_bilibili_cookie_status_reports_missing_keys(monkeypatch, tmp_path):
+    cookie_file = tmp_path / "bilibili.cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tsecret\n", encoding="utf-8")
+    monkeypatch.setenv(media_parser.YTDLP_COOKIES_FILE_ENV, str(cookie_file))
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
+
+    status = media_parser.bilibili_cookie_status()
+
+    assert status["ok"] is False
+    assert "DedeUserID" in status["missing"]

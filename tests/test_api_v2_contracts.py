@@ -328,6 +328,46 @@ def test_v2_raw_library_lists_saved_raw_markdown_files():
     assert match["source"]
 
 
+def test_v2_library_file_reads_and_updates_raw_markdown():
+    client = TestClient(create_app())
+    create_response = client.post(
+        "/api/v2/collect/raw-file",
+        json={
+            "material_type": "text",
+            "title": "Editable Raw Fixture",
+            "note": "initial note",
+            "markdown": "# Editable Raw Fixture\n\nEditable raw body.",
+            "source": "editable-raw-source",
+        },
+    )
+    assert create_response.status_code == 200
+    created = create_response.json()["data"]["item"]
+    windows_path = created["markdown_path"].replace("/", "\\")
+
+    read_response = client.get("/api/v2/libraries/raw/file", params={"markdown_path": windows_path})
+
+    assert read_response.status_code == 200
+    read_payload = read_response.json()["data"]
+    assert read_payload["item"]["markdown_path"] == created["markdown_path"]
+    assert "Editable raw body." in read_payload["markdown"]
+
+    update_response = client.post(
+        "/api/v2/libraries/raw/file",
+        params={"markdown_path": windows_path},
+        json={"title": "Edited Raw Fixture", "note": "edited note", "markdown": "# Old Title\n\nEdited raw body."},
+    )
+
+    assert update_response.status_code == 200
+    update_payload = update_response.json()["data"]
+    assert update_payload["ok"] is True
+    assert update_payload["item"]["title"] == "Edited Raw Fixture"
+    assert update_payload["item"]["note"] == "edited note"
+    text = (storage.ROOT / created["markdown_path"]).read_text(encoding="utf-8")
+    assert "# Edited Raw Fixture" in text
+    assert "- 人工备注：edited note" in text
+    assert "Edited raw body." in text
+
+
 def test_v2_collect_raw_file_saves_markdown_and_manual_note():
     client = TestClient(create_app())
 
@@ -424,6 +464,32 @@ def test_v2_focus_library_lists_files_outside_repo_root(monkeypatch, tmp_path):
     match = next(item for item in items if item["title"] == "External Focus Fixture")
     assert match["library"] == "focus"
     assert match["markdown_path"].endswith("knowledge\\2026-06-05\\external_focus_fixture.md")
+
+    read_response = client.get(
+        "/api/v2/libraries/focus/file",
+        params={"markdown_path": match["markdown_path"]},
+    )
+
+    assert read_response.status_code == 200
+    payload = read_response.json()["data"]
+    assert payload["item"]["title"] == "External Focus Fixture"
+    assert "Focus body." in payload["markdown"]
+
+    save_response = client.post(
+        "/api/v2/libraries/focus/file",
+        params={"markdown_path": match["markdown_path"]},
+        json={
+            "title": "External Focus Fixture Edited",
+            "note": "edited note",
+            "markdown": "# External Focus Fixture\n\nEdited focus body.",
+        },
+    )
+
+    assert save_response.status_code == 200
+    save_payload = save_response.json()["data"]
+    assert save_payload["ok"] is True
+    assert save_payload["item"]["title"] == "External Focus Fixture Edited"
+    assert "Edited focus body." in markdown_path.read_text(encoding="utf-8")
 
 
 def test_v2_learn_refines_then_saves_focus_markdown_from_raw_library(monkeypatch):
@@ -610,6 +676,10 @@ def test_v2_mine_interprets_raw_library_queue_and_saves_perspective_file(monkeyp
     assert "文字组织逻辑" in markdown
     assert raw_item["markdown_path"] in markdown
     assert "raw material for mining" not in markdown
+    assert "## 视角设定" not in markdown
+    assert "## RTFC 解读规范" not in markdown
+    assert "## 固定五段式结构" not in markdown
+    assert "## 旧版兼容字段" not in markdown
 
     save_response = client.post(
         "/api/v2/mine/perspective-file",
@@ -823,6 +893,82 @@ def test_v2_collect_raw_markdown_extracts_uploaded_documents():
     assert item["material_type"] == "document"
     assert path.exists()
     assert "document raw text" in path.read_text(encoding="utf-8")
+
+
+def test_v2_collect_readable_document_uses_ai_vision_for_pdf_pages(monkeypatch):
+    calls: dict[str, object] = {}
+
+    def fake_extract_text(path, visual_recognizer=None, prefer_visual=False):
+        calls["path"] = path
+        calls["prefer_visual"] = prefer_visual
+        calls["visual_text"] = visual_recognizer([path]) if visual_recognizer else ""
+        return "pdf image text from api vision"
+
+    monkeypatch.setattr(api_v2.document_parser, "extract_text", fake_extract_text)
+    monkeypatch.setattr(api_v2.deepseek_client, "recognize_screenshots_with_ai", lambda paths, setting=None: "api vision text")
+    monkeypatch.setattr(
+        api_v2,
+        "_polish_raw_material",
+        lambda material_type, body, title: {"markdown": body, "title": title, "response": {"status": "skipped"}},
+    )
+    client = TestClient(create_app())
+    upload = client.post(
+        "/api/files",
+        files={"files": ("scan.pdf", b"%PDF-1.4\nfake", "application/pdf")},
+    )
+    file_id = upload.json()["items"][0]["id"]
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={
+            "material_type": "document",
+            "parser_mode": "ai_vision",
+            "items": [{"id": file_id, "title": "scan.pdf"}],
+        },
+    )
+
+    payload = response.json()["data"]
+    assert response.status_code == 200
+    assert payload["ok"] is True, payload
+    assert calls["prefer_visual"] is True
+    assert calls["visual_text"] == "api vision text"
+    assert "pdf image text from api vision" in payload["markdown"]
+
+
+def test_v2_collect_document_uses_resolved_storage_path(monkeypatch, tmp_path):
+    outside_documents = tmp_path / "external-documents"
+    monkeypatch.setattr(storage, "DOCUMENT_DIR", outside_documents)
+    storage.init_storage()
+    seen: dict[str, object] = {}
+
+    def fake_extract_text(path, visual_recognizer=None, prefer_visual=False):
+        seen["path"] = path
+        return "external storage document text"
+
+    monkeypatch.setattr(api_v2.document_parser, "extract_text", fake_extract_text)
+    monkeypatch.setattr(
+        api_v2,
+        "_polish_raw_material",
+        lambda material_type, body, title: {"markdown": body, "title": title, "response": {"status": "skipped"}},
+    )
+    client = TestClient(create_app())
+    upload = client.post(
+        "/api/files",
+        files={"files": ("external.txt", b"external raw text", "text/plain")},
+    )
+    item = upload.json()["items"][0]
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={"material_type": "document", "items": [{"id": item["id"], "title": "external.txt"}]},
+    )
+
+    payload = response.json()["data"]
+    assert response.status_code == 200
+    assert payload["ok"] is True, payload
+    assert seen["path"].exists()
+    assert str(seen["path"]).startswith(str(outside_documents))
+    assert "external storage document text" in payload["markdown"]
 
 
 def test_v2_collect_raw_markdown_transcribes_uploaded_subtitle_media():

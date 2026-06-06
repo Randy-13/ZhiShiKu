@@ -13,7 +13,9 @@ export function LearnWorkspace({
   knowledgeDraft,
   isRunning,
   rightRail,
+  addToQueueDisabledReason,
   onSelectMaterial,
+  onAddSelectedOriginalsToQueue,
   onGenerateKnowledge,
   onUpdateKnowledgeDraft,
   onCommitKnowledgeDraft,
@@ -24,7 +26,9 @@ export function LearnWorkspace({
   knowledgeDraft?: KnowledgeDraft;
   isRunning: boolean;
   rightRail: ReactNode;
+  addToQueueDisabledReason: string;
   onSelectMaterial: (id: string) => void;
+  onAddSelectedOriginalsToQueue: () => void;
   onGenerateKnowledge: (ids: string[]) => void;
   onUpdateKnowledgeDraft: (draft: KnowledgeDraft) => void;
   onCommitKnowledgeDraft: () => void;
@@ -44,15 +48,27 @@ export function LearnWorkspace({
           eyebrow={t("common.primary")}
           title={t("learn.queue")}
           body={t("learn.body")}
-          action={isRunning ? t("learn.running") : t("learn.primary")}
+          action={isRunning ? t("learn.running") : t("learn.primaryFocus")}
           disabled={!selectedIds.length || isRunning}
           disabledReason={t("learn.needSelect")}
           onAction={() => onGenerateKnowledge(selectedIds)}
         >
+          <div className="panel-heading-row">
+            <div>
+              <span>{t("learn.selectedCount")} {selectedIds.length} / {queue.length}</span>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={Boolean(addToQueueDisabledReason) || isRunning}
+              onClick={onAddSelectedOriginalsToQueue}
+            >
+              {t("learn.addToQueue")}
+            </button>
+          </div>
+          {addToQueueDisabledReason ? <p className="disabled-reason">{addToQueueDisabledReason}</p> : null}
           <div className="queue-toolbar">
-            <span>
-              {t("learn.selectedCount")} {selectedIds.length} / {queue.length}
-            </span>
+            <span>{t("learn.next")}</span>
             <div className="action-row">
               <button className="secondary-button" type="button" disabled={!queue.length} onClick={() => setCheckedIds(queue.map((item) => item.id))}>
                 {t("common.selectAll")}
@@ -87,9 +103,9 @@ export function LearnWorkspace({
 
         <section className="content-panel">
           <div className="section-heading">
-            <h2>{t("learn.preview")}</h2>
+            <h2>{t("learn.previewFocus")}</h2>
             <button className="secondary-button" type="button" disabled={!knowledgeDraft || isRunning} onClick={onCommitKnowledgeDraft}>
-              {t("learn.commit")}
+              {t("learn.commitFocus")}
             </button>
           </div>
           {knowledgeDraft ? (

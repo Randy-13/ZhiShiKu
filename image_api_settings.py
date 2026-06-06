@@ -22,6 +22,7 @@ class ImageApiSetting:
     api_key: str
     size: str
     quality: str
+    response_format: str
     timeout: float
     created_at: str
     updated_at: str
@@ -65,6 +66,25 @@ def mask_key(api_key: str) -> str:
 
 def _default_data() -> dict[str, Any]:
     return {"active_id": None, "settings": []}
+
+
+def normalize_size(value: Any) -> str:
+    size = str(value or "").strip()
+    size = (
+        size.replace("\u00d7", "x")
+        .replace("\uff58", "x")
+        .replace("\uff38", "x")
+        .replace("*", "x")
+        .replace(" ", "")
+    )
+    if not size or size.lower() in {"auto", "default", "none"}:
+        return "1024x1024"
+    return size
+
+
+def normalize_quality(value: Any) -> str:
+    quality = str(value or "").strip()
+    return quality or "auto"
 
 
 def load_data() -> dict[str, Any]:
@@ -142,8 +162,9 @@ def save_setting(payload: dict[str, Any]) -> dict[str, Any]:
             base_url=(payload.get("base_url") or "").strip().rstrip("/"),
             model=(payload.get("model") or "").strip(),
             api_key=api_key,
-            size=(payload.get("size") or "1024x1024").strip(),
-            quality=(payload.get("quality") or "auto").strip(),
+            size=normalize_size(payload.get("size")),
+            quality=normalize_quality(payload.get("quality")),
+            response_format=(payload.get("response_format") or "").strip(),
             timeout=float(payload.get("timeout") or 120),
             created_at=existing.get("created_at") if existing else now,
             updated_at=now,
@@ -193,6 +214,13 @@ def delete_setting(setting_id: str) -> None:
     save_data(data)
 
 
+def image_endpoint(setting: dict[str, Any]) -> str:
+    base_url = str(setting.get("base_url") or "").rstrip("/")
+    if base_url.endswith("/images/generations"):
+        return base_url
+    return base_url + "/images/generations"
+
+
 def diagnose(setting: dict[str, Any] | None = None) -> dict[str, str]:
     try:
         resolved = setting or active_setting()
@@ -204,7 +232,7 @@ def diagnose(setting: dict[str, Any] | None = None) -> dict[str, str]:
         if missing:
             return {"ok": "false", "error": "缺少字段：" + ", ".join(missing)}
         base_url = resolved.get("base_url", "").rstrip("/")
-        endpoint = base_url + ("/images/generations" if base_url.endswith("/v1") else "/images/generations")
+        endpoint = image_endpoint(resolved)
         return {
             "ok": "true",
             "provider": resolved.get("provider", "compatible"),
@@ -212,8 +240,9 @@ def diagnose(setting: dict[str, Any] | None = None) -> dict[str, str]:
             "model": resolved.get("model", ""),
             "base_url": base_url,
             "endpoint": endpoint,
-            "size": resolved.get("size", ""),
-            "quality": resolved.get("quality", ""),
+            "size": normalize_size(resolved.get("size")),
+            "quality": normalize_quality(resolved.get("quality")),
+            "response_format": resolved.get("response_format", ""),
             "message": "配置字段完整。实际生成时会调用 OpenAI 兼容的 /images/generations 接口。",
         }
     except Exception as exc:

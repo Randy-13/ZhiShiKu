@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import api_settings
+import deepseek_client
 import image_api_settings
 import storage
 
@@ -29,6 +31,7 @@ WECHAT_CONFIG_FILE = Path(os.path.expanduser("~/.wechat-publisher/config.json"))
 WECHAT_TOKEN_CACHE_FILE = Path(os.path.expanduser("~/.wechat-publisher/token_cache.json"))
 WECHAT_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 WECHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_PROMPT_RETRY_MAX_CHARS = 1200
 EMPHASIS_PATTERNS = (
     "关键变化",
     "关键变量",
@@ -41,6 +44,33 @@ EMPHASIS_PATTERNS = (
     "数据飞轮",
     "共识开始前移",
 )
+
+DEFAULT_WRITING_STRATEGY = """微信公众号文章默认写文策略
+- 面向普通读者，用一个清晰的问题开篇，不写成研报摘要。
+- 选题必须来自已导入的原文库、重点库或视角库文件，核心判断要能回到来源材料。
+- 结构遵循：问题提出 -> 关键事实 -> 变量拆解 -> 影响判断 -> 读者行动建议。
+- 保持有观点、有节奏、短句优先，避免堆概念、堆引用、堆行业黑话。
+- 标题要具体、有冲突或变化感，但不能夸大材料没有支撑的结论。
+- 正文保留 Markdown，第一张图为封面图占位：![封面图](cover.png)。
+"""
+
+DEFAULT_DESIGN_STRATEGY = """微信公众号文章默认美编策略
+- 生成适合公众号粘贴发布的 HTML，层级清楚，阅读节奏舒展。
+- 保留标题、摘要、正文小标题、重点句和图片，不增加无来源的新内容。
+- 重点句可以适度强调，但不要把全文做成花哨海报。
+- 图片使用项目内生成的本地路径，由发布预检再转换为公众号可用资源。
+- 整体风格偏科技/财经：克制、清晰、专业，适合长文阅读。
+"""
+
+PM_RESEARCH_DESIGN_STRATEGY = """PM 研究型美编策略
+- 本策略只参考 pm-search、pm-fulltext、pm-paper-detail、pm-export 等 PM skills 的资料组织方式，不把它们当作 HTML formatter。
+- 页面目标是把文章整理成可复盘的研究笔记：结论先行、证据链清晰、来源可追踪、适合反复查阅。
+- 结构建议：核心结论 -> 关键证据 -> 对比表格/变量拆解 -> 风险与反例 -> 后续检索问题 -> 来源附录。
+- 版式保持工作台风格：信息密度高但分区清楚，使用小标题、编号列表、引用块、表格和少量强调句，不做营销海报式装饰。
+- 对来自 PM 检索或论文详情的内容，保留题名、作者/机构、时间、链接或本地引用路径；没有来源的判断必须标成推断。
+- 图片只作为解释结构和关系的辅助，不替代证据；不要让配图压过结论和来源。
+- 导出时优先保证 Markdown/HTML 可复制、可二次编辑、可追溯，而不是追求视觉复杂度。
+"""
 
 
 def wechat_config_file() -> Path:
@@ -108,7 +138,13 @@ def projects_dir() -> Path:
     return WRITER_DIR / "projects"
 
 
-def create_project(name: str, project_type: str = "article", description: str = "") -> dict[str, Any]:
+def create_project(
+    name: str,
+    project_type: str = "article",
+    description: str = "",
+    writing_strategy: str = "",
+    design_strategy: str = "",
+) -> dict[str, Any]:
     clean_type = project_type if project_type in {"article", "image_text", "short_video", "long_video"} else "article"
     title = (name or "").strip() or "未命名创作项目"
     project_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{safe_slug(title, 'project')}-{uuid4().hex[:6]}"
@@ -120,6 +156,8 @@ def create_project(name: str, project_type: str = "article", description: str = 
         "name": title,
         "type": clean_type,
         "description": description.strip(),
+        "writing_strategy": (writing_strategy or DEFAULT_WRITING_STRATEGY).strip(),
+        "design_strategy": (design_strategy or DEFAULT_DESIGN_STRATEGY).strip(),
         "status": "active",
         "workspace": _relative(workspace),
         "created_at": now,
@@ -355,6 +393,21 @@ def utf8_len(value: str | None) -> int:
     return len((value or "").encode("utf-8"))
 
 
+def truncate_utf8(value: str | None, max_bytes: int) -> str:
+    text = value or ""
+    if utf8_len(text) <= max_bytes:
+        return text
+    result: list[str] = []
+    used = 0
+    for char in text:
+        char_len = len(char.encode("utf-8"))
+        if used + char_len > max_bytes:
+            break
+        result.append(char)
+        used += char_len
+    return "".join(result).rstrip()
+
+
 def redact_appid(appid: str) -> str:
     appid = appid or ""
     if len(appid) <= 8:
@@ -570,6 +623,7 @@ def publish_draft_builtin(
     digest: str | None = None,
     cover_path: str | None = None,
 ) -> dict[str, Any]:
+    digest = truncate_utf8(digest, 120)
     invalidated_token = invalidate_stale_wechat_token_cache()
     html_path = workspace / "formatted_wechat.html"
     if not html_path.exists():
@@ -632,6 +686,9 @@ def publish_preflight(
     digest: str | None = None,
     cover_path: str | None = None,
 ) -> dict[str, Any]:
+    original_digest = digest or ""
+    safe_digest = truncate_utf8(original_digest, 120)
+    digest_was_truncated = safe_digest != original_digest
     html_path = workspace / "formatted_wechat.html"
     if not html_path.exists():
         html_path = workspace / "formatted.html"
@@ -706,8 +763,14 @@ def publish_preflight(
         {
             "key": "digest",
             "label": "摘要长度",
-            "ok": utf8_len(digest or "") <= 120,
-            "detail": f"{utf8_len(digest or '')} 字节，publisher 会按 120 字节保护",
+            "ok": True,
+            "detail": (
+                f"{utf8_len(original_digest)} 字节，已自动截断为 {utf8_len(safe_digest)} 字节"
+                if digest_was_truncated
+                else f"{utf8_len(safe_digest)} 字节，符合 120 字节限制"
+            ),
+            "optional": digest_was_truncated,
+            "fixed": digest_was_truncated,
         },
         {
             "key": "content_images",
@@ -732,6 +795,10 @@ def publish_preflight(
         "ok": not blocking,
         "checks": checks,
         "blocking": blocking,
+        "digest": safe_digest,
+        "digest_original_bytes": utf8_len(original_digest),
+        "digest_bytes": utf8_len(safe_digest),
+        "digest_truncated": digest_was_truncated,
         "flow": [
             "1. 获取 access_token：GET /cgi-bin/token?grant_type=client_credential",
             "2. 上传封面永久素材：POST /cgi-bin/material/add_material?type=image，得到 thumb_media_id",
@@ -813,7 +880,63 @@ def _image_endpoint(setting: dict[str, Any]) -> str:
     return base + "/images/generations"
 
 
+def _image_payload(setting: dict[str, Any], prompt: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": setting["model"],
+        "prompt": prompt,
+        "n": 1,
+    }
+    size = str(setting.get("size") or "").strip()
+    quality = str(setting.get("quality") or "auto").strip()
+    known_quality_values = {"auto", "standard", "hd", "high", "medium", "low"}
+    size = (
+        size.replace("\u00d7", "x")
+        .replace("\uff58", "x")
+        .replace("\uff38", "x")
+        .replace("*", "x")
+        .replace(" ", "")
+    )
+    if size.lower() in known_quality_values and not quality:
+        quality = size
+        size = "1024x1024"
+    if not size or size.lower() in {"auto", "default", "none"}:
+        size = "1024x1024"
+    payload["size"] = size
+    if quality:
+        payload["quality"] = quality
+    response_format = str(setting.get("response_format") or "").strip()
+    if response_format:
+        payload["response_format"] = response_format
+    return payload
+
+
+def _compact_image_prompt(prompt: str, max_chars: int = IMAGE_PROMPT_RETRY_MAX_CHARS) -> str:
+    text = re.sub(r"\s+", " ", (prompt or "").strip())
+    if len(text) <= max_chars:
+        return text
+    keep = max_chars - 72
+    return (
+        text[:keep].rstrip()
+        + "。画面保持主题明确、元素克制、少量简体中文文字，适合微信公众号配图。"
+    )
+
+
+def _image_request_summary(endpoint: str, payload: dict[str, Any], prompt: str) -> dict[str, Any]:
+    return {
+        "endpoint": endpoint,
+        "model": payload.get("model"),
+        "size": payload.get("size"),
+        "quality": payload.get("quality", ""),
+        "response_format": payload.get("response_format", ""),
+        "prompt_chars": len(prompt or ""),
+    }
+
+
 def _download_image(url: str, output_path: Path, timeout: float) -> None:
+    if url.startswith("data:image/"):
+        _header, _sep, data = url.partition(",")
+        output_path.write_bytes(base64.b64decode(data))
+        return
     with urllib.request.urlopen(url, timeout=timeout) as response:
         output_path.write_bytes(response.read())
 
@@ -824,34 +947,57 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
     if not prompt:
         raise ValueError("图片提示词不能为空")
 
-    payload = {
-        "model": resolved["model"],
-        "prompt": prompt,
-        "n": 1,
-        "size": resolved.get("size") or "1024x1024",
-    }
-    quality = (resolved.get("quality") or "auto").strip()
-    if quality:
-        payload["quality"] = quality
-
-    request = urllib.request.Request(
-        _image_endpoint(resolved),
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {resolved['api_key']}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    endpoint = _image_endpoint(resolved)
+    payload = _image_payload(resolved, prompt)
     timeout = float(resolved.get("timeout") or 120)
-    try:
+
+    def request_once(current_payload: dict[str, Any]) -> dict[str, Any]:
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(current_payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {resolved['api_key']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"图片 API 返回错误 {exc.code}: {detail}") from exc
+            return json.loads(response.read().decode("utf-8", "replace"))
+
+    retry_used = False
+    try:
+        try:
+            data = request_once(payload)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            should_retry = 500 <= exc.code < 600 and len(prompt) > IMAGE_PROMPT_RETRY_MAX_CHARS
+            if not should_retry:
+                summary = _image_request_summary(endpoint, payload, prompt)
+                raise RuntimeError(
+                    f"图片 API 返回错误 {exc.code}: {detail}; request={json.dumps(summary, ensure_ascii=False)}"
+                ) from exc
+            retry_prompt = _compact_image_prompt(prompt)
+            retry_payload = _image_payload(resolved, retry_prompt)
+            try:
+                data = request_once(retry_payload)
+                prompt = retry_prompt
+                payload = retry_payload
+                retry_used = True
+            except urllib.error.HTTPError as retry_exc:
+                retry_detail = retry_exc.read().decode("utf-8", "replace")
+                summary = _image_request_summary(endpoint, retry_payload, retry_prompt)
+                raise RuntimeError(
+                    "图片 API 返回错误 "
+                    f"{retry_exc.code}: {retry_detail}; 已因上游 {exc.code} 自动改用精简提示词重试；"
+                    f"request={json.dumps(summary, ensure_ascii=False)}"
+                ) from retry_exc
+    except RuntimeError:
+        raise
     except Exception as exc:
-        raise RuntimeError(f"图片 API 调用失败：{exc}") from exc
+        summary = _image_request_summary(endpoint, payload, prompt)
+        raise RuntimeError(
+            f"图片 API 调用失败：{exc}; request={json.dumps(summary, ensure_ascii=False)}"
+        ) from exc
 
     first = (data.get("data") or [{}])[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -867,8 +1013,8 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
         "absolute_path": str(output_path),
         "prompt": prompt,
         "model": resolved.get("model", ""),
+        "retry_used": retry_used,
     }
-
 
 def generate_writer_images(
     workspace: Path,
@@ -876,25 +1022,59 @@ def generate_writer_images(
     content_prompts: list[str] | None = None,
 ) -> dict[str, Any]:
     generated = []
-    metadata: dict[str, Any] = {"cover": None, "content_images": []}
+    errors = []
+    metadata: dict[str, Any] = {"cover": None, "content_images": [], "errors": errors}
+    def existing_item(path: Path, prompt: str) -> dict[str, Any] | None:
+        if not path.exists():
+            return None
+        return {
+            "path": str(path.relative_to(storage.ROOT)),
+            "absolute_path": str(path),
+            "prompt": prompt,
+            "reused_existing": True,
+        }
+
     if cover_prompt:
-        cover_item = generate_image(cover_prompt, workspace / "cover.png")
-        generated.append(cover_item)
-        metadata["cover"] = {"filename": "cover.png", "prompt": cover_prompt, "path": cover_item["path"]}
+        cover_path = workspace / "cover.png"
+        cover_item = existing_item(cover_path, cover_prompt)
+        if cover_item is None:
+            try:
+                cover_item = generate_image(cover_prompt, cover_path)
+            except Exception as exc:
+                errors.append({"kind": "cover", "message": f"生成封面图失败：{exc}"})
+                cover_item = existing_item(cover_path, cover_prompt)
+        if cover_item:
+            generated.append(cover_item)
+            metadata["cover"] = {"filename": "cover.png", "prompt": cover_prompt, "path": cover_item["path"]}
     for index, prompt in enumerate(content_prompts or [], start=1):
         if prompt.strip():
             filename = f"content-{index}.png"
-            item = generate_image(prompt, workspace / filename)
-            generated.append(item)
-            metadata["content_images"].append(
-                {"filename": filename, "prompt": prompt, "path": item["path"], "index": index}
-            )
-    if metadata["cover"] or metadata["content_images"]:
+            image_path = workspace / filename
+            item = existing_item(image_path, prompt)
+            if item is None:
+                try:
+                    item = generate_image(prompt, image_path)
+                except Exception as exc:
+                    errors.append({"kind": "content", "index": index, "message": f"生成正文配图 {index} 失败：{exc}"})
+                    item = existing_item(image_path, prompt)
+            if item:
+                generated.append(item)
+                metadata["content_images"].append(
+                    {"filename": filename, "prompt": prompt, "path": item["path"], "index": index}
+                )
+    if metadata["cover"] or metadata["content_images"] or errors:
         (workspace / "image_metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    return {"items": generated}
+    return {
+        "items": generated,
+        "cover": metadata["cover"],
+        "content_images": metadata["content_images"],
+        "errors": errors,
+        "partial": bool(errors),
+        "ok": not errors,
+    }
 
 
 def content_images(workspace: Path) -> list[Path]:
@@ -1121,7 +1301,13 @@ def fallback_markdown_to_html(markdown_text: str, title: str = "") -> str:
 """
 
 
-def format_article(workspace: Path, markdown: str | None = None, theme: str = "tech") -> dict[str, Any]:
+def format_article(
+    workspace: Path,
+    markdown: str | None = None,
+    theme: str = "tech",
+    design_strategy: str = "",
+    use_ai: bool = True,
+) -> dict[str, Any]:
     if markdown is not None:
         article_path = write_article(workspace, ensure_content_images_in_markdown(workspace, markdown))
     else:
@@ -1133,10 +1319,46 @@ def format_article(workspace: Path, markdown: str | None = None, theme: str = "t
             )
     if not article_path.exists():
         raise FileNotFoundError("article.md 不存在，请先生成文章")
-    if not FORMATTER_SCRIPT.exists():
-        raise FileNotFoundError(f"找不到 formatter 脚本：{FORMATTER_SCRIPT}")
 
     html_path = workspace / "formatted.html"
+    ai_error = ""
+    if use_ai:
+        try:
+            html_text = deepseek_client.design_wechat_article_html(
+                article_path.read_text(encoding="utf-8"),
+                design_strategy=design_strategy or DEFAULT_DESIGN_STRATEGY,
+                setting=api_settings.active_setting(),
+            )
+            html_text = add_publish_emphasis(html_text)
+            html_path.write_text(html_text, encoding="utf-8")
+            return {
+                "path": str(html_path.relative_to(storage.ROOT)),
+                "absolute_path": str(html_path),
+                "html": html_text,
+                "stdout": "generated by API design formatter",
+                "stderr": "",
+                "fallback": False,
+                "ai_formatted": True,
+                "message": "已调用 API 按美编策略生成公众号 HTML。",
+            }
+        except Exception as exc:
+            ai_error = str(exc)
+
+    if not FORMATTER_SCRIPT.exists():
+        html_text = fallback_markdown_to_html(article_path.read_text(encoding="utf-8"))
+        html_text = add_publish_emphasis(html_text)
+        html_path.write_text(html_text, encoding="utf-8")
+        return {
+            "path": str(html_path.relative_to(storage.ROOT)),
+            "absolute_path": str(html_path),
+            "html": html_text,
+            "stdout": "",
+            "stderr": f"API design formatter failed: {ai_error}; formatter script not found: {FORMATTER_SCRIPT}" if ai_error else f"formatter script not found: {FORMATTER_SCRIPT}",
+            "fallback": True,
+            "ai_formatted": False,
+            "message": "API 美编不可用，已使用内置基础 HTML 兜底。" if ai_error else "未找到外部 formatter 脚本，已使用内置美编生成 HTML。",
+        }
+
     try:
         __import__("markdown")
     except ImportError:
@@ -1150,8 +1372,9 @@ def format_article(workspace: Path, markdown: str | None = None, theme: str = "t
             "absolute_path": str(html_path),
             "html": html_text,
             "stdout": "",
-            "stderr": "No module named 'markdown'",
+            "stderr": f"API design formatter failed: {ai_error}; No module named 'markdown'" if ai_error else "No module named 'markdown'",
             "fallback": True,
+            "ai_formatted": False,
             "message": "formatter missing markdown dependency; generated HTML with built-in fallback formatter.",
         }
     completed = _run_python(
@@ -1175,7 +1398,8 @@ def format_article(workspace: Path, markdown: str | None = None, theme: str = "t
         "absolute_path": str(html_path),
         "html": html,
         "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "stderr": f"API design formatter failed: {ai_error}; {completed.stderr}".strip("; ") if ai_error else completed.stderr,
+        "ai_formatted": False,
     }
 
 
@@ -1186,6 +1410,7 @@ def publish_draft(
     digest: str | None = None,
     cover_path: str | None = None,
 ) -> dict[str, Any]:
+    digest = truncate_utf8(digest, 120)
     if not PUBLISHER_SCRIPT.exists():
         return publish_draft_builtin(workspace, title, author=author, digest=digest, cover_path=cover_path)
     invalidated_token = invalidate_stale_wechat_token_cache()

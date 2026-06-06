@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +22,21 @@ SUPPORTED_PLATFORMS = {"bilibili", "douyin", "wechat_channels", "local"}
 SUBTITLE_SUFFIXES = {".srt", ".vtt", ".ass"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".aac", ".flac"}
+YTDLP_COOKIES_FILE_ENV = "FIGURELEARNING_YTDLP_COOKIES_FILE"
+YTDLP_COOKIES_FROM_BROWSER_ENV = "FIGURELEARNING_YTDLP_COOKIES_FROM_BROWSER"
+REQUIRED_BILIBILI_COOKIE_NAMES = ("SESSDATA", "DedeUserID", "bili_jct")
+
+
+@dataclass(frozen=True)
+class YtDlpAuthState:
+    mode: str
+    value: str = ""
+    exists: bool = False
+    source: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.value)
 
 
 def ytdlp_command() -> list[str] | None:
@@ -47,23 +63,178 @@ def ytdlp_command() -> list[str] | None:
     return None
 
 
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def ytdlp_cookie_file_candidates() -> list[Path]:
+    candidates = [
+        storage.ROOT / "auth" / "bilibili.cookies.txt",
+        storage.STORAGE_ROOT / "auth" / "bilibili.cookies.txt",
+        Path.cwd() / "auth" / "bilibili.cookies.txt",
+    ]
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve() if _path_exists(candidate.parent) else candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
 def ytdlp_cookie_source() -> str:
-    cookies_file = os.getenv("FIGURELEARNING_YTDLP_COOKIES_FILE", "").strip()
-    if not cookies_file:
-        default_cookies = storage.ROOT / "auth" / "bilibili.cookies.txt"
-        if default_cookies.exists():
-            cookies_file = str(default_cookies)
-    return cookies_file
+    cookies_file = os.getenv(YTDLP_COOKIES_FILE_ENV, "").strip()
+    if cookies_file:
+        return cookies_file
+    for candidate in ytdlp_cookie_file_candidates():
+        if _path_exists(candidate):
+            return str(candidate)
+    return ""
+
+
+def ytdlp_auth_state() -> YtDlpAuthState:
+    explicit_file = os.getenv(YTDLP_COOKIES_FILE_ENV, "").strip()
+    if explicit_file:
+        return YtDlpAuthState("file", explicit_file, _path_exists(Path(explicit_file)), YTDLP_COOKIES_FILE_ENV)
+    cookies_browser = os.getenv(YTDLP_COOKIES_FROM_BROWSER_ENV, "").strip()
+    if cookies_browser:
+        return YtDlpAuthState("browser", cookies_browser, True, YTDLP_COOKIES_FROM_BROWSER_ENV)
+    default_file = ytdlp_cookie_source()
+    if default_file:
+        return YtDlpAuthState("file", default_file, _path_exists(Path(default_file)), "auth/bilibili.cookies.txt")
+    return YtDlpAuthState("none")
 
 
 def ytdlp_auth_args(cookies_file: str | None = None) -> list[str]:
-    cookies_file = cookies_file or ytdlp_cookie_source()
     if cookies_file:
         return ["--cookies", cookies_file]
-    cookies_browser = os.getenv("FIGURELEARNING_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+    explicit_file = os.getenv(YTDLP_COOKIES_FILE_ENV, "").strip()
+    if explicit_file:
+        return ["--cookies", explicit_file]
+    cookies_browser = os.getenv(YTDLP_COOKIES_FROM_BROWSER_ENV, "").strip()
     if cookies_browser:
         return ["--cookies-from-browser", cookies_browser]
+    cookies_file = ytdlp_cookie_source()
+    if cookies_file:
+        return ["--cookies", cookies_file]
     return []
+
+
+def parse_netscape_cookies(path: Path) -> list[dict[str, object]]:
+    cookies: list[dict[str, object]] = []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        expiry = 0
+        try:
+            expiry = int(float(parts[4] or 0))
+        except ValueError:
+            expiry = 0
+        cookies.append(
+            {
+                "domain": parts[0],
+                "path": parts[2],
+                "secure": parts[3].upper() == "TRUE",
+                "expires": expiry,
+                "name": parts[5],
+            }
+        )
+    return cookies
+
+
+def bilibili_cookie_status() -> dict[str, object]:
+    auth_state = ytdlp_auth_state()
+    path = Path(auth_state.value) if auth_state.mode == "file" and auth_state.value else None
+    result: dict[str, object] = {
+        "mode": auth_state.mode,
+        "source": auth_state.source,
+        "path": str(path) if path else "",
+        "exists": bool(path and _path_exists(path)),
+        "ok": False,
+        "message": "",
+        "missing": list(REQUIRED_BILIBILI_COOKIE_NAMES),
+        "cookie_count": 0,
+        "last_modified": "",
+    }
+    if auth_state.mode == "browser":
+        result.update(
+            {
+                "message": f"Configured to read cookies from browser source: {auth_state.value}. Export to a file for stable Bilibili subtitle extraction.",
+                "missing": [],
+            }
+        )
+        return result
+    if not path:
+        result["message"] = "Bilibili cookies are not configured."
+        return result
+    if not _path_exists(path):
+        result["message"] = f"Bilibili cookie file was not found: {path}"
+        return result
+
+    stat = path.stat()
+    cookies = parse_netscape_cookies(path)
+    now = int(time.time())
+    active_names = {
+        str(cookie["name"])
+        for cookie in cookies
+        if "bilibili.com" in str(cookie.get("domain") or "")
+        and (int(cookie.get("expires") or 0) == 0 or int(cookie.get("expires") or 0) > now)
+    }
+    missing = [name for name in REQUIRED_BILIBILI_COOKIE_NAMES if name not in active_names]
+    result.update(
+        {
+            "cookie_count": len(cookies),
+            "missing": missing,
+            "last_modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "ok": not missing,
+        }
+    )
+    if missing:
+        result["message"] = f"Bilibili cookie file is missing required login keys: {', '.join(missing)}."
+    else:
+        result["message"] = "Bilibili cookie file looks valid. Subtitle extraction can use this file."
+    return result
+
+
+def launch_bilibili_cookie_login(url: str | None = None) -> dict[str, object]:
+    script = storage.ROOT / "export_bilibili_cookies_with_edge.bat"
+    if not script.exists():
+        raise FileNotFoundError(f"Cookie export script was not found: {script}")
+    env = os.environ.copy()
+    if url:
+        env["BILIBILI_COOKIE_EXPORT_URL"] = url
+    creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform.startswith("win") else 0
+    command = ["cmd.exe", "/c", str(script)] if sys.platform.startswith("win") else [str(script)]
+    subprocess.Popen(command, cwd=str(storage.ROOT), env=env, creationflags=creationflags)
+    return {"ok": True, "message": "Opened Edge login window for Bilibili cookie export.", "script": str(script)}
+
+
+def ytdlp_auth_attempts(cookies_file: str | None = None) -> list[tuple[YtDlpAuthState, list[str]]]:
+    attempts: list[tuple[YtDlpAuthState, list[str]]] = []
+    explicit_file = os.getenv(YTDLP_COOKIES_FILE_ENV, "").strip()
+    cookies_browser = os.getenv(YTDLP_COOKIES_FROM_BROWSER_ENV, "").strip()
+    if cookies_file:
+        attempts.append((YtDlpAuthState("file", cookies_file, _path_exists(Path(cookies_file)), "temporary cookies"), ["--cookies", cookies_file]))
+    elif explicit_file:
+        attempts.append((YtDlpAuthState("file", explicit_file, _path_exists(Path(explicit_file)), YTDLP_COOKIES_FILE_ENV), ["--cookies", explicit_file]))
+    if cookies_browser:
+        attempts.append((YtDlpAuthState("browser", cookies_browser, True, YTDLP_COOKIES_FROM_BROWSER_ENV), ["--cookies-from-browser", cookies_browser]))
+    default_file = ytdlp_cookie_source()
+    if default_file and default_file not in {cookies_file, explicit_file}:
+        attempts.append((YtDlpAuthState("file", default_file, _path_exists(Path(default_file)), "auth/bilibili.cookies.txt"), ["--cookies", default_file]))
+    if not attempts:
+        attempts.append((YtDlpAuthState("none"), []))
+    return attempts
 
 
 
@@ -86,13 +257,22 @@ def ffmpeg_command() -> str | None:
 def dependency_status() -> dict[str, object]:
     ytdlp = ytdlp_command()
     ffmpeg = ffmpeg_command()
+    auth_state = ytdlp_auth_state()
+    if auth_state.mode == "file" and auth_state.exists:
+        auth_detail = f"已配置登录 Cookie：{auth_state.value}"
+    elif auth_state.mode == "file":
+        auth_detail = f"已配置登录 Cookie，但文件不存在：{auth_state.value}"
+    elif auth_state.mode == "browser":
+        auth_detail = f"已配置从浏览器读取 Cookie：{auth_state.value}"
+    else:
+        auth_detail = "未配置登录 Cookie"
     return {
         "bilibili_subtitle": {
             "label": "B\u7ad9\u5b57\u5e55\u83b7\u53d6",
             "available": ytdlp is not None,
             "purpose": "\u7528\u4e8e\u89e3\u6790 Bilibili \u94fe\u63a5\uff0c\u8bfb\u53d6\u5b98\u65b9\u5b57\u5e55\u6216\u81ea\u52a8\u5b57\u5e55\u3002",
             "detail": "\u5df2\u627e\u5230\u89c6\u9891\u4e0b\u8f7d\u5de5\u5177\u3002" if ytdlp else "\u672a\u627e\u5230\u89c6\u9891\u4e0b\u8f7d\u5de5\u5177\uff0c\u8bf7\u5b89\u88c5 yt-dlp\u3002",
-            "auth": f"\u5df2\u914d\u7f6e\u767b\u5f55 Cookie\uff1a{ytdlp_cookie_source()}" if ytdlp_cookie_source() else "\u672a\u914d\u7f6e\u767b\u5f55 Cookie",
+            "auth": auth_detail,
         },
         "local_audio_extract": {
             "label": "\u672c\u5730\u89c6\u9891\u8f6c\u97f3\u9891",
@@ -298,6 +478,7 @@ def transcript_from_bilibili(item: dict) -> str:
         raise RuntimeError("yt-dlp is not installed. Install yt-dlp or upload a subtitle/local media file.")
     url = str(item.get("source_url") or item.get("canonical_url") or "")
     stderr = ""
+    auth_state = ytdlp_auth_state()
     with tempfile.TemporaryDirectory() as temp_dir, temporary_ytdlp_cookies() as cookie_file:
         output = str(Path(temp_dir) / "subtitle.%(ext)s")
         completed = subprocess.run(
@@ -332,7 +513,7 @@ def transcript_from_bilibili(item: dict) -> str:
             if transcript:
                 write_transcript(item, transcript, "platform_subtitle")
                 return transcript
-    raise RuntimeError(explain_bilibili_subtitle_error(stderr))
+    raise RuntimeError(explain_bilibili_subtitle_error(stderr, auth_state))
 
 
 def transcript_from_douyin(item: dict) -> str:
@@ -430,7 +611,7 @@ def download_douyin_audio(item: dict, audio_url: str) -> Path:
     request = Request(audio_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyin.com/"})
     with urlopen(request, timeout=120) as response:
         target.write_bytes(response.read())
-    storage.update_media_source(media_id, file_path=str(target.relative_to(storage.ROOT)), content_type="audio/mp4")
+    storage.update_media_source(media_id, file_path=storage.storage_relative(target), content_type="audio/mp4")
     return target
 
 
@@ -464,13 +645,32 @@ def looks_like_failed_subtitle(raw: str) -> bool:
     return any(marker in stripped[:500] for marker in failure_markers)
 
 
-def explain_bilibili_subtitle_error(stderr: str | None = None) -> str:
+def explain_bilibili_subtitle_error(stderr: str | None = None, auth_state: YtDlpAuthState | None = None) -> str:
     stderr = (stderr or "").strip()
+    auth_state = auth_state or ytdlp_auth_state()
     if "Subtitles are only available when logged in" in stderr:
+        if auth_state.mode == "file" and auth_state.exists:
+            return (
+                "Bilibili says subtitles require valid login cookies, but the configured cookies were not accepted: "
+                f"{auth_state.value}. Refresh this file with tools/browser_state_to_netscape_cookies.py, "
+                "or upload a subtitle/local media file."
+            )
+        if auth_state.mode == "file":
+            return (
+                "Bilibili says subtitles require login cookies, but the configured cookie file was not found: "
+                f"{auth_state.value}. Recreate it with tools/browser_state_to_netscape_cookies.py, "
+                f"or set {YTDLP_COOKIES_FILE_ENV} to an existing Netscape cookies file."
+            )
+        if auth_state.mode == "browser":
+            return (
+                "Bilibili says subtitles require valid login cookies, but yt-dlp could not use the configured browser "
+                f"cookie source: {auth_state.value}. Export fresh cookies with tools/browser_state_to_netscape_cookies.py, "
+                "or upload a subtitle/local media file."
+            )
         return (
-            "No downloadable Bilibili subtitle track was found anonymously. "
-            "Bilibili says subtitles require login cookies. Set FIGURELEARNING_YTDLP_COOKIES_FILE "
-            "or FIGURELEARNING_YTDLP_COOKIES_FROM_BROWSER, or upload a subtitle/local media file."
+            "Bilibili says subtitles require login cookies. Export browser login cookies with "
+            "tools/browser_state_to_netscape_cookies.py to auth/bilibili.cookies.txt, set "
+            f"{YTDLP_COOKIES_FILE_ENV} or {YTDLP_COOKIES_FROM_BROWSER_ENV}, or upload a subtitle/local media file."
         )
     if stderr:
         return f"No Bilibili subtitle was found. yt-dlp said: {stderr[-800:]}"
@@ -508,7 +708,7 @@ def write_transcript(item: dict, transcript: str, kind: str) -> Path:
     path.write_text(to_readable_transcript(transcript), encoding="utf-8")
     storage.update_media_source(
         int(item["id"]),
-        transcript_path=str(path.relative_to(storage.ROOT)),
+        transcript_path=storage.storage_relative(path),
         transcript_kind=kind,
         status="transcribed",
         error_message=None,

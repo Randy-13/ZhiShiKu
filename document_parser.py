@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+from collections.abc import Callable
 
 import ocr_client
 
@@ -37,7 +38,25 @@ def read_docx(path: Path) -> str:
     return "\n".join(blocks).strip()
 
 
-def read_pdf(path: Path) -> str:
+VisionRecognizer = Callable[[list[Path]], str]
+
+
+def _ocr_pdf_image(image_path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> tuple[str, str]:
+    if prefer_visual and visual_recognizer:
+        return visual_recognizer([image_path]).strip(), "ai_vision"
+    try:
+        text = ocr_client.recognize_screenshots([image_path]).strip()
+        if text and "No usable text recognized." not in text:
+            return text, "local_ocr"
+    except Exception:
+        if not visual_recognizer:
+            raise
+    if visual_recognizer:
+        return visual_recognizer([image_path]).strip(), "ai_vision"
+    return text.strip(), "local_ocr"
+
+
+def read_pdf(path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> str:
     try:
         import fitz
     except ImportError as exc:
@@ -58,14 +77,17 @@ def read_pdf(path: Path) -> str:
             image_path = render_dir / f"{path.stem}_{index}.png"
             pixmap.save(image_path)
             ocr_images.append(image_path)
-        if ocr_images:
-            blocks.append(ocr_client.recognize_screenshots(ocr_images))
+        for image_path in ocr_images:
+            page_number = image_path.stem.rsplit("_", 1)[-1]
+            text, mode = _ocr_pdf_image(image_path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
+            if text:
+                blocks.append(f"[PDF Page {page_number} {mode}]\n{text}")
     finally:
         doc.close()
     return "\n\n---\n\n".join(block for block in blocks if block.strip()).strip()
 
 
-def read_pdf_pages(path: Path) -> list[dict]:
+def read_pdf_pages(path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> list[dict]:
     try:
         import fitz
     except ImportError as exc:
@@ -79,11 +101,12 @@ def read_pdf_pages(path: Path) -> list[dict]:
         for index, page in enumerate(doc, start=1):
             text = page.get_text("text").strip()
             used_ocr = False
+            ocr_mode = ""
             if len(text) < 30:
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                 image_path = render_dir / f"{path.stem}_{index}.png"
                 pixmap.save(image_path)
-                text = ocr_client.recognize_screenshots([image_path]).strip()
+                text, ocr_mode = _ocr_pdf_image(image_path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
                 used_ocr = True
             pages.append(
                 {
@@ -91,6 +114,7 @@ def read_pdf_pages(path: Path) -> list[dict]:
                     "text": text,
                     "char_count": len(text),
                     "used_ocr": used_ocr,
+                    "ocr_mode": ocr_mode,
                 }
             )
     finally:
@@ -98,11 +122,11 @@ def read_pdf_pages(path: Path) -> list[dict]:
     return pages
 
 
-def document_pages(path: Path) -> list[dict]:
+def document_pages(path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> list[dict]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return read_pdf_pages(path)
-    text = extract_text(path)
+        return read_pdf_pages(path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
+    text = extract_text(path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
     chunks = chunk_text(text, max_chars=4500)
     return [
         {
@@ -223,14 +247,14 @@ def compact_pages_for_prompt(pages: list[dict], max_chars_per_page: int = 900) -
     return "\n".join(blocks)
 
 
-def extract_text(path: Path) -> str:
+def extract_text(path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> str:
     suffix = path.suffix.lower()
     if suffix in TEXT_SUFFIXES:
         text = read_text_file(path)
     elif suffix == ".docx":
         text = read_docx(path)
     elif suffix == ".pdf":
-        text = read_pdf(path)
+        text = read_pdf(path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
     elif suffix == ".doc":
         raise ValueError("暂不支持 .doc，请另存为 .docx 后上传")
     else:
@@ -241,7 +265,13 @@ def extract_text(path: Path) -> str:
     return text
 
 
-def recognize_files(files: list[dict], root: Path) -> str:
+def recognize_files(
+    files: list[dict],
+    root: Path,
+    visual_recognizer: VisionRecognizer | None = None,
+    prefer_visual: bool = False,
+    storage_root: Path | None = None,
+) -> str:
     blocks = []
     for index, item in enumerate(files, start=1):
         file_path = Path(str(item["file_path"]))
@@ -250,10 +280,12 @@ def recognize_files(files: list[dict], root: Path) -> str:
                 root / file_path,
                 root / "data" / "runtime" / file_path,
             ]
+            if storage_root is not None:
+                candidates.insert(0, storage_root / file_path)
             local_appdata = Path.home() / "AppData" / "Local" / "FigureLearning"
             candidates.append(local_appdata / file_path)
             file_path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
-        text = extract_text(file_path)
+        text = extract_text(file_path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
         name = item.get("original_name") or file_path.name
         blocks.append(f"[File {index}: {name}]\n{text}")
     return "\n\n---\n\n".join(blocks)

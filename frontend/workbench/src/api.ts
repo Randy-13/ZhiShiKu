@@ -1,4 +1,14 @@
-import type { CreationDraft, KnowledgeDraft, KnowledgeItem, MaterialType, SourceMaterial, TextExtractionMode, WriterProjectState } from "./domain";
+import type {
+  CreationDraft,
+  KnowledgeDraft,
+  KnowledgeItem,
+  MaterialType,
+  PerspectiveDraft,
+  PerspectiveProfile,
+  SourceMaterial,
+  TextExtractionMode,
+  WriterProjectState,
+} from "./domain";
 
 const API_BASE = "";
 
@@ -105,6 +115,10 @@ function firstString(...values: unknown[]) {
     if (typeof value === "string" && value.trim()) return value;
   }
   return "";
+}
+
+function normalizeLibraryPath(value: unknown) {
+  return firstString(value).replace(/\\/g, "/");
 }
 
 function numericId(value: unknown) {
@@ -229,8 +243,128 @@ export type WriterAdvanceResult = {
   message: string;
 };
 
+export type WriterLibraryFileInput = {
+  library: LibraryKind;
+  markdown_path: string;
+  title: string;
+  knowledge_id?: number;
+};
+
 export type WorkbenchSettings = {
   text_extraction_mode: TextExtractionMode;
+};
+
+export type BilibiliCookieStatus = {
+  ok?: boolean;
+  mode?: string;
+  source?: string;
+  path?: string;
+  exists?: boolean;
+  message?: string;
+  missing?: string[];
+  cookie_count?: number;
+  last_modified?: string;
+};
+
+export type BilibiliCookieLoginResult = {
+  ok?: boolean;
+  message?: string;
+  script?: string;
+};
+
+export type ApiSettingItem = {
+  id: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_masked?: string;
+  timeout?: number;
+  max_retries?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ApiSettingTemplate = {
+  id: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_placeholder?: string;
+  size?: string;
+  quality?: string;
+};
+
+export type ApiSettingsPayload = {
+  active_id?: string | null;
+  items?: ApiSettingItem[];
+  templates?: ApiSettingTemplate[];
+  item?: ApiSettingItem;
+};
+
+export type ApiSettingInput = {
+  id?: string | null;
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  timeout?: number;
+  max_retries?: number;
+  make_active?: boolean;
+};
+
+export type ImageApiSettingItem = ApiSettingItem & {
+  size?: string;
+  quality?: string;
+  response_format?: string;
+};
+
+export type ImageApiSettingsPayload = {
+  active_id?: string | null;
+  items?: ImageApiSettingItem[];
+  templates?: ApiSettingTemplate[];
+  item?: ImageApiSettingItem;
+};
+
+export type ImageApiSettingInput = Omit<ApiSettingInput, "max_retries"> & {
+  size?: string;
+  quality?: string;
+  response_format?: string;
+};
+
+export type ApiTestResult = Record<string, string | boolean | number | null | undefined>;
+
+type PerspectivePayload = Record<string, unknown> & {
+  id?: string;
+  name?: string;
+  positioning?: string;
+  core_goal?: string;
+  coreGoal?: string;
+  stance?: string;
+  role?: string;
+  target_subject?: string;
+  purpose?: string;
+  readonly?: boolean;
+  origin?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type MineSourcePayload = {
+  library: string;
+  markdown_path: string;
+  title?: string;
+};
+
+type MineInterpretPayload = {
+  ok: boolean;
+  error?: string;
+  title?: string;
+  markdown?: string;
+  source_files?: Array<Record<string, string>>;
+  perspective?: PerspectivePayload;
 };
 
 export const api = {
@@ -247,6 +381,86 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings),
+    });
+  },
+
+  bilibiliCookieStatus() {
+    return requestJson<BilibiliCookieStatus>("/api/media/bilibili-cookies");
+  },
+
+  openBilibiliCookieLogin(url = "https://space.bilibili.com/520819684") {
+    return requestJson<BilibiliCookieLoginResult>("/api/media/bilibili-cookies/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+  },
+
+  apiSettings() {
+    return requestJson<ApiSettingsPayload>("/api/api-settings");
+  },
+
+  saveApiSetting(setting: ApiSettingInput) {
+    return requestJson<ApiSettingsPayload>("/api/api-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(setting),
+    });
+  },
+
+  setActiveApiSetting(id: string) {
+    return requestJson<ApiSettingsPayload>("/api/api-settings/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  deleteApiSetting(id: string) {
+    return requestJson<ApiSettingsPayload>(`/api/api-settings/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+
+  testApiSetting(setting: ApiSettingInput) {
+    return requestJson<ApiTestResult>("/api/api-settings/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setting }),
+    });
+  },
+
+  imageApiSettings() {
+    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings");
+  },
+
+  saveImageApiSetting(setting: ImageApiSettingInput) {
+    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(setting),
+    });
+  },
+
+  setActiveImageApiSetting(id: string) {
+    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  deleteImageApiSetting(id: string) {
+    return requestJson<ImageApiSettingsPayload>(`/api/image-api-settings/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+
+  testImageApiSetting(setting: ImageApiSettingInput, options?: { realTest?: boolean; prompt?: string }) {
+    return requestJson<ApiTestResult>("/api/image-api-settings/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setting, real_test: options?.realTest ?? false, prompt: options?.prompt }),
     });
   },
 
@@ -335,6 +549,30 @@ export const api = {
     return (payload.data?.items ?? []).map((item, index) => toLibraryKnowledge(item, index));
   },
 
+  async readLibraryFile(library: LibraryKind, markdownPath: string): Promise<KnowledgeItem> {
+    const payload = await requestJson<V2Payload<{ item?: LibraryFilePayload; markdown?: string }>>(
+      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
+    );
+    return toLibraryKnowledge({ ...(payload.data?.item ?? {}), markdown: payload.data?.markdown }, Date.now());
+  },
+
+  async updateLibraryFile(
+    library: LibraryKind,
+    markdownPath: string,
+    payload: { title: string; note: string; body: string },
+  ): Promise<KnowledgeItem> {
+    const response = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: LibraryFilePayload; markdown?: string }>>(
+      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: payload.title, note: payload.note, markdown: payload.body }),
+      },
+    );
+    const data = assertV2Ok(response);
+    return toLibraryKnowledge({ ...(data.item ?? {}), markdown: data.markdown }, Date.now());
+  },
+
   async createRawLibraryFile(materials: SourceMaterial[], title = ""): Promise<RawLibraryResult> {
     if (!materials.length) throw new Error("No material selected for raw library file.");
     const materialType = rawMaterialType(materials);
@@ -378,6 +616,7 @@ export const api = {
         body: JSON.stringify({
           material_type: rawMaterialType(materials),
           title: materials.length === 1 ? materials[0]?.title ?? "" : "",
+          parser_mode: parserMode,
           items: materials.map((material) => ({
             id: material.backendId,
             content: material.type === "text" ? material.source : "",
@@ -479,6 +718,74 @@ export const api = {
     );
     const data = assertV2Ok(payload);
     return toLibraryKnowledge({ ...(data.item ?? {}), library: "focus" }, Date.now());
+  },
+
+  async listPerspectiveProfiles(): Promise<PerspectiveProfile[]> {
+    const payload = await requestJson<V2Payload<{ items?: PerspectivePayload[] }>>("/api/v2/mine/perspectives");
+    return (payload.data?.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+  },
+
+  async savePerspectiveProfile(profile: PerspectiveProfile): Promise<PerspectiveProfile[]> {
+    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; items?: PerspectivePayload[] }>>(
+      "/api/v2/mine/perspectives",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(toPerspectivePayload(profile)),
+      },
+    );
+    const data = assertV2Ok(payload);
+    return (data.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+  },
+
+  async deletePerspectiveProfile(profileId: string): Promise<PerspectiveProfile[]> {
+    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; items?: PerspectivePayload[] }>>(
+      `/api/v2/mine/perspectives/${encodeURIComponent(profileId)}`,
+      { method: "DELETE" },
+    );
+    const data = assertV2Ok(payload);
+    return (data.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+  },
+
+  async interpretPerspective(sources: KnowledgeItem[], perspective: PerspectiveProfile): Promise<PerspectiveDraft> {
+    const payload = await requestJson<V2Payload<MineInterpretPayload>>("/api/v2/mine/interpret", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: sources.map(toMineSource),
+        perspective: toPerspectivePayload(perspective),
+      }),
+    });
+    const data = assertV2Ok(payload);
+    return {
+      title: firstString(data.title, `${perspective.name}视角解读`),
+      markdown: firstString(data.markdown),
+      sourceFiles: data.source_files ?? [],
+      perspective: toPerspectiveProfile(data.perspective ?? toPerspectivePayload(perspective)),
+    };
+  },
+
+  async savePerspectiveFile(
+    sources: KnowledgeItem[],
+    perspective: PerspectiveProfile,
+    markdown: string,
+    title = "",
+  ): Promise<KnowledgeItem> {
+    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown> }>>(
+      "/api/v2/mine/perspective-file",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sources: sources.map(toMineSource),
+          perspective: toPerspectivePayload(perspective),
+          markdown,
+          title,
+        }),
+      },
+    );
+    const data = assertV2Ok(payload);
+    return toLibraryKnowledge({ ...(data.item ?? {}), library: "perspective" }, Date.now());
   },
 
   async readKnowledge(knowledgeId: number): Promise<KnowledgeItem> {
@@ -693,19 +1000,33 @@ export const api = {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}`);
   },
 
-  createWriterProject(name: string, knowledgeIds: number[] = [], projectType = "article") {
+  createWriterProject(
+    name: string,
+    knowledgeIds: number[] = [],
+    projectType = "article",
+    libraryFiles: WriterLibraryFileInput[] = [],
+    writingStrategy = "",
+    designStrategy = "",
+  ) {
     return requestJson<WriterProjectState>("/api/writer/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, project_type: projectType, knowledge_ids: knowledgeIds }),
+      body: JSON.stringify({
+        name,
+        project_type: projectType,
+        knowledge_ids: knowledgeIds,
+        library_files: libraryFiles,
+        writing_strategy: writingStrategy,
+        design_strategy: designStrategy,
+      }),
     });
   },
 
-  confirmWriterKnowledge(projectId: string, knowledgeIds: number[]) {
+  confirmWriterKnowledge(projectId: string, knowledgeIds: number[], libraryFiles: WriterLibraryFileInput[] = []) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/knowledge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds }),
+      body: JSON.stringify({ knowledge_ids: knowledgeIds, library_files: libraryFiles }),
     });
   },
 
@@ -755,11 +1076,11 @@ export const api = {
     });
   },
 
-  formatWriterProject(projectId: string, markdown?: string) {
+  formatWriterProject(projectId: string, markdown?: string, designStrategy?: string) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/format`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, theme: "tech" }),
+      body: JSON.stringify({ markdown, theme: "tech", design_strategy: designStrategy }),
     });
   },
 
@@ -793,12 +1114,12 @@ export function materialFromUpload(type: MaterialType, upload: UploadedItem, fal
 
 function toLibraryKnowledge(raw: LibraryFilePayload, fallbackIndex = 0): KnowledgeItem {
   const library = libraryBucketFromV2(raw.library);
-  const markdownPath = firstString(raw.markdown_path, raw.id);
+  const markdownPath = normalizeLibraryPath(raw.markdown_path || raw.id);
   return {
     id: markdownPath || `${library}-${fallbackIndex}`,
     title: firstString(raw.title, raw.id, `File ${fallbackIndex + 1}`),
-    body: firstString(raw.source, raw.status, raw.material_type),
-    note: firstString(raw.source, raw.material_type, raw.status),
+    body: firstString(raw.markdown),
+    note: firstString(raw.note, raw.source, raw.material_type, raw.status),
     library,
     markdownPath,
     createdAt: firstString(raw.created_at),
@@ -810,10 +1131,61 @@ function toLibraryKnowledge(raw: LibraryFilePayload, fallbackIndex = 0): Knowled
   };
 }
 
+function libraryBucketToSource(value: LibraryKind) {
+  return value === "original" ? "raw" : value;
+}
+
+function toMineSource(item: KnowledgeItem): MineSourcePayload {
+  if (!item.markdownPath) throw new Error("所选原文缺少 Markdown 路径。");
+  return {
+    library: libraryBucketToSource(item.library ?? "original"),
+    markdown_path: item.markdownPath,
+    title: item.title,
+  };
+}
+
+function toPerspectivePayload(profile: PerspectiveProfile): PerspectivePayload {
+  return {
+    id: profile.id,
+    name: profile.name,
+    positioning: profile.positioning,
+    core_goal: profile.coreGoal,
+    stance: profile.stance,
+    role: profile.positioning,
+    target_subject: profile.positioning,
+    purpose: profile.coreGoal,
+    focus_dimensions: splitPerspectiveLines(profile.stance),
+    analysis_questions: [profile.coreGoal].filter(Boolean),
+    output_style: "严格按照 RTFC 框架和固定五段式结构输出。",
+    evidence_rule: "所有判断必须锚定原文事实，使用 S1/S2 等来源编号，不脑补、不编造。",
+  };
+}
+
+function toPerspectiveProfile(raw: PerspectivePayload, fallbackIndex = 0): PerspectiveProfile {
+  return {
+    id: firstString(raw.id, `perspective-${fallbackIndex}`),
+    name: firstString(raw.name, "未命名视角"),
+    positioning: firstString(raw.positioning, raw.role, raw.target_subject),
+    coreGoal: firstString(raw.coreGoal, raw.core_goal, raw.purpose),
+    stance: firstString(raw.stance, Array.isArray(raw.focus_dimensions) ? raw.focus_dimensions.join("；") : "", raw.evidence_rule),
+    readonly: Boolean(raw.readonly),
+    origin: firstString(raw.origin),
+    createdAt: firstString(raw.created_at),
+    updatedAt: firstString(raw.updated_at),
+  };
+}
+
+function splitPerspectiveLines(value: string) {
+  return value
+    .split(/[\n；;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function toKnowledge(raw: Record<string, unknown>, material?: SourceMaterial, fallbackIndex = 0, library: LibraryKind = "focus"): KnowledgeItem {
   const backendId = numericId(raw.id);
   const body = firstString(raw.markdown, raw.content, raw.body, raw.summary);
-  const markdownPath = firstString(raw.markdown_path);
+  const markdownPath = normalizeLibraryPath(raw.markdown_path);
   return {
     id: String(raw.id ?? `knowledge-${Date.now()}-${fallbackIndex}`),
     backendId,

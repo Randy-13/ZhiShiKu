@@ -63,6 +63,7 @@ class CollectRawMarkdownRequest(BaseModel):
     material_type: str
     title: str = ""
     items: list[CollectQueueItem]
+    parser_mode: str | None = None
 
 
 class CollectRawFileRequest(BaseModel):
@@ -77,6 +78,7 @@ class CollectReadableDraftRequest(BaseModel):
     material_type: str
     title: str = ""
     items: list[CollectQueueItem]
+    parser_mode: str | None = None
 
 
 class LearnRefineKnowledgeClusterRequest(BaseModel):
@@ -96,9 +98,18 @@ class LibrarySourceRequest(BaseModel):
     title: str = ""
 
 
+class LibraryFileUpdateRequest(BaseModel):
+    title: str
+    note: str = ""
+    markdown: str
+
+
 class MinePerspectiveProfile(BaseModel):
     id: str = ""
     name: str
+    positioning: str = ""
+    core_goal: str = ""
+    stance: str = ""
     role: str = ""
     target_subject: str = ""
     purpose: str = ""
@@ -360,6 +371,26 @@ def library_files(library_id: str, pending_focus: bool = False) -> dict[str, obj
     return success_payload(data={"items": _list_library_files(library_id, pending_focus=pending_focus)})
 
 
+@router.get("/libraries/{library_id}/file")
+def library_file(library_id: str, markdown_path: str) -> dict[str, object]:
+    item, text = _read_library_file(library_id, markdown_path)
+    return success_payload(data={"item": item, "markdown": text})
+
+
+@router.post("/libraries/{library_id}/file")
+def update_library_file(library_id: str, markdown_path: str, request: LibraryFileUpdateRequest) -> dict[str, object]:
+    if not request.markdown.strip():
+        return success_payload(data={"ok": False, "error": "Markdown 正文不能为空"})
+    path = _resolve_library_markdown_path(library_id, markdown_path)
+    text = _replace_markdown_title(request.markdown, request.title.strip() or _markdown_title(request.markdown) or path.stem)
+    text = _replace_markdown_note(text, request.note)
+    path.write_text(text, encoding="utf-8")
+    item = _library_file_payload(path, library_id)
+    if request.note.strip():
+        item["note"] = request.note.strip()
+    return success_payload(data={"ok": True, "item": item, "markdown": text})
+
+
 @router.post("/collect/text")
 def collect_text(request: CollectTextRequest) -> dict[str, object]:
     content = request.content.strip()
@@ -410,7 +441,7 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
     material_type = request.material_type.strip()
     title = request.title.strip() or _default_raw_title(material_type, request.items)
     try:
-        body, sources, errors = _extract_queue_text(material_type, request.items)
+        body, sources, errors = _extract_queue_text(material_type, request.items, parser_mode=request.parser_mode)
     except (KeyError, ValueError, OSError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -470,7 +501,7 @@ def collect_readable_draft(request: CollectReadableDraftRequest) -> dict[str, ob
     material_type = request.material_type.strip()
     title = request.title.strip() or _default_raw_title(material_type, request.items)
     try:
-        body, sources, errors = _extract_queue_text(material_type, request.items)
+        body, sources, errors = _extract_queue_text(material_type, request.items, parser_mode=request.parser_mode)
     except (KeyError, ValueError, OSError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -571,7 +602,7 @@ def learn_save_focus_file(request: LearnSaveFocusRequest) -> dict[str, object]:
         meta = _markdown_meta(markdown)
         updated = storage.update_knowledge_entry(
             entry["id"],
-            markdown_path=str(markdown_path.relative_to(storage.ROOT)),
+            markdown_path=storage.storage_relative(markdown_path),
             title=title,
             topic=meta.get("主题") or "",
             tags=json.dumps(_tags_from_meta(meta), ensure_ascii=False),
@@ -667,7 +698,7 @@ def mine_save_perspective_file(request: MineSavePerspectiveRequest) -> dict[str,
                     "status": "已解读",
                     "source": request.perspective.name,
                     "perspective": request.perspective.model_dump(),
-                    "markdown_path": str(path.relative_to(storage.ROOT)),
+                    "markdown_path": storage.storage_relative(path),
                     "created_at": now,
                     "source_files": sources,
                     "hash": source_hash,
@@ -973,12 +1004,14 @@ def _library_file_payload(path: Path, library_id: str) -> dict[str, object]:
     relative_path = storage.storage_relative(path)
     material_type = meta.get("材料类型") or meta.get("material_type") or ""
     tags = [material_type] if material_type else []
+    note = meta.get("人工备注") or meta.get("备注") or meta.get("note") or ""
     return {
         "id": relative_path,
         "title": title,
         "library": library_id,
         "status": meta.get("状态") or _default_library_status(library_id),
         "source": meta.get("来源") or meta.get("Source") or "",
+        "note": note,
         "material_type": material_type,
         "markdown_path": relative_path,
         "created_at": meta.get("收集时间") or datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
@@ -986,6 +1019,70 @@ def _library_file_payload(path: Path, library_id: str) -> dict[str, object]:
         "size": stat.st_size,
         "tags": tags,
     }
+
+
+def _read_library_file(library_id: str, markdown_path: str) -> tuple[dict[str, object], str]:
+    path = _resolve_library_markdown_path(library_id, markdown_path)
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return _library_file_payload(path, library_id), text
+
+
+def _resolve_library_markdown_path(library_id: str, markdown_path: str) -> Path:
+    roots = {
+        "raw": storage.ROOT / "raw_materials",
+        "focus": storage.KNOWLEDGE_DIR,
+        "perspective": storage.MINING_DIR,
+    }
+    expected_parts = {
+        "raw": "raw_materials",
+        "focus": "knowledge",
+        "perspective": "mining",
+    }
+    root = roots.get(library_id)
+    expected_root = expected_parts.get(library_id)
+    if root is None or expected_root is None:
+        raise ValueError(f"Unsupported library: {library_id}")
+    normalized = markdown_path.replace("\\", "/").strip()
+    candidate = Path(normalized)
+    if not normalized or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"只能读取库内相对路径：{markdown_path}")
+    if not candidate.parts or candidate.parts[0] != expected_root:
+        raise ValueError(f"{library_id} 文件路径不属于 {expected_root}：{markdown_path}")
+    path = root.joinpath(*candidate.parts[1:])
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".md":
+        raise FileNotFoundError(f"库文件不存在：{markdown_path}")
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    if resolved_root not in resolved_path.parents and resolved_path != resolved_root:
+        raise ValueError(f"文件路径越界：{markdown_path}")
+    return path
+
+
+def _replace_markdown_title(markdown: str, title: str) -> str:
+    text = markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = text.split("\n") if text else []
+    if lines and lines[0].strip().startswith("# "):
+        lines[0] = f"# {title}"
+        return "\n".join(lines).strip() + "\n"
+    return f"# {title}\n\n{text}".strip() + "\n"
+
+
+def _replace_markdown_note(markdown: str, note: str) -> str:
+    text = markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not note.strip():
+        return text + "\n"
+    lines = text.split("\n") if text else []
+    note_line = f"- 人工备注：{note.strip()}"
+    for index, line in enumerate(lines[:30]):
+        stripped = line.strip()
+        if stripped.startswith("- 人工备注：") or stripped.startswith("- 备注：") or stripped.startswith("- note:"):
+            lines[index] = note_line
+            return "\n".join(lines).strip() + "\n"
+    insert_at = 1 if lines and lines[0].strip().startswith("# ") else 0
+    while insert_at < len(lines) and lines[insert_at].strip().startswith("- "):
+        insert_at += 1
+    lines.insert(insert_at, note_line)
+    return "\n".join(lines).strip() + "\n"
 
 
 def _markdown_title(text: str) -> str:
@@ -1024,6 +1121,9 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
         {
             "id": "writer",
             "name": "作家视角",
+            "positioning": "扮演文件原创作者或专业写作者，关注全文创作逻辑、内容取舍和表达张力。",
+            "core_goal": "解释创作初衷，梳理内容逻辑，提炼可迁移的表达方法。",
+            "stance": "维护内容核心逻辑，重视行文设计、叙事节奏和表达取舍；不从外部投资价值或市场投机角度解读。",
             "role": "观察文本如何组织信息、制造节奏和形成表达张力",
             "target_subject": "原文表达、叙事顺序、论证结构、可复用写法",
             "purpose": "从材料中拆出可迁移的创作逻辑，而不是复述内容",
@@ -1035,6 +1135,9 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
         {
             "id": "investor",
             "name": "投资者视角",
+            "positioning": "扮演一级/二级市场职业投资人，关注商业变现、风险评估和成本收益。",
+            "core_goal": "识别机会、判断风险、估算回报，并形成投/不投/观望的决策线索。",
+            "stance": "极度功利、优先避险，重视落地性、现金流和增长空间；不关注纯文学修饰或无落地路径的理论空谈。",
             "role": "识别材料中的市场信号、产业变化和风险线索",
             "target_subject": "需求信号、竞争格局、商业化路径、风险边界",
             "purpose": "判断材料透露出的投资启发和可继续验证的问题",
@@ -1046,6 +1149,9 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
         {
             "id": "student",
             "name": "学生视角",
+            "positioning": "扮演普通在校大学生，具备基础认知、学习求知和入门理解能力。",
+            "core_goal": "读懂核心内容，提炼知识点，总结收获、疑问和个人学习启发。",
+            "stance": "零基础友好，重理解和学以致用，关注个人成长；不追求高阶商业博弈或过深专业术语。",
             "role": "判断材料与学习、技能、就业和作业任务的关系",
             "target_subject": "知识点、技能映射、就业相关度、学习路径",
             "purpose": "把材料转成可学习、可练习、可用于任务的问题",
@@ -1057,6 +1163,9 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
         {
             "id": "founder",
             "name": "创业者视角",
+            "positioning": "扮演创业者，关注用户问题、产品机会、市场入口和落地约束。",
+            "core_goal": "从材料中发现可转化为产品、服务或项目的机会假设。",
+            "stance": "务实落地，优先验证真实需求和最小可行动作；排斥脱离执行约束的空泛机会判断。",
             "role": "从材料中寻找用户问题、产品机会和落地约束",
             "target_subject": "用户痛点、解决方案、市场入口、资源约束",
             "purpose": "发现可转化为产品/服务/项目的机会假设",
@@ -1068,6 +1177,9 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
         {
             "id": "industry_researcher",
             "name": "行业研究员视角",
+            "positioning": "扮演专职行业研究员，具备政策、产业链、竞品和数据研判能力。",
+            "core_goal": "拆解行业逻辑，提炼趋势，形成后续研究可复用的判断框架。",
+            "stance": "客观中立，重数据、重逻辑、重行业对标；不关注情绪化表达和非行业相关冗余内容。",
             "role": "建立行业底层结构、关键变量和趋势解释框架",
             "target_subject": "行业结构、供需变量、政策/技术/资本因素、趋势路径",
             "purpose": "把材料沉淀成后续研究可复用的行业判断框架",
@@ -1159,8 +1271,6 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
         f"# {result.title}",
         "",
         f"- 视角：{perspective.name}",
-        f"- 角色定位：{perspective.role}",
-        f"- 关注对象：{perspective.target_subject}",
         f"- 解读时间：{now}",
         "- 状态：已解读",
         f"- 标签：{tags}",
@@ -1172,16 +1282,6 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
         sections.append(f"- [S{index}] {source['title']}（{source['library']}：{source['relative_path']}）")
     sections.extend(
         [
-            "",
-            "## 视角设定",
-            "",
-            f"- 核心目的：{perspective.purpose}",
-            f"- 输出风格：{perspective.output_style}",
-            f"- 证据规则：{perspective.evidence_rule}",
-            "- 关注维度：",
-            *[f"  - {item}" for item in perspective.focus_dimensions],
-            "- 判断问题：",
-            *[f"  - {item}" for item in perspective.analysis_questions],
             "",
             "## 解读摘要",
             "",
@@ -1203,7 +1303,6 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
     sections.extend(f"- {item}" for item in result.risks_and_limits) if result.risks_and_limits else sections.append("- 暂无。")
     sections.append("")
     return "\n".join(sections)
-
 
 def _processed_raw_material_paths() -> set[str]:
     storage.init_storage()
@@ -1396,7 +1495,7 @@ def _write_raw_markdown(
     }
 
 
-def _extract_queue_text(material_type: str, items: list[CollectQueueItem]) -> tuple[str, list[str], list[str]]:
+def _extract_queue_text(material_type: str, items: list[CollectQueueItem], parser_mode: str | None = None) -> tuple[str, list[str], list[str]]:
     if material_type == "text":
         blocks = []
         for index, item in enumerate(items, start=1):
@@ -1418,7 +1517,7 @@ def _extract_queue_text(material_type: str, items: list[CollectQueueItem]) -> tu
         return ocr_client.recognize_screenshots(image_paths), [item.get("image_path") or "" for item in screenshots], []
 
     if material_type == "document":
-        return _extract_document_queue(items)
+        return _extract_document_queue(items, parser_mode=parser_mode)
 
     if material_type == "media":
         return _extract_media_queue(items)
@@ -1444,15 +1543,26 @@ def _extract_web_link_queue(items: list[CollectQueueItem]) -> tuple[str, list[st
     return "\n\n---\n\n".join(blocks), sources, errors
 
 
-def _extract_document_queue(items: list[CollectQueueItem]) -> tuple[str, list[str], list[str]]:
+def _document_visual_recognizer(image_paths: list[Path]) -> str:
+    return deepseek_client.recognize_screenshots_with_ai(image_paths, setting=api_settings.active_setting())
+
+
+def _extract_document_queue(items: list[CollectQueueItem], parser_mode: str | None = None) -> tuple[str, list[str], list[str]]:
     files = [storage.get_source_file(int(item.id)) for item in items if item.id is not None]
     blocks: list[str] = []
     sources: list[str] = []
     errors: list[str] = []
+    prefer_visual = parser_mode == "ai_vision"
     for index, item in enumerate(files, start=1):
         try:
-            file_path = storage.ROOT / str(item["file_path"])
-            text = document_parser.extract_text(file_path)
+            file_path = storage.resolve_root_path(str(item["file_path"]))
+            if not file_path or not file_path.exists():
+                raise FileNotFoundError(f"uploaded file not found: {item['file_path']}")
+            text = document_parser.extract_text(
+                file_path,
+                visual_recognizer=_document_visual_recognizer,
+                prefer_visual=prefer_visual,
+            )
             name = str(item.get("original_name") or file_path.name)
             sources.append(name)
             blocks.append(f"[File {index}: {name}]\n{text}")

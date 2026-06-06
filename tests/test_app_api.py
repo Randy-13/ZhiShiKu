@@ -1,5 +1,7 @@
 import base64
+import io
 import json
+import urllib.error
 
 from fastapi.testclient import TestClient
 
@@ -539,6 +541,31 @@ def test_media_resolve_url_examples(tmp_path, monkeypatch):
     assert douyin.status_code == 200
     assert douyin.json()["item"]["platform"] == "douyin"
     assert "7645662793240815025" in douyin.json()["item"]["canonical_url"]
+
+
+def test_bilibili_cookie_settings_endpoints(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    cookie_file = tmp_path / "auth" / "bilibili.cookies.txt"
+    cookie_file.parent.mkdir(parents=True)
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tsecret\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tDedeUserID\t123\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tbili_jct\tcsrf\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(media_parser.YTDLP_COOKIES_FILE_ENV, str(cookie_file))
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
+    monkeypatch.setattr(media_parser, "launch_bilibili_cookie_login", lambda url=None: {"ok": True, "message": "opened", "url": url})
+    client = TestClient(app.app)
+
+    status = client.get("/api/media/bilibili-cookies")
+    assert status.status_code == 200
+    assert status.json()["ok"] is True
+
+    launched = client.post("/api/media/bilibili-cookies/login", json={"url": "https://space.bilibili.com/520819684"})
+    assert launched.status_code == 200
+    assert launched.json()["ok"] is True
 
 
 def test_doc_upload_is_rejected_with_clear_message(tmp_path, monkeypatch):
@@ -1656,6 +1683,114 @@ def test_image_api_settings_save_update_and_delete(tmp_path, monkeypatch):
     assert deleted.status_code == 200
 
 
+def test_image_payload_keeps_configured_quality():
+    base = {
+        "model": "gpt-image-2",
+        "base_url": "https://relay.example.com/v1",
+        "api_key": "secret-key",
+        "size": "1024x1024",
+    }
+
+    payload = writer_tools._image_payload({**base, "quality": ""}, "测试图")
+    assert payload["model"] == "gpt-image-2"
+    assert payload["prompt"] == "测试图"
+    assert payload["size"] == "1024x1024"
+    assert payload["quality"] == "auto"
+
+    for quality in ("auto", "high", "standard"):
+        payload = writer_tools._image_payload({**base, "quality": quality}, "测试图")
+        assert payload["quality"] == quality
+
+    payload = writer_tools._image_payload({**base, "size": "1024×1024", "quality": ""}, "测试图")
+    assert payload["size"] == "1024x1024"
+    assert payload["quality"] == "auto"
+
+    payload = writer_tools._image_payload(
+        {**base, "quality": "auto", "response_format": "b64_json"},
+        "测试图",
+    )
+    assert payload["response_format"] == "b64_json"
+
+
+def test_generate_image_retries_long_prompt_after_upstream_error(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    setting = {
+        "model": "gpt-image-2",
+        "base_url": "https://relay.example.com/v1",
+        "api_key": "secret-key",
+        "size": "1024x1024",
+        "quality": "auto",
+        "timeout": 90,
+    }
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        body = json.loads(request.data.decode("utf-8"))
+        calls.append(body["prompt"])
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                502,
+                "Bad Gateway",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":{"message":"Upstream request failed"}}'),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(writer_tools.urllib.request, "urlopen", fake_urlopen)
+    output = tmp_path / "writer" / "cover.png"
+    result = writer_tools.generate_image("长提示词" * 500, output, setting=setting)
+
+    assert output.read_bytes().startswith(b"\x89PNG")
+    assert result["retry_used"] is True
+    assert len(calls) == 2
+    assert len(calls[1]) < len(calls[0])
+    assert len(calls[1]) <= writer_tools.IMAGE_PROMPT_RETRY_MAX_CHARS
+
+
+def test_generate_writer_images_keeps_partial_success(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("partial-images")
+
+    def fake_generate_image(prompt, output_path, setting=None):
+        if output_path.name == "content-2.png":
+            raise RuntimeError("upstream 502")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(PNG_1X1)
+        return {
+            "path": str(output_path.relative_to(storage.ROOT)),
+            "absolute_path": str(output_path),
+            "prompt": prompt,
+        }
+
+    monkeypatch.setattr(writer_tools, "generate_image", fake_generate_image)
+    result = writer_tools.generate_writer_images(
+        workspace,
+        cover_prompt="封面",
+        content_prompts=["正文图一", "正文图二"],
+    )
+
+    assert len(result["items"]) == 2
+    assert result["partial"] is True
+    assert result["errors"][0]["index"] == 2
+    assert (workspace / "cover.png").exists()
+    assert (workspace / "content-1.png").exists()
+    metadata = json.loads((workspace / "image_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["cover"]["filename"] == "cover.png"
+    assert metadata["content_images"][0]["filename"] == "content-1.png"
+    assert metadata["errors"][0]["message"].startswith("生成正文配图 2 失败")
+
+
 def readable_document_prefers_historical_ocr_text_and_slices_by_screenshot_legacy_encoding_probe(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     old_markdown = tmp_path / "knowledge" / "2026-06-04" / "任泽平赴美考察后提醒：AI不是风口，是海啸_0229ad71.md"
@@ -1855,7 +1990,7 @@ def test_writer_revise_format_and_publish_use_workflow_helpers(tmp_path, monkeyp
         ),
     )
 
-    def fake_format(workspace_path, markdown=None, theme="tech"):
+    def fake_format(workspace_path, markdown=None, theme="tech", design_strategy="", use_ai=True):
         path = workspace_path / "formatted.html"
         path.write_text("<html><body>ok</body></html>", encoding="utf-8")
         return {"path": str(path.relative_to(storage.ROOT)), "html": path.read_text(encoding="utf-8")}
@@ -1941,6 +2076,19 @@ def test_writer_image_suggestions_and_file_preview(tmp_path, monkeypatch):
     assert preview.content.startswith(b"\x89PNG")
 
 
+def test_writer_html_file_preview(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("html-preview")
+    html_path = workspace / "formatted.html"
+    html_path.write_text("<html><body><h1>preview ok</h1></body></html>", encoding="utf-8")
+    client = TestClient(app.app)
+
+    preview = client.get(f"/api/writer/file?path={str(html_path.relative_to(storage.ROOT))}")
+
+    assert preview.status_code == 200
+    assert "preview ok" in preview.text
+
+
 def test_format_article_falls_back_when_markdown_dependency_missing(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("fallback-format")
@@ -1961,6 +2109,89 @@ def test_format_article_falls_back_when_markdown_dependency_missing(tmp_path, mo
     assert result["fallback"] is True
     assert "formatted.html" in result["path"]
     assert "正文" in result["html"]
+
+
+def test_format_article_falls_back_when_formatter_script_missing(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("missing-formatter")
+    writer_tools.write_article(workspace, "# 标题\n\n## 小节\n\n正文")
+    monkeypatch.setattr(writer_tools, "FORMATTER_SCRIPT", tmp_path / "missing_formatter.py")
+
+    result = writer_tools.format_article(workspace)
+
+    assert result["fallback"] is True
+    assert "formatter script not found" in result["stderr"]
+    assert "formatted.html" in result["path"]
+    assert "正文" in result["html"]
+
+
+def test_format_article_prefers_api_design_formatter(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("api-format")
+    writer_tools.write_article(workspace, "# 标题\n\n## 小节\n\n正文")
+    monkeypatch.setattr(writer_tools, "FORMATTER_SCRIPT", tmp_path / "missing_formatter.py")
+    monkeypatch.setattr(writer_tools.api_settings, "active_setting", lambda: {"api_key": "test", "model": "format-model"})
+
+    def fake_design(markdown, design_strategy="", setting=None):
+        assert "# 标题" in markdown
+        assert "强调重点句" in design_strategy
+        assert setting["model"] == "format-model"
+        return "<html><body><section style='padding:24px'><blockquote>设计化导语</blockquote><p>正文</p></section></body></html>"
+
+    monkeypatch.setattr(writer_tools.deepseek_client, "design_wechat_article_html", fake_design)
+
+    result = writer_tools.format_article(workspace, design_strategy="强调重点句")
+
+    assert result["fallback"] is False
+    assert result["ai_formatted"] is True
+    assert "设计化导语" in result["html"]
+    assert "formatted.html" in result["path"]
+
+
+def test_writer_project_image_generation_persists_failures(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    project = writer_tools.create_project("image failure project")
+    workspace = writer_tools.resolve_project_workspace(str(project["id"]))
+    writer_tools.write_article(workspace, "# 标题\n\n正文")
+
+    def fake_generate_image(prompt, output_path, setting=None):
+        raise RuntimeError("upstream image service failed")
+
+    monkeypatch.setattr(writer_tools, "generate_image", fake_generate_image)
+    client = TestClient(app.app)
+
+    response = client.post(
+        f"/api/writer/projects/{project['id']}/images",
+        json={"cover_prompt": "封面图", "content_image_prompts": ["正文图"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["step"] == "images"
+    assert payload["project"]["images"]["ok"] is False
+    assert len(payload["project"]["images"]["errors"]) == 2
+    assert "upstream image service failed" in payload["project"]["images"]["errors"][0]["message"]
+    metadata_path = workspace / "image_metadata.json"
+    assert metadata_path.exists()
+
+
+def test_publish_preflight_truncates_long_digest(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("long-digest")
+    (workspace / "formatted.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+    (workspace / "article.md").write_text("# 标题\n\n正文", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "missing-wechat.json")
+    digest = "这是一段会超过公众号摘要字节限制的中文摘要" * 10
+
+    result = writer_tools.publish_preflight(workspace, "标题", digest=digest)
+    digest_check = next(item for item in result["checks"] if item["key"] == "digest")
+
+    assert digest_check["ok"] is True
+    assert digest_check["fixed"] is True
+    assert result["digest_truncated"] is True
+    assert writer_tools.utf8_len(result["digest"]) <= 120
+    assert result["digest"].encode("utf-8").decode("utf-8") == result["digest"]
 
 
 def test_format_article_injects_content_images(tmp_path, monkeypatch):

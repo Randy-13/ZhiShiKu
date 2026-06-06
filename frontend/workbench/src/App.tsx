@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BookOpen, Boxes, Cog, Feather, Inbox, Pickaxe } from "lucide-react";
 import { api, materialFromUpload, rawMaterialGroupKey } from "./api";
-import type { LibraryKind, ReadableDraftInput } from "./api";
+import type { LibraryKind, ReadableDraftInput, WriterLibraryFileInput } from "./api";
 import type {
   ActivityEvent,
   CreationDraft,
@@ -10,7 +10,8 @@ import type {
   Language,
   LegacyStageId,
   MaterialType,
-  MiningResult,
+  PerspectiveDraft,
+  PerspectiveProfile,
   SourceMaterial,
   TextExtractionMode,
   WriterProject,
@@ -69,7 +70,9 @@ export default function App() {
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<string>();
   const [collectDraft, setCollectDraft] = useState<ReadableDraftInput>();
   const [knowledgeDraft, setKnowledgeDraft] = useState<KnowledgeDraft>();
-  const [miningResult, setMiningResult] = useState<MiningResult>();
+  const [perspectives, setPerspectives] = useState<PerspectiveProfile[]>([]);
+  const [selectedPerspectiveId, setSelectedPerspectiveId] = useState<string>();
+  const [perspectiveDraft, setPerspectiveDraft] = useState<PerspectiveDraft>();
   const [draft, setDraft] = useState<CreationDraft>(() => initialDraft());
   const [writerProjects, setWriterProjects] = useState<WriterProject[]>([]);
   const [writerState, setWriterState] = useState<WriterProjectState>();
@@ -83,6 +86,8 @@ export default function App() {
   const [isCollectingReadable, setIsCollectingReadable] = useState(false);
   const [isSavingRawDraft, setIsSavingRawDraft] = useState(false);
   const [isLearning, setIsLearning] = useState(false);
+  const [isMining, setIsMining] = useState(false);
+  const [isSavingPerspective, setIsSavingPerspective] = useState(false);
   const [isWriting, setIsWriting] = useState(false);
 
   const addActivity = useCallback((event: Omit<ActivityEvent, "id" | "time">) => {
@@ -190,6 +195,28 @@ export default function App() {
     });
   }, [addActivity, language, refreshWriterProjects]);
 
+  const refreshPerspectiveProfiles = useCallback(async (nextSelectedId?: string) => {
+    const items = await api.listPerspectiveProfiles();
+    setPerspectives(items);
+    setSelectedPerspectiveId((current) => {
+      if (nextSelectedId && items.some((item) => item.id === nextSelectedId)) return nextSelectedId;
+      if (current && items.some((item) => item.id === current)) return current;
+      return items[0]?.id;
+    });
+    return items;
+  }, []);
+
+  useEffect(() => {
+    refreshPerspectiveProfiles().catch((error) => {
+      addActivity({
+        title: language === "zh" ? "视角列表加载失败" : "Perspective list load failed",
+        detail: error instanceof Error ? error.message : "Perspective API failed",
+        workspace: "mine",
+        status: "error",
+      });
+    });
+  }, [addActivity, language, refreshPerspectiveProfiles]);
+
   const navItems = useMemo<WorkspaceNavItem[]>(
     () => [
       { id: "collect", label: t("workspace.collect"), description: t("workspace.collect.desc"), icon: Inbox },
@@ -216,9 +243,14 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!selectedKnowledge?.backendId || selectedKnowledge.body) return;
-    api
-      .readKnowledge(selectedKnowledge.backendId)
+    if (!selectedKnowledge || selectedKnowledge.body) return;
+    const loadKnowledge = selectedKnowledge.backendId
+      ? api.readKnowledge(selectedKnowledge.backendId)
+      : selectedKnowledge.markdownPath && selectedKnowledge.library
+        ? api.readLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath)
+        : undefined;
+    if (!loadKnowledge) return;
+    loadKnowledge
       .then((item) => {
         setKnowledge((current) =>
           current.map((candidate) =>
@@ -228,6 +260,7 @@ export default function App() {
                   ...item,
                   id: candidate.id,
                   sourceIds: candidate.sourceIds,
+                  markdownPath: item.markdownPath ?? candidate.markdownPath,
                   note: item.note ?? candidate.note,
                 }
               : candidate,
@@ -250,6 +283,37 @@ export default function App() {
     () => knowledge.filter((item) => (item.library ?? "focus") === libraryRailBucket),
     [knowledge, libraryRailBucket],
   );
+  const selectedRailOriginals = useMemo(
+    () =>
+      libraryRailBucket === "original"
+        ? knowledge.filter((item) => libraryRailCheckedIds.includes(item.id) && (item.library ?? "focus") === "original")
+        : [],
+    [knowledge, libraryRailBucket, libraryRailCheckedIds],
+  );
+  const selectedRailKnowledge = useMemo(() => {
+    const idSet = new Set(libraryRailCheckedIds);
+    return knowledge.filter((item) => idSet.has(item.id));
+  }, [knowledge, libraryRailCheckedIds]);
+  const selectedPerspective = useMemo(
+    () => perspectives.find((item) => item.id === selectedPerspectiveId) ?? perspectives[0],
+    [perspectives, selectedPerspectiveId],
+  );
+  const mineSourceDisabledReason = useMemo(() => {
+    if (libraryRailBucket !== "original") return language === "zh" ? "请先把右侧知识列表切换到原文库。" : "Switch the right library rail to Originals first.";
+    if (!selectedRailOriginals.length) return language === "zh" ? "请先在右侧原文库勾选解读来源。" : "Select source files in the right Originals rail first.";
+    if (selectedRailOriginals.some((item) => !item.markdownPath?.startsWith("raw_materials/"))) {
+      return language === "zh" ? "所选原文缺少可解读的 Markdown 路径。" : "The selected original is missing an interpretable Markdown path.";
+    }
+    return "";
+  }, [language, libraryRailBucket, selectedRailOriginals]);
+  const addToLearningQueueDisabledReason = useMemo(() => {
+    if (libraryRailBucket !== "original") return t("learn.addToQueue.disabled.notOriginalBucket");
+    if (!selectedRailOriginals.length) return t("learn.addToQueue.disabled.noOriginalSelection");
+    if (selectedRailOriginals.some((item) => !item.markdownPath?.startsWith("raw_materials/"))) {
+      return t("learn.addToQueue.disabled.missingPath");
+    }
+    return "";
+  }, [libraryRailBucket, selectedRailOriginals, t]);
 
   const selectWorkspace = useCallback((id: WorkspaceId) => {
     setActiveWorkspace(id);
@@ -538,17 +602,43 @@ export default function App() {
     addActivity({ title: "删除素材", detail: `已从素材队列删除 ${ids.length} 个素材`, workspace: "collect", status: "done" });
   }, [addActivity]);
 
+  const addSelectedOriginalsToLearningQueue = useCallback(() => {
+    if (addToLearningQueueDisabledReason) return;
+    const items = selectedRailOriginals
+      .filter((item) => item.markdownPath?.startsWith("raw_materials/"))
+      .map((item) => ({
+        id: item.id,
+        type: "text" as const,
+        title: item.title,
+        source: item.markdownPath ?? "",
+        status: "queued" as const,
+        note: item.note,
+      }));
+    if (!items.length) return;
+    setLearningQueue((current) => {
+      const existingIds = new Set(current.map((item) => item.id));
+      return [...current, ...items.filter((item) => !existingIds.has(item.id))];
+    });
+    setSelectedLearningMaterialId((current) => current ?? items[0]?.id);
+    addActivity({
+      title: language === "zh" ? "加入学习队列" : "Added to learning queue",
+      detail:
+        language === "zh"
+          ? `已加入 ${items.length} 个原文库文件，重复文件会自动跳过。`
+          : `Added ${items.length} original file(s); duplicates are skipped automatically.`,
+      workspace: "learn",
+      status: "done",
+    });
+  }, [addActivity, addToLearningQueueDisabledReason, language, selectedRailOriginals]);
+
   const generateKnowledge = useCallback(async (ids: string[]) => {
     const idSet = new Set(ids);
     const selectedMaterials = learningQueue.filter((item) => idSet.has(item.id));
     if (!selectedMaterials.length) return;
     const rawPaths = selectedMaterials.map((item) => item.source).filter(Boolean);
-    const allRawLibraryFiles =
-      rawPaths.length === selectedMaterials.length &&
-      selectedMaterials.every((item) => item.type === "text" && item.source.startsWith("raw_materials/"));
-    const textOnly = selectedMaterials.every((material) => material.type === "text" && !material.backendId);
+    const allRawLibraryFiles = rawPaths.length === selectedMaterials.length && selectedMaterials.every((item) => item.source.startsWith("raw_materials/"));
     setIsLearning(true);
-    setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: "learning" } : item)));
+    setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: "learning", error: undefined } : item)));
     try {
       if (!allRawLibraryFiles) {
         const detail =
@@ -575,91 +665,42 @@ export default function App() {
         });
         return;
       }
-      if (allRawLibraryFiles) {
-        const refined = await api.refineKnowledgeCluster(rawPaths);
-        const title = markdownTitle(refined.markdown) || selectedMaterials[0]?.title || (language === "zh" ? "未命名重点文件" : "Untitled focus file");
-        const draft: KnowledgeDraft = {
-          id: uid("focus-draft"),
-          title,
-          note:
-            language === "zh"
-              ? `核心知识簇：${refined.cluster_count ?? 0} 个；来源：${selectedMaterials.map((item) => item.title).join("、")}`
-              : `Core clusters: ${refined.cluster_count ?? 0}; sources: ${selectedMaterials.map((item) => item.title).join(", ")}`,
-          body: refined.markdown ?? "",
-          sourceIds: rawPaths,
-          status: "draft",
-        };
-        setKnowledgeDraft(draft);
-        const nextQueue = learningQueue.filter((item) => !idSet.has(item.id));
-        setLearningQueue(nextQueue);
-        setSelectedLearningMaterialId(nextQueue[0]?.id);
-        addActivity({
-          title: draft.title,
-          detail: language === "zh" ? "已提炼为重点库草稿，请确认后入库。" : "Focus draft generated. Review and commit it.",
-          workspace: "learn",
-          status: "done",
-        });
-        return;
-      }
-      let readable: KnowledgeItem;
-      if (textOnly) {
-        const localItems = selectedMaterials.map((material) => localReadableDocument(material, language));
-        readable = combineReadableDocuments(localItems, selectedMaterials, language);
-      } else {
-        try {
-          readable = await api.readableDocument(selectedMaterials, textExtractionMode);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : "Readable document API failed";
-          setLearningQueue((current) =>
-            current.map((item) =>
-              idSet.has(item.id)
-                ? {
-                    ...item,
-                    status: "error",
-                    error: detail,
-                    note: language === "zh" ? "原文提取失败，未生成本地占位草稿。" : "Extraction failed; no local placeholder draft was generated.",
-                  }
-                : item,
-            ),
-          );
-          addActivity({
-            title: language === "zh" ? "后端原文提取失败" : "Readable document extraction failed",
-            detail,
-            workspace: "learn",
-            status: "error",
-          });
-          return;
-        }
-      }
-      const draft = knowledgeDraftFromGenerated([readable], selectedMaterials, language);
-      try {
-        const meta = await api.knowledgeDraftMeta(selectedMaterials, draft.body, language);
-        draft.title = meta.title?.trim() || draft.title;
-        draft.note = meta.note?.trim() || draft.note;
-      } catch (error) {
-        addActivity({
-          title: language === "zh" ? "知识草稿标题预生成失败" : "Knowledge draft title generation failed",
-          detail: error instanceof Error ? error.message : "Draft metadata API failed",
-          workspace: "learn",
-          status: "error",
-        });
-      }
+      const refined = await api.refineKnowledgeCluster(rawPaths);
+      const title = markdownTitle(refined.markdown) || selectedMaterials[0]?.title || (language === "zh" ? "未命名重点文件" : "Untitled focus file");
+      const draft: KnowledgeDraft = {
+        id: uid("focus-draft"),
+        title,
+        note:
+          language === "zh"
+            ? `核心知识簇：${refined.cluster_count ?? 0} 个；来源：${selectedMaterials.map((item) => item.title).join("、")}`
+            : `Core clusters: ${refined.cluster_count ?? 0}; sources: ${selectedMaterials.map((item) => item.title).join(", ")}`,
+        body: refined.markdown ?? "",
+        sourceIds: rawPaths,
+        status: "draft",
+      };
       setKnowledgeDraft(draft);
-      const nextQueue = learningQueue.filter((item) => !idSet.has(item.id));
-      setLearningQueue(nextQueue);
-      setSelectedLearningMaterialId(nextQueue[0]?.id);
-      addActivity({ title: draft.title, detail: `已生成 ${selectedMaterials.length} 个素材的待入库知识草稿`, workspace: "learn", status: "done" });
-    } catch (error) {
+      setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: "queued", error: undefined } : item)));
       addActivity({
-        title: "生成知识失败",
-        detail: error instanceof Error ? error.message : "生成知识失败",
+        title: draft.title,
+        detail: language === "zh" ? "已提炼为重点文件草稿，请编辑确认后加入重点库。" : "Focus draft generated. Review and add it to Focus.",
+        workspace: "learn",
+        status: "done",
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "生成重点知识失败";
+      setLearningQueue((current) =>
+        current.map((item) => (idSet.has(item.id) ? { ...item, status: "error", error: detail, note: detail } : item)),
+      );
+      addActivity({
+        title: language === "zh" ? "生成重点知识失败" : "Generate focus knowledge failed",
+        detail,
         workspace: "learn",
         status: "error",
       });
     } finally {
       setIsLearning(false);
     }
-  }, [addActivity, language, learningQueue, textExtractionMode]);
+  }, [addActivity, language, learningQueue]);
 
   const commitKnowledgeDraft = useCallback(async () => {
     if (!knowledgeDraft) return;
@@ -681,49 +722,143 @@ export default function App() {
         confidence: "medium",
       };
     } catch (error) {
-      item = {
-        id: knowledgeDraft.id,
-        backendId: knowledgeDraft.backendId,
-        title: knowledgeDraft.title.trim() || (language === "zh" ? "未命名知识" : "Untitled knowledge"),
-        note: knowledgeDraft.note.trim(),
-        body: knowledgeDraft.body,
-        sourceIds: knowledgeDraft.sourceIds,
-        library: isFocusDraft ? "focus" : undefined,
-        status: "saved",
-        confidence: "medium",
-      };
       addActivity({
-        title: language === "zh" ? "知识草稿后端入库失败" : "Knowledge draft backend commit failed",
-        detail: error instanceof Error ? error.message : "Draft commit API failed; saved locally only",
-        workspace: "library",
+        title: language === "zh" ? "加入重点库失败" : "Add to Focus failed",
+        detail: error instanceof Error ? error.message : "Focus draft save failed",
+        workspace: "learn",
         status: "error",
       });
+      return;
     }
     setKnowledge((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
     setSelectedKnowledgeId(item.id);
     setKnowledgeDraft(undefined);
-    refreshLibraries().catch(() => undefined);
-    addActivity({ title: item.title, detail: language === "zh" ? "知识草稿已确认入库" : "Knowledge draft committed to library", workspace: "library", status: "done" });
-  }, [addActivity, knowledgeDraft, language, refreshLibraries]);
-
-  const runMining = useCallback(
-    (role: string, question: string) => {
-      if (!selectedKnowledge) return;
-      setMiningResult({
-        id: uid("mining"),
-        role,
-        knowledgeId: selectedKnowledge.id,
-        claim:
-          language === "zh"
-            ? `围绕“${selectedKnowledge.title}”，最值得保留的是它能转化为一个清晰判断。`
-            : `For "${selectedKnowledge.title}", the reusable value is a clear judgment.`,
-        evidence: selectedKnowledge.body.slice(0, 160),
-        counterpoint: language === "zh" ? `仍需回看来源验证：${question}` : `Source review is still needed: ${question}`,
+    if (isFocusDraft) {
+      const sourceIdSet = new Set(knowledgeDraft.sourceIds);
+      setSelectedLearningMaterialId((current) => {
+        if (!current) return current;
+        const remaining = learningQueue.filter((queueItem) => !sourceIdSet.has(queueItem.source));
+        return remaining.some((queueItem) => queueItem.id === current) ? current : remaining[0]?.id;
       });
-      addActivity({ title: selectedKnowledge.title, detail: "挖掘结果已生成", workspace: "mine", status: "done" });
+      setLearningQueue((current) => current.filter((queueItem) => !sourceIdSet.has(queueItem.source)));
+      setLibraryRailBucket("focus");
+    }
+    refreshLibraries().catch(() => undefined);
+    addActivity({ title: item.title, detail: language === "zh" ? "重点文件已加入重点库" : "Focus file added to library", workspace: "library", status: "done" });
+  }, [addActivity, knowledgeDraft, language, learningQueue, refreshLibraries]);
+
+  const savePerspectiveProfile = useCallback(
+    async (profile: PerspectiveProfile) => {
+      try {
+        const items = await api.savePerspectiveProfile(profile);
+        setPerspectives(items);
+        const saved = items.find((item) => item.name === profile.name && item.coreGoal === profile.coreGoal) ?? items[0];
+        setSelectedPerspectiveId(saved?.id);
+        addActivity({
+          title: saved?.name ?? profile.name,
+          detail: language === "zh" ? "视角已保存" : "Perspective saved",
+          workspace: "mine",
+          status: "done",
+        });
+      } catch (error) {
+        addActivity({
+          title: language === "zh" ? "视角保存失败" : "Perspective save failed",
+          detail: error instanceof Error ? error.message : "Perspective API failed",
+          workspace: "mine",
+          status: "error",
+        });
+        throw error;
+      }
     },
-    [addActivity, language, selectedKnowledge],
+    [addActivity, language],
   );
+
+  const deletePerspectiveProfile = useCallback(
+    async (profileId: string) => {
+      try {
+        const items = await api.deletePerspectiveProfile(profileId);
+        setPerspectives(items);
+        setSelectedPerspectiveId((current) => (current === profileId ? items[0]?.id : current));
+        addActivity({
+          title: language === "zh" ? "视角已删除" : "Perspective deleted",
+          detail: profileId,
+          workspace: "mine",
+          status: "done",
+        });
+      } catch (error) {
+        addActivity({
+          title: language === "zh" ? "视角删除失败" : "Perspective delete failed",
+          detail: error instanceof Error ? error.message : "Perspective API failed",
+          workspace: "mine",
+          status: "error",
+        });
+        throw error;
+      }
+    },
+    [addActivity, language],
+  );
+
+  const runPerspectiveInterpretation = useCallback(async () => {
+    if (!selectedPerspective || mineSourceDisabledReason) return;
+    setIsMining(true);
+    try {
+      const draft = await api.interpretPerspective(selectedRailOriginals, selectedPerspective);
+      setPerspectiveDraft(draft);
+      addActivity({
+        title: draft.title,
+        detail: language === "zh" ? "视角解读草稿已生成，请确认后加入视角库。" : "Perspective draft generated. Review and save it to Perspectives.",
+        workspace: "mine",
+        status: "done",
+      });
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "视角解读失败" : "Perspective interpretation failed",
+        detail: error instanceof Error ? error.message : "Mine API failed",
+        workspace: "mine",
+        status: "error",
+      });
+    } finally {
+      setIsMining(false);
+    }
+  }, [addActivity, language, mineSourceDisabledReason, selectedPerspective, selectedRailOriginals]);
+
+  const savePerspectiveDraft = useCallback(async () => {
+    if (!perspectiveDraft || !selectedPerspective) return;
+    const markdown = perspectiveDraft.markdown.trim();
+    if (!markdown) {
+      addActivity({
+        title: language === "zh" ? "加入视角库失败" : "Add to Perspectives failed",
+        detail: language === "zh" ? "视角解读正文不能为空" : "Perspective body cannot be empty",
+        workspace: "mine",
+        status: "error",
+      });
+      return;
+    }
+    setIsSavingPerspective(true);
+    try {
+      const item = await api.savePerspectiveFile(selectedRailOriginals, selectedPerspective, markdown, perspectiveDraft.title);
+      setKnowledge((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
+      setSelectedKnowledgeId(item.id);
+      setPerspectiveDraft(undefined);
+      setLibraryRailBucket("perspective");
+      await refreshLibraries();
+      addActivity({
+        title: item.title,
+        detail: language === "zh" ? "视角文件已加入视角库" : "Perspective file added to library",
+        workspace: "mine",
+        status: "done",
+      });
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "加入视角库失败" : "Add to Perspectives failed",
+        detail: error instanceof Error ? error.message : "Perspective save API failed",
+        workspace: "mine",
+        status: "error",
+      });
+    } finally {
+      setIsSavingPerspective(false);
+    }
+  }, [addActivity, language, perspectiveDraft, refreshLibraries, selectedPerspective, selectedRailOriginals]);
 
   const runWriterAction = useCallback(
     async (title: string, action: () => Promise<WriterProjectState>) => {
@@ -749,10 +884,17 @@ export default function App() {
   );
 
   const createWriterProject = useCallback(
-    (name: string, projectType: string) => {
+    (name: string, projectType: string, libraryFiles: WriterLibraryFileInput[] = [], writingStrategy = "", designStrategy = "") => {
       selectWorkspace("create");
-      runWriterAction(language === "zh" ? "创建写文项目" : "Create writing project", () =>
-        api.createWriterProject(name || (language === "zh" ? "未命名写文项目" : "Untitled writing project"), [], projectType),
+      runWriterAction(language === "zh" ? "创建创作项目" : "Create writing project", () =>
+        api.createWriterProject(
+          name || (language === "zh" ? "未命名创作项目" : "Untitled writing project"),
+          [],
+          projectType,
+          libraryFiles,
+          writingStrategy,
+          designStrategy,
+        ),
       );
     },
     [language, runWriterAction, selectWorkspace],
@@ -771,6 +913,13 @@ export default function App() {
     if (!projectId) throw new Error(language === "zh" ? "请先创建或选择写文项目" : "Create or select a writing project first");
     return projectId;
   }, [language, selectedWriterProjectId, writerState]);
+
+  const importWriterKnowledge = useCallback(
+    (libraryFiles: WriterLibraryFileInput[]) => {
+      runWriterAction(language === "zh" ? "导入项目知识" : "Import project knowledge", () => api.confirmWriterKnowledge(requireProjectId(), [], libraryFiles));
+    },
+    [language, requireProjectId, runWriterAction],
+  );
 
   const generateWriterTopics = useCallback(() => {
     runWriterAction(language === "zh" ? "生成选题建议" : "Generate topic suggestions", () => api.generateWriterProjectTopics(requireProjectId()));
@@ -794,23 +943,23 @@ export default function App() {
     [language, requireProjectId, runWriterAction],
   );
 
-  const suggestWriterImages = useCallback(() => {
+  const suggestWriterImages = useCallback((markdown?: string) => {
     const project = writerState?.project;
     runWriterAction(language === "zh" ? "生成配图建议" : "Suggest images", () =>
-      api.suggestWriterProjectImages(requireProjectId(), project?.article_markdown, project?.topic ?? undefined),
+      api.suggestWriterProjectImages(requireProjectId(), markdown ?? project?.article_markdown, project?.topic ?? undefined),
     );
   }, [language, requireProjectId, runWriterAction, writerState]);
 
-  const generateWriterImages = useCallback(() => {
+  const generateWriterImages = useCallback((coverPrompt?: string, contentImagePrompts?: string[]) => {
     const project = writerState?.project;
     runWriterAction(language === "zh" ? "生成图片" : "Generate images", () =>
-      api.generateWriterProjectImages(requireProjectId(), project?.cover_prompt, project?.content_image_prompts ?? []),
+      api.generateWriterProjectImages(requireProjectId(), coverPrompt ?? project?.cover_prompt, contentImagePrompts ?? project?.content_image_prompts ?? []),
     );
   }, [language, requireProjectId, runWriterAction, writerState]);
 
   const formatWriterProject = useCallback(
-    (markdown?: string) => {
-      runWriterAction(language === "zh" ? "美编排版" : "Design article", () => api.formatWriterProject(requireProjectId(), markdown));
+    (markdown?: string, designStrategy?: string) => {
+      runWriterAction(language === "zh" ? "美编排版" : "Design article", () => api.formatWriterProject(requireProjectId(), markdown, designStrategy));
     },
     [language, requireProjectId, runWriterAction],
   );
@@ -866,6 +1015,8 @@ export default function App() {
       try {
         if (selectedKnowledge.backendId) {
           saved = await api.updateKnowledge(selectedKnowledge.backendId, trimmed);
+        } else if (selectedKnowledge.markdownPath && selectedKnowledge.library) {
+          saved = await api.updateLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath, trimmed);
         } else {
           saved = { ...selectedKnowledge, ...trimmed, status: "saved", confidence: "medium" };
           addActivity({
@@ -893,6 +1044,8 @@ export default function App() {
         note: trimmed.note,
         body: saved.body || trimmed.body,
         sourceIds: selectedKnowledge.sourceIds,
+        markdownPath: saved.markdownPath ?? selectedKnowledge.markdownPath,
+        library: saved.library ?? selectedKnowledge.library,
         status: saved.status || "saved",
         confidence: saved.confidence || "medium",
       };
@@ -1025,7 +1178,9 @@ export default function App() {
             knowledgeDraft={knowledgeDraft}
             isRunning={isLearning}
             rightRail={knowledgeRail}
+            addToQueueDisabledReason={addToLearningQueueDisabledReason}
             onSelectMaterial={setSelectedLearningMaterialId}
+            onAddSelectedOriginalsToQueue={addSelectedOriginalsToLearningQueue}
             onGenerateKnowledge={generateKnowledge}
             onUpdateKnowledgeDraft={setKnowledgeDraft}
             onCommitKnowledgeDraft={commitKnowledgeDraft}
@@ -1036,9 +1191,20 @@ export default function App() {
           <MineWorkspace
             t={t}
             language={language}
-            result={miningResult}
+            perspectives={perspectives}
+            selectedPerspective={selectedPerspective}
+            selectedSources={selectedRailOriginals}
+            draft={perspectiveDraft}
+            isRunning={isMining}
+            isSaving={isSavingPerspective}
+            disabledReason={mineSourceDisabledReason}
             rightRail={knowledgeRail}
-            onRunMining={runMining}
+            onSelectPerspective={setSelectedPerspectiveId}
+            onSavePerspective={savePerspectiveProfile}
+            onDeletePerspective={deletePerspectiveProfile}
+            onRunInterpretation={runPerspectiveInterpretation}
+            onUpdateDraft={setPerspectiveDraft}
+            onSaveDraft={savePerspectiveDraft}
           />
         );
       case "create":
@@ -1050,9 +1216,11 @@ export default function App() {
             writerProjects={writerProjects}
             writerState={writerState}
             selectedProjectId={selectedWriterProjectId}
+            selectedKnowledgeFiles={selectedRailKnowledge}
             isRunning={isWriting}
             onCreateProject={createWriterProject}
             onSelectProject={selectWriterProject}
+            onImportKnowledge={importWriterKnowledge}
             onGenerateTopics={generateWriterTopics}
             onSelectTopic={selectWriterTopic}
             onGenerateDraft={generateWriterDraft}
