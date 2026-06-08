@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 import pytest
@@ -23,15 +24,20 @@ from schemas import (
 
 @pytest.fixture(autouse=True)
 def isolate_storage(tmp_path, monkeypatch):
+    runtime_root = tmp_path
     monkeypatch.setattr(storage, "ROOT", tmp_path)
-    monkeypatch.setattr(storage, "IMAGE_DIR", tmp_path / "images")
-    monkeypatch.setattr(storage, "DOCUMENT_DIR", tmp_path / "documents")
-    monkeypatch.setattr(storage, "KNOWLEDGE_DIR", tmp_path / "knowledge")
-    monkeypatch.setattr(storage, "MEDIA_DIR", tmp_path / "media")
-    monkeypatch.setattr(storage, "MINING_DIR", tmp_path / "mining")
+    monkeypatch.setattr(storage, "STORAGE_ROOT", runtime_root)
+    monkeypatch.setattr(storage, "IMAGE_DIR", runtime_root / "images")
+    monkeypatch.setattr(storage, "DOCUMENT_DIR", runtime_root / "documents")
+    monkeypatch.setattr(storage, "KNOWLEDGE_DIR", runtime_root / "knowledge")
+    monkeypatch.setattr(storage, "MEDIA_DIR", runtime_root / "media")
+    monkeypatch.setattr(storage, "MINING_DIR", runtime_root / "mining")
+    monkeypatch.setattr(storage, "RAW_MATERIAL_DIR", runtime_root / "raw_materials")
+    monkeypatch.setattr(storage, "WRITER_DIR", runtime_root / "writer")
+    monkeypatch.setattr(storage, "TRASH_DIR", runtime_root / "trash")
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "knowledge.test.db")
-    monkeypatch.setattr(api_v2.writer_tools, "WRITER_DIR", tmp_path / "writer")
+    monkeypatch.setattr(api_v2.writer_tools, "WRITER_DIR", runtime_root / "writer")
     monkeypatch.setattr(api_v2.api_settings, "SETTINGS_PATH", tmp_path / "data" / "api_settings.json")
     monkeypatch.setattr(api_v2.asr_settings, "SETTINGS_PATH", tmp_path / "data" / "asr_settings.json")
     monkeypatch.setattr(api_v2.image_api_settings, "SETTINGS_PATH", tmp_path / "data" / "image_api_settings.json")
@@ -366,6 +372,66 @@ def test_v2_library_file_reads_and_updates_raw_markdown():
     assert "# Edited Raw Fixture" in text
     assert "- 人工备注：edited note" in text
     assert "Edited raw body." in text
+
+
+def test_v2_library_file_delete_moves_all_libraries_to_trash():
+    client = TestClient(create_app())
+    client.delete("/api/v2/settings/trash")
+    fixtures = [
+        ("raw", storage.RAW_MATERIAL_DIR, "raw-delete.md"),
+        ("focus", storage.KNOWLEDGE_DIR, "focus-delete.md"),
+        ("perspective", storage.MINING_DIR, "perspective-delete.md"),
+    ]
+    markdown_paths: list[tuple[str, str, Path]] = []
+    for library_id, root, filename in fixtures:
+        path = root / "2026-06-07" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {filename}\n\nDelete body.", encoding="utf-8")
+        markdown_paths.append((library_id, storage.storage_relative(path), path))
+
+    for library_id, markdown_path, path in markdown_paths:
+        response = client.delete(f"/api/v2/libraries/{library_id}/file", params={"markdown_path": markdown_path})
+
+        assert response.status_code == 200
+        payload = response.json()["data"]
+        assert payload["ok"] is True
+        assert not path.exists()
+        trash_path = Path(payload["item"]["trash_path"])
+        assert (storage.STORAGE_ROOT / trash_path).exists()
+        list_response = client.get(f"/api/v2/libraries/{library_id}/files")
+        listed_paths = {item["markdown_path"] for item in list_response.json()["data"]["items"]}
+        assert markdown_path not in listed_paths
+
+    status = client.get("/api/v2/settings/trash").json()["data"]
+    assert status["file_count"] == 3
+    assert len(status["items"]) == 3
+
+    raw_trash_item = next(item for item in status["items"] if item["library"] == "raw")
+    restored_path = markdown_paths[0][1]
+    restore_response = client.post(
+        "/api/v2/settings/trash/restore",
+        json={"trash_paths": [raw_trash_item["trash_path"]]},
+    )
+    assert restore_response.status_code == 200
+    assert restore_response.json()["data"]["restored"]
+    assert (storage.STORAGE_ROOT / restored_path).exists()
+
+    status = client.get("/api/v2/settings/trash").json()["data"]
+    delete_response = client.post(
+        "/api/v2/settings/trash/delete",
+        json={"trash_paths": [status["items"][0]["trash_path"]]},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["deleted"]
+
+    status = client.get("/api/v2/settings/trash").json()["data"]
+    assert status["file_count"] == 1
+    clear_response = client.delete("/api/v2/settings/trash")
+    assert clear_response.status_code == 200
+    cleared = clear_response.json()["data"]
+    assert cleared["deleted_files"] == 1
+    assert cleared["file_count"] == 0
+    assert not any(storage.TRASH_DIR.rglob("*.*"))
 
 
 def test_v2_collect_raw_file_saves_markdown_and_manual_note():
@@ -744,6 +810,69 @@ def test_v2_collect_inspect_link_classifies_special_platforms():
     assert item["link_type"] == "platform_wechat"
     assert item["access_status"] == "needs_specialized_extractor"
     assert item["extraction_strategy"] == "specialized_tool_or_browser"
+
+
+def test_v2_collect_inspect_link_keeps_public_article_with_login_nav_accessible(monkeypatch):
+    article = "\n".join(f"公共政策正文段落 {index}，这里是可以直接读取的公开网页内容。" for index in range(60))
+    html = f"""
+    <html>
+      <head>
+        <title>公开政策文章_中国政府网</title>
+        <script>window.loginUrl = "/login";</script>
+      </head>
+      <body>
+        <nav><a href="/login">登录</a></nav>
+        <main>
+          <h1>公开政策文章</h1>
+          <p>{article}</p>
+        </main>
+      </body>
+    </html>
+    """
+
+    def fake_fetch_url_bytes(url: str, max_bytes: int) -> dict[str, object]:
+        return {
+            "body": html.encode("utf-8"),
+            "content_type": "text/html; charset=utf-8",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(api_v2, "_fetch_url_bytes", fake_fetch_url_bytes)
+    monkeypatch.setattr(
+        api_v2,
+        "_polish_raw_material",
+        lambda material_type, body, title: {"markdown": body, "title": title, "response": {"status": "skipped"}},
+    )
+    client = TestClient(create_app())
+
+    response = client.post("/api/v2/collect/inspect-link", json={"url": "https://www.gov.cn/example.htm"})
+
+    assert response.status_code == 200
+    item = response.json()["data"]["item"]
+    assert item["link_type"] == "public_webpage"
+    assert item["access_status"] == "accessible"
+    assert item["extraction_strategy"] == "direct_fetch"
+
+    fetched = api_v2._extract_link_text(
+        "https://www.gov.cn/example.htm",
+        api_v2.CollectQueueItem(url="https://www.gov.cn/example.htm", title=""),
+    )
+    assert fetched["access_status"] == "accessible"
+    assert "公共政策正文段落 59" in fetched["text"]
+
+    draft = client.post(
+        "/api/v2/collect/readable-draft",
+        json={
+            "material_type": "web_link",
+            "items": [{"url": "https://www.gov.cn/example.htm", "title": "公开政策文章"}],
+        },
+    )
+    draft_payload = draft.json()["data"]
+    assert draft.status_code == 200
+    assert draft_payload["ok"] is True
+    assert "Access Status: accessible" in draft_payload["markdown"]
+    assert "公共政策正文段落 59" in draft_payload["markdown"]
+    assert "登录墙" not in draft_payload["markdown"]
 
 
 def test_v2_collect_raw_markdown_extracts_wechat_with_browser_payload(monkeypatch):

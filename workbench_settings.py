@@ -10,6 +10,7 @@ import storage
 VALID_TEXT_EXTRACTION_MODES = {"local_ocr", "ai_vision"}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "text_extraction_mode": "local_ocr",
+    "storage_locations": {},
 }
 
 
@@ -42,6 +43,12 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     mode = data.get("text_extraction_mode")
     if mode not in VALID_TEXT_EXTRACTION_MODES:
         data["text_extraction_mode"] = DEFAULT_SETTINGS["text_extraction_mode"]
+    locations = data.get("storage_locations")
+    if not isinstance(locations, dict):
+        locations = {}
+    data["storage_locations"] = storage.apply_storage_locations(
+        {key: str(value) for key, value in locations.items() if value is not None}
+    )
     return data
 
 

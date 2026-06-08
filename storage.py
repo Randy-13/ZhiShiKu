@@ -16,7 +16,10 @@ from fastapi import UploadFile
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("LOCALAPPDATA", ROOT / "data")) / "FigureLearning"
+PROJECT_DATA_DIR = ROOT / "data" / "runtime"
+SYSTEM_DATA_DIR = Path(os.getenv("LOCALAPPDATA", ROOT / "data")) / "FigureLearning"
+DATA_DIR = PROJECT_DATA_DIR
+DEFAULT_ROOT = ROOT
 
 
 def _is_writable_dir(path: Path) -> bool:
@@ -34,23 +37,28 @@ def _select_storage_root() -> Path:
     configured = os.getenv("FIGURELEARNING_STORAGE_ROOT")
     candidates = [
         Path(configured) if configured else None,
+        PROJECT_DATA_DIR,
         DATA_DIR,
-        ROOT / "data" / "runtime",
+        SYSTEM_DATA_DIR,
     ]
     for candidate in candidates:
         if candidate and _is_writable_dir(candidate):
             return candidate.resolve()
-    fallback = ROOT / "data" / "runtime"
+    fallback = PROJECT_DATA_DIR
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback.resolve()
 
 
 STORAGE_ROOT = _select_storage_root()
+DEFAULT_STORAGE_ROOT = STORAGE_ROOT
 IMAGE_DIR = STORAGE_ROOT / "images"
 DOCUMENT_DIR = STORAGE_ROOT / "documents"
 KNOWLEDGE_DIR = STORAGE_ROOT / "knowledge"
 MEDIA_DIR = STORAGE_ROOT / "media"
 MINING_DIR = STORAGE_ROOT / "mining"
+RAW_MATERIAL_DIR = STORAGE_ROOT / "raw_materials"
+WRITER_DIR = STORAGE_ROOT / "writer"
+TRASH_DIR = STORAGE_ROOT / "trash"
 DB_PATH = Path(os.getenv("FIGURELEARNING_DB_PATH", ROOT / "knowledge.db"))
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
@@ -72,13 +80,64 @@ ALLOWED_MEDIA_EXTENSIONS = {
 SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 
 
+def migrate_legacy_system_storage() -> int:
+    if ROOT != DEFAULT_ROOT:
+        return 0
+    if STORAGE_ROOT.resolve() == SYSTEM_DATA_DIR.resolve():
+        return 0
+    directory_pairs = [
+        (SYSTEM_DATA_DIR / "images", IMAGE_DIR),
+        (SYSTEM_DATA_DIR / "documents", DOCUMENT_DIR),
+        (SYSTEM_DATA_DIR / "knowledge", KNOWLEDGE_DIR),
+        (SYSTEM_DATA_DIR / "media", MEDIA_DIR),
+        (SYSTEM_DATA_DIR / "mining", MINING_DIR),
+        (SYSTEM_DATA_DIR / "raw_materials", RAW_MATERIAL_DIR),
+        (SYSTEM_DATA_DIR / "writer", WRITER_DIR),
+    ]
+    copied = 0
+    for source_root, target_root in directory_pairs:
+        try:
+            if not source_root.exists() or source_root.resolve() == target_root.resolve():
+                continue
+        except OSError:
+            continue
+        try:
+            files = [path for path in source_root.rglob("*") if path.is_file()]
+        except OSError:
+            continue
+        for source_path in files:
+            try:
+                relative_path = source_path.relative_to(source_root)
+            except ValueError:
+                continue
+            target_path = target_root / relative_path
+            if target_path.exists():
+                continue
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, target_path)
+                copied += 1
+            except OSError:
+                continue
+    return copied
+
+
 def init_storage() -> None:
+    global RAW_MATERIAL_DIR, WRITER_DIR
+    if ROOT != DEFAULT_ROOT and ROOT.resolve() not in RAW_MATERIAL_DIR.resolve().parents:
+        RAW_MATERIAL_DIR = ROOT / "raw_materials"
+    if ROOT != DEFAULT_ROOT and ROOT.resolve() not in WRITER_DIR.resolve().parents:
+        WRITER_DIR = ROOT / "writer"
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     MINING_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_MATERIAL_DIR.mkdir(parents=True, exist_ok=True)
+    WRITER_DIR.mkdir(parents=True, exist_ok=True)
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_system_storage()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.execute(
@@ -220,6 +279,41 @@ def init_storage() -> None:
         _ensure_column(conn, "knowledge_entries", "source_hash", "TEXT")
         recover_markdown_entries(conn)
         conn.commit()
+
+
+def apply_storage_locations(locations: dict[str, str]) -> dict[str, str]:
+    global STORAGE_ROOT, IMAGE_DIR, DOCUMENT_DIR, KNOWLEDGE_DIR, MEDIA_DIR, MINING_DIR, RAW_MATERIAL_DIR, WRITER_DIR, TRASH_DIR
+
+    def clean_path(key: str, fallback: Path) -> Path:
+        value = str(locations.get(key) or "").strip()
+        return Path(value).expanduser().resolve() if value else fallback
+
+    STORAGE_ROOT = clean_path("storage_root", STORAGE_ROOT)
+    IMAGE_DIR = clean_path("image_cache", STORAGE_ROOT / "images")
+    DOCUMENT_DIR = clean_path("document_cache", STORAGE_ROOT / "documents")
+    MEDIA_DIR = clean_path("media_cache", STORAGE_ROOT / "media")
+    RAW_MATERIAL_DIR = clean_path("raw_library", STORAGE_ROOT / "raw_materials")
+    KNOWLEDGE_DIR = clean_path("focus_library", STORAGE_ROOT / "knowledge")
+    MINING_DIR = clean_path("perspective_library", STORAGE_ROOT / "mining")
+    WRITER_DIR = clean_path("writer_projects", STORAGE_ROOT / "writer")
+    TRASH_DIR = clean_path("trash", STORAGE_ROOT / "trash")
+    init_storage()
+    return storage_locations()
+
+
+def storage_locations() -> dict[str, str]:
+    return {
+        "storage_root": str(STORAGE_ROOT),
+        "image_cache": str(IMAGE_DIR),
+        "document_cache": str(DOCUMENT_DIR),
+        "media_cache": str(MEDIA_DIR),
+        "raw_library": str(RAW_MATERIAL_DIR),
+        "focus_library": str(KNOWLEDGE_DIR),
+        "perspective_library": str(MINING_DIR),
+        "writer_projects": str(WRITER_DIR),
+        "trash": str(TRASH_DIR),
+        "database": str(DB_PATH),
+    }
 
 
 def storage_relative(path: Path) -> str:

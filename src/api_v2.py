@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 import urllib.error
@@ -102,6 +104,10 @@ class LibraryFileUpdateRequest(BaseModel):
     title: str
     note: str = ""
     markdown: str
+
+
+class TrashSelectionRequest(BaseModel):
+    trash_paths: list[str]
 
 
 class MinePerspectiveProfile(BaseModel):
@@ -389,6 +395,80 @@ def update_library_file(library_id: str, markdown_path: str, request: LibraryFil
     if request.note.strip():
         item["note"] = request.note.strip()
     return success_payload(data={"ok": True, "item": item, "markdown": text})
+
+
+@router.delete("/libraries/{library_id}/file")
+def delete_library_file(library_id: str, markdown_path: str) -> dict[str, object]:
+    path = _resolve_library_markdown_path(library_id, markdown_path)
+    trashed_path = _move_library_file_to_trash(library_id, path)
+    return success_payload(
+        data={
+            "ok": True,
+            "item": {
+                "library": library_id,
+                "markdown_path": storage.storage_relative(path),
+                "trash_path": storage.storage_relative(trashed_path),
+            },
+            "trash": _trash_status(),
+        }
+    )
+
+
+@router.get("/settings/trash")
+def settings_trash_status() -> dict[str, object]:
+    return success_payload(data={**_trash_status(), "items": _list_trash_files()})
+
+
+@router.post("/settings/trash/delete")
+def delete_selected_trash_files(request: TrashSelectionRequest) -> dict[str, object]:
+    result = _delete_trash_paths(request.trash_paths)
+    return success_payload(data={"ok": True, **result, **_trash_status(), "items": _list_trash_files()})
+
+
+@router.post("/settings/trash/restore")
+def restore_selected_trash_files(request: TrashSelectionRequest) -> dict[str, object]:
+    result = _restore_trash_paths(request.trash_paths)
+    return success_payload(data={"ok": True, **result, **_trash_status(), "items": _list_trash_files()})
+
+
+@router.delete("/settings/trash")
+def clear_settings_trash() -> dict[str, object]:
+    status = _trash_status()
+    deleted_files = int(status["file_count"])
+    deleted_bytes = int(status["size_bytes"])
+    manifest = _load_trash_manifest()
+    remaining_manifest: dict[str, dict[str, object]] = {}
+    failed_sources: list[str] = []
+    for source, entry in manifest.items():
+        source_path = Path(source)
+        try:
+            if source_path.exists():
+                _unlink_writable(source_path)
+        except OSError:
+            remaining_manifest[source] = entry
+            failed_sources.append(source)
+    if storage.TRASH_DIR.exists():
+        for child in storage.TRASH_DIR.iterdir():
+            if child.name == ".trash_manifest.json":
+                continue
+            if child.is_dir():
+                _rmtree_writable(child)
+            else:
+                _unlink_writable(child)
+    storage.TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    if remaining_manifest:
+        _save_trash_manifest(remaining_manifest)
+    else:
+        _trash_manifest_path().unlink(missing_ok=True)
+    return success_payload(
+        data={
+            "ok": True,
+            "deleted_files": deleted_files,
+            "deleted_bytes": deleted_bytes,
+            "failed_sources": failed_sources,
+            **_trash_status(),
+        }
+    )
 
 
 @router.post("/collect/text")
@@ -782,8 +862,8 @@ def create_writer_article(project_id: str, request: CreateWriterArticleRequest) 
             "ok": True,
             **result.model_dump(),
             "project": project,
-            "workspace": str(workspace.relative_to(storage.ROOT)),
-            "article_path": str(article_path.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
+            "article_path": storage.storage_relative(article_path),
         }
     )
 
@@ -816,9 +896,9 @@ def create_writer_revise(project_id: str, request: CreateWriterReviseRequest) ->
             "ok": True,
             **result.model_dump(),
             "project": project,
-            "workspace": str(workspace.relative_to(storage.ROOT)),
-            "article_path": str(article_path.relative_to(storage.ROOT)),
-            "version_path": str(version_path.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
+            "article_path": storage.storage_relative(article_path),
+            "version_path": storage.storage_relative(version_path),
         }
     )
 
@@ -835,7 +915,7 @@ def create_writer_format(project_id: str, request: CreateWriterFormatRequest) ->
         data={
             "ok": True,
             "project": project,
-            "workspace": str(workspace.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
             **result,
         }
     )
@@ -856,7 +936,7 @@ def create_writer_publish_preflight(project_id: str, request: CreateWriterPublis
     return success_payload(
         data={
             "project": project,
-            "workspace": str(workspace.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
             **result,
         }
     )
@@ -880,7 +960,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
                 "ok": False,
                 "error": "发布预检未通过",
                 "project": project,
-                "workspace": str(workspace.relative_to(storage.ROOT)),
+                "workspace": storage.storage_relative(workspace),
                 "preflight": preflight,
             }
         )
@@ -895,7 +975,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
         data={
             "ok": True,
             "project": writer_tools.load_project(project_id),
-            "workspace": str(workspace.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
             "preflight": preflight,
             **result,
         }
@@ -977,18 +1057,34 @@ def _settings_error_section(section_id: str, label: str, error: object) -> dict[
 
 
 def _list_library_files(library_id: str, pending_focus: bool = False) -> list[dict[str, object]]:
-    roots = {
-        "raw": storage.ROOT / "raw_materials",
-        "focus": storage.KNOWLEDGE_DIR,
-        "perspective": storage.MINING_DIR,
-    }
-    root = roots.get(library_id)
-    if root is None:
+    roots = _library_scan_roots(library_id)
+    if not roots:
         raise ValueError(f"Unsupported library: {library_id}")
-    if not root.exists():
-        return []
 
-    files = sorted(root.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+    trashed_sources = _trashed_source_paths()
+    seen: set[object] = set()
+    files: list[Path] = []
+    for root in roots:
+        try:
+            if not root.exists():
+                continue
+            root_files = list(root.rglob("*.md"))
+        except OSError:
+            continue
+        for path in root_files:
+            resolved = path.resolve()
+            if str(resolved) in trashed_sources:
+                continue
+            try:
+                identity: object = path.relative_to(root)
+            except ValueError:
+                identity = resolved
+            if identity in seen or resolved in seen:
+                continue
+            seen.add(identity)
+            seen.add(resolved)
+            files.append(path)
+    files = sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)
     items = [_library_file_payload(path, library_id) for path in files[:200]]
     if library_id == "raw" and pending_focus:
         processed_paths = _processed_raw_material_paths()
@@ -1027,36 +1123,298 @@ def _read_library_file(library_id: str, markdown_path: str) -> tuple[dict[str, o
     return _library_file_payload(path, library_id), text
 
 
-def _resolve_library_markdown_path(library_id: str, markdown_path: str) -> Path:
-    roots = {
-        "raw": storage.ROOT / "raw_materials",
+def _move_library_file_to_trash(library_id: str, path: Path) -> Path:
+    library_name = {"raw": "raw", "focus": "focus", "perspective": "perspective"}.get(library_id, library_id)
+    relative_path: Path | None = None
+    for root in _library_scan_roots(library_id):
+        try:
+            relative_path = path.resolve().relative_to(root.resolve())
+            break
+        except ValueError:
+            continue
+    if relative_path is None:
+        relative_path = Path(path.name)
+    target = storage.TRASH_DIR / library_name / relative_path
+    if target.exists():
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        target = target.with_name(f"{target.stem}_{stamp}{target.suffix}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        os.replace(path, target)
+    except OSError:
+        shutil.copy2(path, target)
+        try:
+            path.chmod(path.stat().st_mode | stat.S_IWRITE)
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except OSError as exc:
+            _record_trashed_source(path, target, exc)
+    return target
+
+
+def _trash_manifest_path() -> Path:
+    return storage.TRASH_DIR / ".trash_manifest.json"
+
+
+def _load_trash_manifest() -> dict[str, dict[str, object]]:
+    path = _trash_manifest_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+
+
+def _save_trash_manifest(payload: dict[str, dict[str, object]]) -> None:
+    path = _trash_manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _trashed_source_paths() -> set[str]:
+    return set(_load_trash_manifest().keys())
+
+
+def _record_trashed_source(source_path: Path, trash_path: Path, error: OSError) -> None:
+    manifest = _load_trash_manifest()
+    resolved = str(source_path.resolve())
+    manifest[resolved] = {
+        "source_path": resolved,
+        "trash_path": str(trash_path.resolve()),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "delete_error": str(error),
+    }
+    _save_trash_manifest(manifest)
+
+
+def _trash_library_roots() -> dict[str, Path]:
+    return {
+        "raw": storage.RAW_MATERIAL_DIR,
         "focus": storage.KNOWLEDGE_DIR,
         "perspective": storage.MINING_DIR,
     }
-    expected_parts = {
-        "raw": "raw_materials",
-        "focus": "knowledge",
-        "perspective": "mining",
+
+
+def _resolve_trash_path(trash_path: str) -> Path:
+    normalized = trash_path.replace("\\", "/").strip()
+    candidate = Path(normalized)
+    if not normalized or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"垃圾箱路径无效：{trash_path}")
+    path = storage.TRASH_DIR.joinpath(*candidate.parts).resolve()
+    root = storage.TRASH_DIR.resolve()
+    if path != root and root not in path.parents:
+        raise ValueError(f"垃圾箱路径越界：{trash_path}")
+    return path
+
+
+def _trash_relative(path: Path) -> str:
+    return str(path.resolve().relative_to(storage.TRASH_DIR.resolve()))
+
+
+def _trash_source_for(trash_path: Path) -> str:
+    resolved_trash = str(trash_path.resolve())
+    for source, entry in _load_trash_manifest().items():
+        if str(entry.get("trash_path") or "") == resolved_trash:
+            return source
+    return ""
+
+
+def _make_writable(path: Path) -> None:
+    if path.exists():
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+
+
+def _unlink_writable(path: Path) -> None:
+    if path.exists():
+        _make_writable(path)
+        path.unlink()
+
+
+def _rmtree_writable(path: Path) -> None:
+    def handle_remove_error(func, failed_path, _exc_info):
+        failed = Path(failed_path)
+        _make_writable(failed)
+        func(failed_path)
+
+    shutil.rmtree(path, onerror=handle_remove_error)
+
+
+def _list_trash_files() -> list[dict[str, object]]:
+    storage.TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    items: list[dict[str, object]] = []
+    for path in storage.TRASH_DIR.rglob("*.md"):
+        if path.name == ".trash_manifest.json":
+            continue
+        try:
+            relative = path.resolve().relative_to(storage.TRASH_DIR.resolve())
+        except ValueError:
+            continue
+        parts = relative.parts
+        library = parts[0] if parts else ""
+        if library not in {"raw", "focus", "perspective"}:
+            library = ""
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        stat_result = path.stat()
+        items.append(
+            {
+                "id": str(relative),
+                "trash_path": str(relative),
+                "title": _markdown_title(text) or path.stem,
+                "library": library,
+                "source_path": _trash_source_for(path),
+                "deleted_at": datetime.fromtimestamp(stat_result.st_mtime).isoformat(timespec="seconds"),
+                "size": stat_result.st_size,
+            }
+        )
+    return sorted(items, key=lambda item: str(item.get("deleted_at") or ""), reverse=True)
+
+
+def _delete_trash_paths(trash_paths: list[str]) -> dict[str, object]:
+    manifest = _load_trash_manifest()
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+    for item in trash_paths:
+        try:
+            path = _resolve_trash_path(item)
+            source_path = _trash_source_for(path)
+            if path.exists() and path.is_file():
+                _unlink_writable(path)
+            if source_path:
+                source = Path(source_path)
+                if source.exists():
+                    _unlink_writable(source)
+                manifest.pop(source_path, None)
+            deleted.append(item)
+        except OSError as exc:
+            errors.append({"path": item, "error": str(exc)})
+    _save_trash_manifest(manifest) if manifest else _trash_manifest_path().unlink(missing_ok=True)
+    return {"deleted": deleted, "errors": errors}
+
+
+def _restore_trash_paths(trash_paths: list[str]) -> dict[str, object]:
+    manifest = _load_trash_manifest()
+    restored: list[str] = []
+    errors: list[dict[str, str]] = []
+    roots = _trash_library_roots()
+    for item in trash_paths:
+        try:
+            path = _resolve_trash_path(item)
+            source_path = _trash_source_for(path)
+            if source_path and Path(source_path).exists():
+                manifest.pop(source_path, None)
+                if path.exists():
+                    path.unlink()
+                restored.append(item)
+                continue
+            relative = path.resolve().relative_to(storage.TRASH_DIR.resolve())
+            parts = relative.parts
+            if len(parts) < 2 or parts[0] not in roots:
+                raise ValueError(f"无法判断恢复目标库：{item}")
+            target = roots[parts[0]].joinpath(*parts[1:])
+            if target.exists():
+                stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                target = target.with_name(f"{target.stem}_{stamp}{target.suffix}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(path, target)
+            restored.append(item)
+        except (OSError, ValueError) as exc:
+            errors.append({"path": item, "error": str(exc)})
+    _save_trash_manifest(manifest) if manifest else _trash_manifest_path().unlink(missing_ok=True)
+    return {"restored": restored, "errors": errors}
+
+
+def _trash_status() -> dict[str, object]:
+    storage.TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    files: list[Path] = []
+    for path in storage.TRASH_DIR.rglob("*"):
+        if path.is_file() and path.name != ".trash_manifest.json":
+            files.append(path)
+    size_bytes = sum(path.stat().st_size for path in files)
+    latest = max((path.stat().st_mtime for path in files), default=0)
+    return {
+        "path": str(storage.TRASH_DIR),
+        "file_count": len(files),
+        "size_bytes": size_bytes,
+        "updated_at": datetime.fromtimestamp(latest).isoformat(timespec="seconds") if latest else "",
     }
+
+
+def _resolve_library_markdown_path(library_id: str, markdown_path: str) -> Path:
+    roots = _library_roots()
     root = roots.get(library_id)
-    expected_root = expected_parts.get(library_id)
-    if root is None or expected_root is None:
+    if root is None:
         raise ValueError(f"Unsupported library: {library_id}")
     normalized = markdown_path.replace("\\", "/").strip()
     candidate = Path(normalized)
-    if not normalized or candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError(f"只能读取库内相对路径：{markdown_path}")
-    if not candidate.parts or candidate.parts[0] != expected_root:
-        raise ValueError(f"{library_id} 文件路径不属于 {expected_root}：{markdown_path}")
-    path = root.joinpath(*candidate.parts[1:])
+    if not normalized or ".." in candidate.parts:
+        raise ValueError(f"只能读取库内路径：{markdown_path}")
+    if candidate.is_absolute():
+        path = candidate
+    else:
+        path = root.joinpath(*candidate.parts)
+        if not path.exists():
+            path = storage.STORAGE_ROOT.joinpath(*candidate.parts)
+        if not path.exists():
+            path = storage.ROOT.joinpath(*candidate.parts)
     if not path.exists() or not path.is_file() or path.suffix.lower() != ".md":
         raise FileNotFoundError(f"库文件不存在：{markdown_path}")
-    resolved_root = root.resolve()
     resolved_path = path.resolve()
-    if resolved_root not in resolved_path.parents and resolved_path != resolved_root:
+    allowed_roots = [candidate.resolve() for candidate in _library_scan_roots(library_id)]
+    if not any(candidate in resolved_path.parents or resolved_path == candidate for candidate in allowed_roots):
         raise ValueError(f"文件路径越界：{markdown_path}")
     return path
 
+
+def _library_roots() -> dict[str, Path]:
+    return {
+        "raw": storage.RAW_MATERIAL_DIR,
+        "focus": storage.KNOWLEDGE_DIR,
+        "perspective": storage.MINING_DIR,
+    }
+
+
+def _library_scan_roots(library_id: str) -> list[Path]:
+    roots = _library_roots()
+    root = roots.get(library_id)
+    if root is None:
+        return []
+    candidates = [root]
+    legacy_roots = {
+        "raw": storage.ROOT / "raw_materials",
+        "focus": storage.ROOT / "knowledge",
+        "perspective": storage.ROOT / "mining",
+    }
+    legacy_root = legacy_roots.get(library_id)
+    if legacy_root is not None:
+        candidates.append(legacy_root)
+    if storage.ROOT == storage.DEFAULT_ROOT:
+        system_roots = {
+            "raw": storage.SYSTEM_DATA_DIR / "raw_materials",
+            "focus": storage.SYSTEM_DATA_DIR / "knowledge",
+            "perspective": storage.SYSTEM_DATA_DIR / "mining",
+        }
+        system_root = system_roots.get(library_id)
+        if system_root is not None:
+            candidates.append(system_root)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
 
 def _replace_markdown_title(markdown: str, title: str) -> str:
     text = markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1207,51 +1565,30 @@ def _read_mine_source(source: LibrarySourceRequest) -> dict[str, str]:
     library = source.library.strip()
     if library not in {"raw", "focus"}:
         raise ValueError("挖掘队列当前只支持原料库和重点库文件")
-    candidate = Path(source.markdown_path)
-    if not source.markdown_path.strip() or candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError(f"只能选择库内相对路径：{source.markdown_path}")
-    expected_root = "raw_materials" if library == "raw" else "knowledge"
-    if not candidate.parts or candidate.parts[0] != expected_root:
-        raise ValueError(f"{library} 文件路径不属于 {expected_root}：{source.markdown_path}")
-    path = storage.ROOT / candidate
-    if not path.exists() or not path.is_file() or path.suffix.lower() != ".md":
-        raise FileNotFoundError(f"挖掘来源文件不存在：{source.markdown_path}")
+    path = _resolve_library_markdown_path(library, source.markdown_path)
     text = path.read_text(encoding="utf-8", errors="ignore")
     return {
         "library": library,
         "title": source.title.strip() or _markdown_title(text) or path.stem,
-        "relative_path": str(candidate),
+        "relative_path": storage.storage_relative(path),
         "text": text,
     }
 
 
 def _read_create_source(source: LibrarySourceRequest) -> dict[str, str]:
     library = source.library.strip()
-    allowed_roots = {
-        "raw": "raw_materials",
-        "focus": "knowledge",
-        "perspective": "mining",
-    }
-    expected_root = allowed_roots.get(library)
-    if expected_root is None:
+    if library not in {"raw", "focus", "perspective"}:
         raise ValueError("创作项目只支持原料库、重点库和视角库文件")
-    candidate = Path(source.markdown_path)
-    if not source.markdown_path.strip() or candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError(f"只能选择库内相对路径：{source.markdown_path}")
-    if not candidate.parts or candidate.parts[0] != expected_root:
-        raise ValueError(f"{library} 文件路径不属于 {expected_root}：{source.markdown_path}")
-    path = storage.ROOT / candidate
-    if not path.exists() or not path.is_file() or path.suffix.lower() != ".md":
-        raise FileNotFoundError(f"创作来源文件不存在：{source.markdown_path}")
+    path = _resolve_library_markdown_path(library, source.markdown_path)
     text = path.read_text(encoding="utf-8", errors="ignore")
+    relative_path = storage.storage_relative(path)
     return {
         "library": library,
         "title": source.title.strip() or _markdown_title(text) or path.stem,
-        "markdown_path": str(candidate),
-        "relative_path": str(candidate),
+        "markdown_path": relative_path,
+        "relative_path": relative_path,
         "text": text,
     }
-
 
 def _project_writer_sources(project: dict[str, object], request_files: list[LibrarySourceRequest] | None) -> list[dict[str, str]]:
     if request_files is not None:
@@ -1327,25 +1664,13 @@ def _processed_raw_material_paths() -> set[str]:
 
 
 def _read_raw_material_file(relative_path: str) -> dict[str, str]:
-    candidate = Path(relative_path)
-    if not relative_path.strip():
-        raise ValueError("原料文件路径不能为空")
-    if candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError(f"只能选择原料库相对路径：{relative_path}")
-    if not candidate.parts or candidate.parts[0] != "raw_materials":
-        raise ValueError(f"只能选择原料库文件：{relative_path}")
-    path = storage.ROOT / candidate
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"原料文件不存在：{relative_path}")
-    if path.suffix.lower() != ".md":
-        raise ValueError(f"原料库只支持 Markdown 文件：{relative_path}")
+    path = _resolve_library_markdown_path("raw", relative_path)
     text = path.read_text(encoding="utf-8", errors="ignore")
     return {
         "title": _markdown_title(text) or path.stem,
-        "relative_path": str(candidate),
+        "relative_path": storage.storage_relative(path),
         "text": text,
     }
-
 
 def _combine_raw_material_sources(sources: list[dict[str, str]]) -> str:
     blocks = []
@@ -1470,7 +1795,7 @@ def _write_raw_markdown(
     storage.init_storage()
     now = datetime.now().isoformat(timespec="seconds")
     content_hash = hashlib.sha256(f"{material_type}|{source}|{body}".encode("utf-8")).hexdigest()
-    dated_dir = storage.ROOT / "raw_materials" / datetime.now().strftime("%Y-%m-%d")
+    dated_dir = storage.RAW_MATERIAL_DIR / datetime.now().strftime("%Y-%m-%d")
     dated_dir.mkdir(parents=True, exist_ok=True)
     path = dated_dir / f"{storage.safe_filename(title, fallback='raw-material')}_{content_hash[:8]}.md"
     meta = {
@@ -1489,7 +1814,7 @@ def _write_raw_markdown(
         "title": title,
         "material_type": material_type,
         "source": source,
-        "markdown_path": str(path.relative_to(storage.ROOT)),
+        "markdown_path": storage.storage_relative(path),
         "created_at": now,
         "hash": content_hash,
     }
@@ -2348,9 +2673,19 @@ def _extract_meta(html_text: str, names: list[str]) -> str:
 
 
 def _looks_like_login_wall(html_text: str, final_url: str) -> bool:
-    lower = (html_text + " " + final_url).lower()
+    visible_text = _html_to_text(html_text)
+    if len(visible_text) >= 800:
+        return False
+
+    lower_html = html_text.lower()
+    lower_visible = visible_text.lower()
+    lower_url = final_url.lower()
+    form_like = bool(
+        re.search(r"<input[^>]+type=[\"']?(password|submit)[\"']?", lower_html, flags=re.IGNORECASE)
+        or re.search(r"<form[^>]+(?:login|signin|auth|passport)", lower_html, flags=re.IGNORECASE)
+    )
     markers = ["login", "sign in", "signin", "登录", "请登录", "权限", "unauthorized", "forbidden"]
-    return any(marker in lower for marker in markers)
+    return form_like or any(marker in lower_visible or marker in lower_url for marker in markers)
 
 
 def _looks_like_dynamic_page(html_text: str) -> bool:

@@ -11,6 +11,8 @@ import type {
 } from "./domain";
 
 const API_BASE = "";
+const READABLE_DRAFT_TIMEOUT_MS = 120_000;
+const DRAFT_META_TIMEOUT_MS = 30_000;
 
 export type LibraryKind = "original" | "focus" | "perspective";
 
@@ -65,13 +67,28 @@ type ReadableDraftPayload = {
   errors?: string[];
 };
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, init);
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(readError(text) || `${response.status} ${response.statusText}`);
+async function requestJson<T>(path: string, init?: RequestInit, options?: { timeoutMs?: number }): Promise<T> {
+  const timeoutMs = options?.timeoutMs;
+  const controller = timeoutMs ? new AbortController() : undefined;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
+    : undefined;
+  const signal = controller?.signal ?? init?.signal;
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { ...init, signal });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(readError(text) || `${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Readable original generation timed out. For Douyin links, upload the local video/subtitle or configure ASR, then try again.");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
   }
-  return response.json() as Promise<T>;
 }
 
 function readError(text: string) {
@@ -252,6 +269,44 @@ export type WriterLibraryFileInput = {
 
 export type WorkbenchSettings = {
   text_extraction_mode: TextExtractionMode;
+  storage_locations?: StorageLocations;
+};
+
+export type StorageLocations = {
+  storage_root?: string;
+  image_cache?: string;
+  document_cache?: string;
+  media_cache?: string;
+  raw_library?: string;
+  focus_library?: string;
+  perspective_library?: string;
+  writer_projects?: string;
+  trash?: string;
+  database?: string;
+};
+
+export type TrashStatus = {
+  path: string;
+  file_count: number;
+  size_bytes: number;
+  updated_at?: string;
+  deleted_files?: number;
+  deleted_bytes?: number;
+  deleted?: string[];
+  restored?: string[];
+  errors?: Array<{ path?: string; error?: string }>;
+  items?: TrashFileItem[];
+  ok?: boolean;
+};
+
+export type TrashFileItem = {
+  id: string;
+  trash_path: string;
+  title: string;
+  library: LibraryKind | "raw" | "";
+  source_path?: string;
+  deleted_at?: string;
+  size?: number;
 };
 
 export type BilibiliCookieStatus = {
@@ -573,6 +628,43 @@ export const api = {
     return toLibraryKnowledge({ ...(data.item ?? {}), markdown: data.markdown }, Date.now());
   },
 
+  async deleteLibraryFile(library: LibraryKind, markdownPath: string): Promise<TrashStatus> {
+    const response = await requestJson<V2Payload<{ ok: boolean; error?: string; trash?: TrashStatus }>>(
+      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
+      { method: "DELETE" },
+    );
+    const data = assertV2Ok(response);
+    return data.trash ?? { path: "", file_count: 0, size_bytes: 0 };
+  },
+
+  async trashStatus(): Promise<TrashStatus> {
+    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash");
+    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+  },
+
+  async clearTrash(): Promise<TrashStatus> {
+    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash", { method: "DELETE" });
+    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+  },
+
+  async deleteTrashFiles(trashPaths: string[]): Promise<TrashStatus> {
+    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trash_paths: trashPaths }),
+    });
+    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+  },
+
+  async restoreTrashFiles(trashPaths: string[]): Promise<TrashStatus> {
+    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trash_paths: trashPaths }),
+    });
+    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+  },
+
   async createRawLibraryFile(materials: SourceMaterial[], title = ""): Promise<RawLibraryResult> {
     if (!materials.length) throw new Error("No material selected for raw library file.");
     const materialType = rawMaterialType(materials);
@@ -627,7 +719,7 @@ export const api = {
             access_status: material.status,
           })),
         }),
-      });
+      }, { timeoutMs: READABLE_DRAFT_TIMEOUT_MS });
       const data = assertV2Ok(payload);
       readable = {
         id: `readable-${Date.now()}`,
@@ -642,7 +734,7 @@ export const api = {
       readable = await this.readableDocument(materials, parserMode);
     }
     const meta = await this
-      .knowledgeDraftMeta(materials, readable.body, "zh")
+      .knowledgeDraftMeta(materials, readable.body, "zh", DRAFT_META_TIMEOUT_MS)
       .catch(() => ({ title: readable.title, note: readable.note ?? "" }));
     return {
       title: meta.title?.trim() || readable.title || materials[0]?.title || "未命名原文",
@@ -836,7 +928,7 @@ export const api = {
     };
   },
 
-  knowledgeDraftMeta(materials: SourceMaterial[], body: string, language: string) {
+  knowledgeDraftMeta(materials: SourceMaterial[], body: string, language: string, timeoutMs?: number) {
     return requestJson<{ title?: string; note?: string }>("/api/knowledge/draft-meta", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -849,7 +941,7 @@ export const api = {
         body,
         language,
       }),
-    });
+    }, timeoutMs ? { timeoutMs } : undefined);
   },
 
   async commitKnowledgeDraft(draft: KnowledgeDraft): Promise<KnowledgeItem> {

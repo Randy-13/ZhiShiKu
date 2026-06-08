@@ -23,7 +23,8 @@ import image_api_settings
 import storage
 
 
-WRITER_DIR = storage.ROOT / "writer"
+WRITER_DIR = storage.WRITER_DIR
+_LAST_STORAGE_WRITER_DIR = storage.WRITER_DIR
 FORMATTER_SCRIPT = Path(r"C:\Users\Bo Yang\.codex\skills\wechat-article-formatter\scripts\markdown_to_html.py")
 CODE_BLOCK_SCRIPT = Path(r"C:\Users\Bo Yang\.codex\skills\wechat-article-formatter\scripts\convert-code-blocks.py")
 PUBLISHER_SCRIPT = Path(r"C:\Users\Bo Yang\.codex\skills\wechat-draft-publisher\publisher.py")
@@ -128,14 +129,22 @@ def safe_slug(value: str, fallback: str = "article") -> str:
     return text[:48] or fallback
 
 
+def writer_dir() -> Path:
+    global WRITER_DIR, _LAST_STORAGE_WRITER_DIR
+    if WRITER_DIR == _LAST_STORAGE_WRITER_DIR:
+        WRITER_DIR = storage.WRITER_DIR
+    _LAST_STORAGE_WRITER_DIR = storage.WRITER_DIR
+    return WRITER_DIR
+
+
 def dated_workspace(topic: str) -> Path:
-    root = WRITER_DIR / datetime.now().strftime("%Y-%m-%d") / safe_slug(topic)
+    root = writer_dir() / datetime.now().strftime("%Y-%m-%d") / safe_slug(topic)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def projects_dir() -> Path:
-    return WRITER_DIR / "projects"
+    return writer_dir() / "projects"
 
 
 def create_project(
@@ -257,7 +266,7 @@ def resolve_workspace(path: str | None) -> Path:
     if not workspace.is_absolute():
         workspace = storage.ROOT / workspace
     workspace = workspace.resolve()
-    writer_root = WRITER_DIR.resolve()
+    writer_root = writer_dir().resolve()
     if writer_root not in workspace.parents and workspace != writer_root:
         raise ValueError("写文工作目录不在 writer/ 下")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -285,7 +294,7 @@ def write_article(workspace: Path, markdown: str, filename: str = "article.md") 
 
 
 def _relative(path: Path) -> str:
-    return str(path.relative_to(storage.ROOT))
+    return storage.storage_relative(path)
 
 
 def article_title(markdown: str, fallback: str) -> str:
@@ -347,10 +356,11 @@ def workspace_status(workspace: Path) -> dict[str, Any]:
 
 
 def list_workspaces() -> list[dict[str, Any]]:
-    if not WRITER_DIR.exists():
+    root = writer_dir()
+    if not root.exists():
         return []
     items: list[dict[str, Any]] = []
-    for date_dir in sorted(WRITER_DIR.iterdir(), reverse=True):
+    for date_dir in sorted(root.iterdir(), reverse=True):
         if not date_dir.is_dir():
             continue
         for workspace in sorted(date_dir.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
@@ -664,10 +674,10 @@ def publish_draft_builtin(
         "stdout": json.dumps(data, ensure_ascii=False),
         "stderr": "",
         "author": author or "Bobo",
-        "content_path": str(publish_html_path.relative_to(storage.ROOT)),
-        "source_content_path": str(html_path.relative_to(storage.ROOT)),
+        "content_path": _relative(publish_html_path),
+        "source_content_path": _relative(html_path),
         "invalidated_token_cache": invalidated_token,
-        "cover_path": str(cover.relative_to(storage.ROOT)) if cover.exists() and storage.ROOT in cover.parents else str(cover),
+        "cover_path": _relative(cover) if cover.exists() else str(cover),
         "thumb_media_id": thumb_media_id,
         "media_id": media_id,
         "uploaded_content_images": uploaded_images,
@@ -675,7 +685,7 @@ def publish_draft_builtin(
     }
     result_path = workspace / "publish_result.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    result["path"] = str(result_path.relative_to(storage.ROOT))
+    result["path"] = _relative(result_path)
     return result
 
 
@@ -730,13 +740,13 @@ def publish_preflight(
             "key": "article_markdown",
             "label": "文章 Markdown",
             "ok": article_path.exists(),
-            "detail": str(article_path.relative_to(storage.ROOT)) if article_path.exists() else "缺少 article.md",
+            "detail": _relative(article_path) if article_path.exists() else "缺少 article.md",
         },
         {
             "key": "html",
             "label": "微信公众号 HTML",
             "ok": html_path.exists() and bool(html_text.strip()),
-            "detail": f"{html_path.relative_to(storage.ROOT) if html_path.exists() else '缺少 formatted.html'}; {len(html_text)} 字符",
+            "detail": f"{_relative(html_path) if html_path.exists() else '缺少 formatted.html'}; {len(html_text)} 字符",
         },
         {
             "key": "cover",
@@ -1009,7 +1019,7 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
         raise RuntimeError(f"图片 API 返回结构中没有 b64_json 或 url：{json.dumps(data, ensure_ascii=False)[:500]}")
 
     return {
-        "path": str(output_path.relative_to(storage.ROOT)),
+        "path": _relative(output_path),
         "absolute_path": str(output_path),
         "prompt": prompt,
         "model": resolved.get("model", ""),
@@ -1028,7 +1038,7 @@ def generate_writer_images(
         if not path.exists():
             return None
         return {
-            "path": str(path.relative_to(storage.ROOT)),
+            "path": _relative(path),
             "absolute_path": str(path),
             "prompt": prompt,
             "reused_existing": True,
@@ -1178,7 +1188,7 @@ def ensure_content_images_in_markdown(workspace: Path, markdown_text: str) -> st
     total = len(items)
     for position, item in enumerate(items, start=1):
         image_path = item["path"]
-        relative = str(image_path.relative_to(storage.ROOT)).replace("\\", "/")
+        relative = _relative(image_path).replace("\\", "/")
         keywords = image_prompt_keywords(item.get("prompt", ""))
         fallback_ratio = 0.35 + (position - 1) * (0.45 / max(1, total - 1))
         line_index = best_image_insert_line(lines, keywords, used_lines, fallback_ratio)
@@ -1196,7 +1206,7 @@ def resolve_writer_file(path: str) -> Path:
     if not resolved:
         raise ValueError("缺少文件路径")
     resolved = resolved.resolve()
-    writer_root = WRITER_DIR.resolve()
+    writer_root = writer_dir().resolve()
     if writer_root not in resolved.parents and resolved != writer_root:
         raise ValueError("只能预览 writer/ 下的文件")
     if not resolved.exists() or not resolved.is_file():
@@ -1332,7 +1342,7 @@ def format_article(
             html_text = add_publish_emphasis(html_text)
             html_path.write_text(html_text, encoding="utf-8")
             return {
-                "path": str(html_path.relative_to(storage.ROOT)),
+                "path": _relative(html_path),
                 "absolute_path": str(html_path),
                 "html": html_text,
                 "stdout": "generated by API design formatter",
@@ -1349,7 +1359,7 @@ def format_article(
         html_text = add_publish_emphasis(html_text)
         html_path.write_text(html_text, encoding="utf-8")
         return {
-            "path": str(html_path.relative_to(storage.ROOT)),
+            "path": _relative(html_path),
             "absolute_path": str(html_path),
             "html": html_text,
             "stdout": "",
@@ -1368,7 +1378,7 @@ def format_article(
         )
         html_text = html_path.read_text(encoding="utf-8")
         return {
-            "path": str(html_path.relative_to(storage.ROOT)),
+            "path": _relative(html_path),
             "absolute_path": str(html_path),
             "html": html_text,
             "stdout": "",
@@ -1394,7 +1404,7 @@ def format_article(
     html = add_publish_emphasis(html)
     html_path.write_text(html, encoding="utf-8")
     return {
-        "path": str(html_path.relative_to(storage.ROOT)),
+        "path": _relative(html_path),
         "absolute_path": str(html_path),
         "html": html,
         "stdout": completed.stdout,
@@ -1446,9 +1456,9 @@ def publish_draft(
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or "",
             "author": author or "Bobo",
-            "content_path": str(publish_html_path.relative_to(storage.ROOT)),
-            "source_content_path": str(html_path.relative_to(storage.ROOT)),
-            "cover_path": str(cover.relative_to(storage.ROOT)) if cover.exists() and storage.ROOT in cover.parents else str(cover),
+            "content_path": _relative(publish_html_path),
+            "source_content_path": _relative(html_path),
+            "cover_path": _relative(cover) if cover.exists() else str(cover),
             "timeout": True,
             "timeout_seconds": exc.timeout,
             "command": [str(sys.executable), *command],
@@ -1456,7 +1466,7 @@ def publish_draft(
         result_path = workspace / "publish_result.json"
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError(
-            f"转入草稿箱超时（{int(exc.timeout)}秒）。已保存发布检查结果：{result_path.relative_to(storage.ROOT)}。"
+            f"转入草稿箱超时（{int(exc.timeout)}秒）。已保存发布检查结果：{_relative(result_path)}。"
             "这通常是微信发布脚本等待网络、授权或接口响应过久导致，请稍后在目录中继续发布。"
         ) from exc
     result = {
@@ -1464,17 +1474,17 @@ def publish_draft(
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "author": author or "Bobo",
-        "content_path": str(publish_html_path.relative_to(storage.ROOT)),
-        "source_content_path": str(html_path.relative_to(storage.ROOT)),
+        "content_path": _relative(publish_html_path),
+        "source_content_path": _relative(html_path),
         "invalidated_token_cache": invalidated_token,
-        "cover_path": str(cover.relative_to(storage.ROOT)) if cover.exists() and storage.ROOT in cover.parents else str(cover),
+        "cover_path": _relative(cover) if cover.exists() else str(cover),
     }
     media_ids = re.findall(r"media_id[:：]\s*([A-Za-z0-9_\-]+)", completed.stdout + "\n" + completed.stderr)
     if media_ids:
         result["media_id"] = media_ids[-1]
     result_path = workspace / "publish_result.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    result["path"] = str(result_path.relative_to(storage.ROOT))
+    result["path"] = _relative(result_path)
     if completed.returncode != 0:
         raw = (completed.stderr or completed.stdout or "").strip()
         if "错误码40001" in raw or "errcode\":40001" in raw or "AppSecret错误" in raw:

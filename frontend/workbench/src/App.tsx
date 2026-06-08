@@ -22,6 +22,7 @@ import type {
 import { createTranslator, workspaceLabel } from "./i18n";
 import { AppShell } from "./shell/AppShell";
 import { CollectWorkspace } from "./workspaces/CollectWorkspace";
+import type { CollectInputBusy } from "./workspaces/CollectWorkspace";
 import { LearnWorkspace } from "./workspaces/LearnWorkspace";
 import { MineWorkspace } from "./workspaces/MineWorkspace";
 import { CreateWorkspace } from "./workspaces/CreateWorkspace";
@@ -83,6 +84,7 @@ export default function App() {
   const [libraryRailQuery, setLibraryRailQuery] = useState("");
   const [libraryRailCheckedIds, setLibraryRailCheckedIds] = useState<string[]>([]);
   const [isDeletingKnowledge, setIsDeletingKnowledge] = useState(false);
+  const [collectInputBusy, setCollectInputBusy] = useState<CollectInputBusy>(null);
   const [isCollectingReadable, setIsCollectingReadable] = useState(false);
   const [isSavingRawDraft, setIsSavingRawDraft] = useState(false);
   const [isLearning, setIsLearning] = useState(false);
@@ -101,7 +103,8 @@ export default function App() {
     ]);
   }, []);
 
-  const refreshLibraries = useCallback(async (options?: { selectFirst?: boolean }) => {
+  const refreshLibraries = useCallback(async (options?: { selectFirst?: boolean; clearChecked?: boolean }) => {
+    if (options?.clearChecked !== false) setLibraryRailCheckedIds([]);
     try {
       const groups = await Promise.all(libraryKinds.map((kind) => api.listLibraryFiles(kind)));
       const items = groups.flat();
@@ -301,7 +304,7 @@ export default function App() {
   const mineSourceDisabledReason = useMemo(() => {
     if (libraryRailBucket !== "original") return language === "zh" ? "请先把右侧知识列表切换到原文库。" : "Switch the right library rail to Originals first.";
     if (!selectedRailOriginals.length) return language === "zh" ? "请先在右侧原文库勾选解读来源。" : "Select source files in the right Originals rail first.";
-    if (selectedRailOriginals.some((item) => !item.markdownPath?.startsWith("raw_materials/"))) {
+    if (selectedRailOriginals.some((item) => !item.markdownPath)) {
       return language === "zh" ? "所选原文缺少可解读的 Markdown 路径。" : "The selected original is missing an interpretable Markdown path.";
     }
     return "";
@@ -309,7 +312,7 @@ export default function App() {
   const addToLearningQueueDisabledReason = useMemo(() => {
     if (libraryRailBucket !== "original") return t("learn.addToQueue.disabled.notOriginalBucket");
     if (!selectedRailOriginals.length) return t("learn.addToQueue.disabled.noOriginalSelection");
-    if (selectedRailOriginals.some((item) => !item.markdownPath?.startsWith("raw_materials/"))) {
+    if (selectedRailOriginals.some((item) => !item.markdownPath)) {
       return t("learn.addToQueue.disabled.missingPath");
     }
     return "";
@@ -347,6 +350,8 @@ export default function App() {
 
   const uploadFiles = useCallback(
     async (type: MaterialType, files: File[]) => {
+      if (!files.length) return;
+      setCollectInputBusy(type);
       try {
         const uploaded = await api.uploadMaterial(type, files);
         if (!uploaded.length) throw new Error("旧后端没有返回上传结果");
@@ -366,6 +371,8 @@ export default function App() {
             error: error instanceof Error ? error.message : "上传旧后端失败",
           }),
         );
+      } finally {
+        setCollectInputBusy(null);
       }
     },
     [createMaterial, insertMaterial],
@@ -373,6 +380,8 @@ export default function App() {
 
   const pasteImages = useCallback(
     async (files: File[]) => {
+      if (!files.length) return;
+      setCollectInputBusy("paste-image");
       try {
         const uploaded = await api.uploadPastedImages(files);
         if (!uploaded.length) throw new Error("旧后端没有返回粘贴截图结果");
@@ -388,6 +397,8 @@ export default function App() {
           }),
         );
         addActivity({ title: "粘贴截图后端上传失败", detail, workspace: "collect", status: "error" });
+      } finally {
+        setCollectInputBusy(null);
       }
     },
     [addActivity, createMaterial, insertMaterial],
@@ -466,8 +477,11 @@ export default function App() {
 
   const resolveLinksV2 = useCallback(
     async (urls: string[]) => {
+      if (!urls.length) return;
+      setCollectInputBusy("link");
       const existing = new Set(materials.map((item) => item.source));
-      for (const url of urls) {
+      try {
+        for (const url of urls) {
         if (existing.has(url)) continue;
         if (looksLikeMediaUrl(url)) {
           try {
@@ -517,6 +531,9 @@ export default function App() {
                   : "Link inspection failed, but you can still try generating the readable original.",
           });
         }
+        }
+      } finally {
+        setCollectInputBusy(null);
       }
     },
     [createMaterial, insertMaterial, language, materials],
@@ -605,7 +622,7 @@ export default function App() {
   const addSelectedOriginalsToLearningQueue = useCallback(() => {
     if (addToLearningQueueDisabledReason) return;
     const items = selectedRailOriginals
-      .filter((item) => item.markdownPath?.startsWith("raw_materials/"))
+      .filter((item) => item.markdownPath)
       .map((item) => ({
         id: item.id,
         type: "text" as const,
@@ -636,7 +653,7 @@ export default function App() {
     const selectedMaterials = learningQueue.filter((item) => idSet.has(item.id));
     if (!selectedMaterials.length) return;
     const rawPaths = selectedMaterials.map((item) => item.source).filter(Boolean);
-    const allRawLibraryFiles = rawPaths.length === selectedMaterials.length && selectedMaterials.every((item) => item.source.startsWith("raw_materials/"));
+    const allRawLibraryFiles = rawPaths.length === selectedMaterials.length && selectedMaterials.every((item) => item.source);
     setIsLearning(true);
     setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: "learning", error: undefined } : item)));
     try {
@@ -704,7 +721,7 @@ export default function App() {
 
   const commitKnowledgeDraft = useCallback(async () => {
     if (!knowledgeDraft) return;
-    const isFocusDraft = knowledgeDraft.sourceIds.some((sourceId) => sourceId.startsWith("raw_materials/"));
+    const isFocusDraft = knowledgeDraft.sourceIds.length > 0;
     let item: KnowledgeItem;
     try {
       item = isFocusDraft
@@ -743,7 +760,7 @@ export default function App() {
       setLearningQueue((current) => current.filter((queueItem) => !sourceIdSet.has(queueItem.source)));
       setLibraryRailBucket("focus");
     }
-    refreshLibraries().catch(() => undefined);
+    await refreshLibraries();
     addActivity({ title: item.title, detail: language === "zh" ? "重点文件已加入重点库" : "Focus file added to library", workspace: "library", status: "done" });
   }, [addActivity, knowledgeDraft, language, learningQueue, refreshLibraries]);
 
@@ -1066,49 +1083,63 @@ export default function App() {
       if (!ids.length) return;
       const idSet = new Set(ids);
       const selectedItems = knowledge.filter((item) => idSet.has(item.id));
-      const backendIds = selectedItems.map((item) => item.backendId).filter((id): id is number => typeof id === "number");
-      const localIds = selectedItems.filter((item) => !item.backendId).map((item) => item.id);
+      const fileItems = selectedItems.filter((item) => item.markdownPath && item.library);
+      const fileItemIds = new Set(fileItems.map((item) => item.id));
+      const backendIds = selectedItems
+        .filter((item) => !fileItemIds.has(item.id))
+        .map((item) => item.backendId)
+        .filter((id): id is number => typeof id === "number");
+      const localIds = selectedItems.filter((item) => !fileItemIds.has(item.id) && !item.backendId).map((item) => item.id);
+
+      let movedCount = 0;
+      for (const item of fileItems) {
+        if (!item.markdownPath || !item.library) continue;
+        await api.deleteLibraryFile(item.library, item.markdownPath);
+        movedCount += 1;
+      }
 
       if (backendIds.length) {
         const result = await api.deleteKnowledge(backendIds);
-        setKnowledge((current) => {
-          const localIdSet = new Set(localIds);
-          const localRemaining = current.filter((item) => !localIdSet.has(item.id) && !item.backendId);
-          const backendItems = result.items;
-          return [...backendItems, ...localRemaining];
-        });
-        const deletedCount = result.deleted.length + localIds.length;
+        const deletedCount = movedCount + result.deleted.length + localIds.length;
         const skippedCount = result.skipped.length;
         addActivity({
           title: language === "zh" ? "删除知识文件" : "Delete knowledge files",
           detail:
             language === "zh"
-              ? `已删除 ${deletedCount} 个文件${skippedCount ? `，${skippedCount} 个因已入图谱或状态限制未删除` : ""}`
-              : `Deleted ${deletedCount} file(s)${skippedCount ? `, ${skippedCount} skipped because of graph/status protection` : ""}`,
+              ? `已将 ${deletedCount} 个文件移入垃圾箱${skippedCount ? `，${skippedCount} 个因已入图谱或状态限制未删除` : ""}`
+              : `Moved ${deletedCount} file(s) to trash${skippedCount ? `, ${skippedCount} skipped because of graph/status protection` : ""}`,
           workspace: "library",
           status: skippedCount ? "error" : "done",
         });
+        const items = await refreshLibraries();
         const deletedIds = new Set(result.deleted.map((item) => String(item.id)));
         setSelectedKnowledgeId((current) => {
-          if (!current) return result.items[0]?.id;
+          if (!current) return items[0]?.id;
           const currentItem = selectedItems.find((item) => item.id === current);
-          if (currentItem?.backendId && deletedIds.has(String(currentItem.backendId))) return result.items[0]?.id;
-          if (localIds.includes(current)) return result.items[0]?.id;
-          return current;
+          if (fileItemIds.has(current)) return items[0]?.id;
+          if (currentItem?.backendId && deletedIds.has(String(currentItem.backendId))) return items[0]?.id;
+          if (localIds.includes(current)) return items[0]?.id;
+          return items.some((item) => item.id === current) ? current : items[0]?.id;
         });
         return;
       }
 
-      setKnowledge((current) => current.filter((item) => !idSet.has(item.id)));
-      setSelectedKnowledgeId((current) => (current && idSet.has(current) ? undefined : current));
+      const items = await refreshLibraries();
+      setSelectedKnowledgeId((current) => {
+        if (!current || idSet.has(current)) return items[0]?.id;
+        return items.some((item) => item.id === current) ? current : items[0]?.id;
+      });
       addActivity({
-        title: language === "zh" ? "删除本地知识文件" : "Delete local knowledge files",
-        detail: language === "zh" ? `已从当前页面移除 ${localIds.length} 个本地文件` : `Removed ${localIds.length} local file(s) from this page`,
+        title: language === "zh" ? "删除知识文件" : "Delete knowledge files",
+        detail:
+          language === "zh"
+            ? `已将 ${movedCount + localIds.length} 个文件移入垃圾箱`
+            : `Moved ${movedCount + localIds.length} file(s) to trash`,
         workspace: "library",
         status: "done",
       });
     },
-    [addActivity, knowledge, language],
+    [addActivity, knowledge, language, refreshLibraries],
   );
 
   useEffect(() => {
@@ -1157,6 +1188,7 @@ export default function App() {
             readableDraft={collectDraft}
             isGeneratingReadable={isCollectingReadable}
             isSavingReadable={isSavingRawDraft}
+            inputBusy={collectInputBusy}
             rightRail={knowledgeRail}
             onSelectMaterial={setSelectedMaterialId}
             onCreateMaterial={createMaterial}

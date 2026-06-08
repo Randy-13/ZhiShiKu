@@ -40,14 +40,19 @@ PNG_1X1 = (
 
 
 def setup_storage(tmp_path, monkeypatch):
+    runtime_root = tmp_path
     monkeypatch.setattr(storage, "ROOT", tmp_path)
-    monkeypatch.setattr(storage, "IMAGE_DIR", tmp_path / "images")
-    monkeypatch.setattr(storage, "DOCUMENT_DIR", tmp_path / "documents")
-    monkeypatch.setattr(storage, "KNOWLEDGE_DIR", tmp_path / "knowledge")
-    monkeypatch.setattr(storage, "MEDIA_DIR", tmp_path / "media")
-    monkeypatch.setattr(storage, "MINING_DIR", tmp_path / "mining")
+    monkeypatch.setattr(storage, "STORAGE_ROOT", runtime_root)
+    monkeypatch.setattr(storage, "IMAGE_DIR", runtime_root / "images")
+    monkeypatch.setattr(storage, "DOCUMENT_DIR", runtime_root / "documents")
+    monkeypatch.setattr(storage, "KNOWLEDGE_DIR", runtime_root / "knowledge")
+    monkeypatch.setattr(storage, "MEDIA_DIR", runtime_root / "media")
+    monkeypatch.setattr(storage, "MINING_DIR", runtime_root / "mining")
+    monkeypatch.setattr(storage, "RAW_MATERIAL_DIR", runtime_root / "raw_materials")
+    monkeypatch.setattr(storage, "WRITER_DIR", runtime_root / "writer")
+    monkeypatch.setattr(storage, "TRASH_DIR", runtime_root / "trash")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "knowledge.db")
-    monkeypatch.setattr(writer_tools, "WRITER_DIR", tmp_path / "writer")
+    monkeypatch.setattr(writer_tools, "WRITER_DIR", runtime_root / "writer")
     storage.init_storage()
     graph_core.init_graph()
 

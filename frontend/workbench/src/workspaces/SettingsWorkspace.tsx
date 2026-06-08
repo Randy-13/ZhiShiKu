@@ -1,4 +1,4 @@
-import { CheckCircle2, Cookie, ExternalLink, Plug, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { CheckCircle2, Cookie, ExternalLink, FolderOpen, Plug, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api";
@@ -12,6 +12,9 @@ import type {
   ImageApiSettingInput,
   ImageApiSettingItem,
   ImageApiSettingsPayload,
+  StorageLocations,
+  TrashFileItem,
+  TrashStatus,
 } from "../api";
 import type { ActivityEvent, Language, TextExtractionMode } from "../domain";
 import type { Translator } from "../i18n";
@@ -19,6 +22,7 @@ import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 import { StatusBadge } from "../components/StatusBadge";
 
 type ApiMode = "chat" | "image";
+type StorageKey = keyof StorageLocations;
 
 type ApiFormState = {
   id?: string;
@@ -51,6 +55,18 @@ const emptyForm: ApiFormState = {
   make_active: true,
 };
 
+const storageFields: Array<{ key: StorageKey; editable: boolean; zh: string; en: string; noteZh: string; noteEn: string }> = [
+  { key: "storage_root", editable: true, zh: "运行存储根目录", en: "Runtime storage root", noteZh: "上传缓存和派生目录的默认根目录。", noteEn: "Default root for upload caches and derived folders." },
+  { key: "image_cache", editable: true, zh: "收集截图缓存", en: "Screenshot cache", noteZh: "收集区截图和粘贴图片保存位置。", noteEn: "Saved screenshots and pasted images from Collect." },
+  { key: "document_cache", editable: true, zh: "收集文件缓存", en: "Document cache", noteZh: "上传 PDF、文档和文本文件保存位置。", noteEn: "Uploaded PDFs, documents, and text files." },
+  { key: "media_cache", editable: true, zh: "音视频缓存", en: "Media cache", noteZh: "本地音视频、转写和平台解析结果保存位置。", noteEn: "Local media, transcripts, and platform parsing results." },
+  { key: "raw_library", editable: true, zh: "原文库文件", en: "Originals library", noteZh: "收集区生成的可编辑原文 Markdown。", noteEn: "Editable original Markdown generated from Collect." },
+  { key: "focus_library", editable: true, zh: "重点库文件", en: "Focus library", noteZh: "学习区提炼后的重点 Markdown。", noteEn: "Refined focus Markdown from Learn." },
+  { key: "perspective_library", editable: true, zh: "视角库文件", en: "Perspective library", noteZh: "挖掘区视角解读和分析文件。", noteEn: "Perspective interpretation and analysis files." },
+  { key: "writer_projects", editable: true, zh: "创作项目地址", en: "Writer projects", noteZh: "创作项目、文章、配图和美编产物。", noteEn: "Writing projects, articles, images, and formatted output." },
+  { key: "database", editable: false, zh: "SQLite 数据库", en: "SQLite database", noteZh: "数据库文件只展示位置，不在这里迁移。", noteEn: "Shown for reference; database migration is not handled here." },
+];
+
 export function SettingsWorkspace({
   t,
   language,
@@ -74,6 +90,14 @@ export function SettingsWorkspace({
   const [cookieStatus, setCookieStatus] = useState<BilibiliCookieStatus>();
   const [cookieLoading, setCookieLoading] = useState(false);
   const [cookieActionMessage, setCookieActionMessage] = useState("");
+  const [storageLocations, setStorageLocations] = useState<StorageLocations>({});
+  const [storageDraft, setStorageDraft] = useState<StorageLocations>({});
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageMessage, setStorageMessage] = useState("");
+  const [trashStatus, setTrashStatus] = useState<TrashStatus>();
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashMessage, setTrashMessage] = useState("");
+  const [trashModalOpen, setTrashModalOpen] = useState(false);
 
   async function refreshCookieStatus() {
     setCookieLoading(true);
@@ -100,8 +124,79 @@ export function SettingsWorkspace({
     }
   }
 
+  async function refreshStorageLocations() {
+    setStorageLoading(true);
+    setStorageMessage("");
+    try {
+      const settings = await api.workbenchSettings();
+      const locations = settings.storage_locations ?? {};
+      setStorageLocations(locations);
+      setStorageDraft(locations);
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStorageLoading(false);
+    }
+  }
+
+  async function saveStorageLocations() {
+    setStorageLoading(true);
+    setStorageMessage("");
+    try {
+      const payload = await api.saveWorkbenchSettings({
+        text_extraction_mode: textExtractionMode,
+        storage_locations: Object.fromEntries(
+          storageFields
+            .filter((field) => field.editable)
+            .map((field) => [field.key, String(storageDraft[field.key] ?? "").trim()]),
+        ),
+      });
+      const locations = payload.storage_locations ?? {};
+      setStorageLocations(locations);
+      setStorageDraft(locations);
+      setStorageMessage(language === "zh" ? "本地存储位置已保存并生效。" : "Local storage locations saved and applied.");
+      setTrashStatus((current) => current ? { ...current, path: locations.trash ?? current.path } : current);
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStorageLoading(false);
+    }
+  }
+
+  async function refreshTrashStatus() {
+    setTrashLoading(true);
+    setTrashMessage("");
+    try {
+      setTrashStatus(await api.trashStatus());
+    } catch (error) {
+      setTrashMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTrashLoading(false);
+    }
+  }
+
+  async function clearTrash() {
+    setTrashLoading(true);
+    setTrashMessage("");
+    try {
+      const result = await api.clearTrash();
+      setTrashStatus(result);
+      setTrashMessage(
+        language === "zh"
+          ? `已彻底删除 ${result.deleted_files ?? 0} 个垃圾箱文件。`
+          : `Permanently deleted ${result.deleted_files ?? 0} trash file(s).`,
+      );
+    } catch (error) {
+      setTrashMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTrashLoading(false);
+    }
+  }
+
   useEffect(() => {
     refreshCookieStatus();
+    refreshStorageLocations();
+    refreshTrashStatus();
   }, []);
 
   return (
@@ -135,9 +230,52 @@ export function SettingsWorkspace({
               {language === "zh" ? "配置 API" : "Configure API"}
             </button>
           </div>
-          <div>
-            <h2>{t("settings.storage")}</h2>
+          <div className="settings-action-card">
+            <div>
+              <h2>{language === "zh" ? "垃圾箱" : "Trash"}</h2>
+              <p className="hint">
+                {language === "zh"
+                  ? `${trashStatus?.file_count ?? 0} 个文件，${formatBytes(trashStatus?.size_bytes ?? 0)}`
+                  : `${trashStatus?.file_count ?? 0} file(s), ${formatBytes(trashStatus?.size_bytes ?? 0)}`}
+              </p>
+            </div>
+            <button className="secondary-button" type="button" onClick={() => setTrashModalOpen(true)}>
+              <Trash2 size={16} />
+              {language === "zh" ? "管理垃圾箱" : "Manage trash"}
+            </button>
+          </div>
+          <div className="storage-settings-card">
+            <div className="dependency-check-title">
+              <FolderOpen size={17} />
+              <h2>{t("settings.storage")}</h2>
+            </div>
             <p className="hint">{t("settings.storage.body")}</p>
+            <div className="storage-location-list">
+              {storageFields.map((field) => (
+                <label key={field.key} className={field.editable ? "storage-location-row" : "storage-location-row readonly"}>
+                  <span>
+                    <strong>{language === "zh" ? field.zh : field.en}</strong>
+                    <small>{language === "zh" ? field.noteZh : field.noteEn}</small>
+                  </span>
+                  <input
+                    value={storageDraft[field.key] ?? storageLocations[field.key] ?? ""}
+                    readOnly={!field.editable}
+                    onChange={(event) => setStorageDraft((current) => ({ ...current, [field.key]: event.target.value }))}
+                  />
+                </label>
+              ))}
+            </div>
+            {storageMessage ? <p className={storageMessage.toLowerCase().includes("error") || storageMessage.includes("失败") ? "inline-error" : "hint"}>{storageMessage}</p> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={refreshStorageLocations} disabled={storageLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "刷新位置" : "Refresh"}
+              </button>
+              <button className="secondary-button" type="button" onClick={saveStorageLocations} disabled={storageLoading}>
+                <Save size={16} />
+                {storageLoading ? (language === "zh" ? "处理中" : "Saving") : (language === "zh" ? "保存位置" : "Save paths")}
+              </button>
+            </div>
           </div>
           <div>
             <h2>{t("settings.extraction")}</h2>
@@ -210,7 +348,184 @@ export function SettingsWorkspace({
 
       {rightRail}
       {apiModalOpen ? <ApiSettingsModal language={language} onClose={() => setApiModalOpen(false)} /> : null}
+      {trashModalOpen ? (
+        <TrashModal
+          language={language}
+          status={trashStatus}
+          isLoading={trashLoading}
+          message={trashMessage}
+          onClose={() => setTrashModalOpen(false)}
+          onRefresh={refreshTrashStatus}
+          onClear={clearTrash}
+          onDeleteSelected={async (paths) => {
+            setTrashLoading(true);
+            setTrashMessage("");
+            try {
+              const result = await api.deleteTrashFiles(paths);
+              setTrashStatus(result);
+              setTrashMessage(language === "zh" ? `已彻底删除 ${result.deleted?.length ?? 0} 个文件。` : `Deleted ${result.deleted?.length ?? 0} file(s).`);
+            } catch (error) {
+              setTrashMessage(error instanceof Error ? error.message : String(error));
+            } finally {
+              setTrashLoading(false);
+            }
+          }}
+          onRestoreSelected={async (paths) => {
+            setTrashLoading(true);
+            setTrashMessage("");
+            try {
+              const result = await api.restoreTrashFiles(paths);
+              setTrashStatus(result);
+              setTrashMessage(language === "zh" ? `已恢复 ${result.restored?.length ?? 0} 个文件。` : `Restored ${result.restored?.length ?? 0} file(s).`);
+            } catch (error) {
+              setTrashMessage(error instanceof Error ? error.message : String(error));
+            } finally {
+              setTrashLoading(false);
+            }
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function TrashModal({
+  language,
+  status,
+  isLoading,
+  message,
+  onClose,
+  onRefresh,
+  onClear,
+  onDeleteSelected,
+  onRestoreSelected,
+}: {
+  language: Language;
+  status?: TrashStatus;
+  isLoading: boolean;
+  message: string;
+  onClose: () => void;
+  onRefresh: () => Promise<void>;
+  onClear: () => Promise<void>;
+  onDeleteSelected: (paths: string[]) => Promise<void>;
+  onRestoreSelected: (paths: string[]) => Promise<void>;
+}) {
+  const [checked, setChecked] = useState<string[]>([]);
+  const items = status?.items ?? [];
+  const checkedSet = useMemo(() => new Set(checked), [checked]);
+  const visibleChecked = checked.filter((path) => items.some((item) => item.trash_path === path));
+
+  useEffect(() => {
+    setChecked((current) => current.filter((path) => items.some((item) => item.trash_path === path)));
+  }, [items]);
+
+  function toggle(path: string) {
+    setChecked((current) => (current.includes(path) ? current.filter((item) => item !== path) : [...current, path]));
+  }
+
+  function selectAll() {
+    setChecked(items.map((item) => item.trash_path));
+  }
+
+  async function run(action: (paths: string[]) => Promise<void>) {
+    if (!visibleChecked.length) return;
+    await action(visibleChecked);
+    setChecked([]);
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel trash-modal-panel" role="dialog" aria-modal="true" aria-label={language === "zh" ? "垃圾箱" : "Trash"}>
+        <div className="modal-title-row">
+          <div>
+            <span>{language === "zh" ? "设置" : "Settings"}</span>
+            <h2>{language === "zh" ? "垃圾箱" : "Trash"}</h2>
+            <p className="hint">{status?.path ?? ""}</p>
+          </div>
+          <button className="icon-button" type="button" aria-label={language === "zh" ? "关闭" : "Close"} onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="trash-modal-toolbar">
+          <span>
+            {language === "zh"
+              ? `${items.length} 个文件，已选 ${visibleChecked.length} 个`
+              : `${items.length} file(s), ${visibleChecked.length} selected`}
+          </span>
+          <div className="dependency-actions">
+            <button className="secondary-button" type="button" onClick={selectAll} disabled={!items.length || isLoading}>
+              {language === "zh" ? "全选" : "Select all"}
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setChecked([])} disabled={!visibleChecked.length || isLoading}>
+              {language === "zh" ? "清空选择" : "Clear"}
+            </button>
+            <button className="secondary-button" type="button" onClick={onRefresh} disabled={isLoading}>
+              <RefreshCw size={16} />
+              {language === "zh" ? "刷新" : "Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {items.length ? (
+          <div className="trash-file-list">
+            {items.map((item) => (
+              <TrashRow key={item.trash_path} item={item} checked={checkedSet.has(item.trash_path)} language={language} onToggle={toggle} />
+            ))}
+          </div>
+        ) : (
+          <p className="hint">{language === "zh" ? "垃圾箱为空。" : "Trash is empty."}</p>
+        )}
+
+        {message ? <p className={message.toLowerCase().includes("error") || message.includes("失败") ? "inline-error" : "hint"}>{message}</p> : null}
+
+        <div className="api-settings-actions">
+          <button className="secondary-button" type="button" disabled={!visibleChecked.length || isLoading} onClick={() => run(onRestoreSelected)}>
+            {language === "zh" ? "恢复选中" : "Restore selected"}
+          </button>
+          <button className="secondary-button danger-button" type="button" disabled={!visibleChecked.length || isLoading} onClick={() => run(onDeleteSelected)}>
+            {language === "zh" ? "彻底删除选中" : "Delete selected"}
+          </button>
+          <button className="secondary-button danger-button" type="button" disabled={!items.length || isLoading} onClick={onClear}>
+            <Trash2 size={16} />
+            {language === "zh" ? "清空垃圾箱" : "Clear trash"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TrashRow({ item, checked, language, onToggle }: { item: TrashFileItem; checked: boolean; language: Language; onToggle: (path: string) => void }) {
+  const libraryLabel =
+    item.library === "raw"
+      ? language === "zh" ? "原文库" : "Originals"
+      : item.library === "focus"
+        ? language === "zh" ? "重点库" : "Focus"
+        : item.library === "perspective"
+          ? language === "zh" ? "视角库" : "Perspectives"
+          : language === "zh" ? "未知库" : "Unknown";
+  return (
+    <label className="trash-file-row">
+      <input type="checkbox" checked={checked} onChange={() => onToggle(item.trash_path)} />
+      <span>
+        <strong>{item.title}</strong>
+        <small>{libraryLabel} · {formatBytes(item.size ?? 0)}</small>
+        <em>{item.trash_path}</em>
+      </span>
+    </label>
   );
 }
 

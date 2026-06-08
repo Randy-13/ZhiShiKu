@@ -7,6 +7,8 @@ import { EmptyState } from "../components/EmptyState";
 import { ObjectList } from "../components/ObjectList";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 
+export type CollectInputBusy = "image" | "file" | "media" | "link" | "paste-image" | null;
+
 const panes: Array<{ id: MaterialType; labelKey: string; helper: string }> = [
   { id: "text", labelKey: "collect.type.text", helper: "键入、粘贴或临时记录" },
   { id: "image", labelKey: "collect.type.image", helper: "拖入截图或 Ctrl+V 粘贴" },
@@ -22,6 +24,7 @@ export function CollectWorkspace({
   readableDraft,
   isGeneratingReadable,
   isSavingReadable,
+  inputBusy,
   rightRail,
   onSelectMaterial,
   onCreateMaterial,
@@ -39,6 +42,7 @@ export function CollectWorkspace({
   readableDraft?: ReadableDraftInput;
   isGeneratingReadable: boolean;
   isSavingReadable: boolean;
+  inputBusy: CollectInputBusy;
   rightRail: ReactNode;
   onSelectMaterial: (id: string) => void;
   onCreateMaterial: (item: Pick<SourceMaterial, "type" | "title" | "source">) => void;
@@ -57,6 +61,19 @@ export function CollectWorkspace({
   const [textValue, setTextValue] = useState("");
   const [linkValue, setLinkValue] = useState("");
   const [checkedMaterialIds, setCheckedMaterialIds] = useState<string[]>([]);
+  const isInputBusy = inputBusy !== null;
+  const busyMessage =
+    inputBusy === "link"
+      ? "正在加入链接材料..."
+      : inputBusy === "image"
+        ? "正在上传图片..."
+        : inputBusy === "paste-image"
+          ? "正在加入粘贴图片..."
+          : inputBusy === "file"
+            ? "正在上传文件..."
+            : inputBusy === "media"
+              ? "正在上传音视频..."
+              : "";
 
   useEffect(() => {
     const visibleIds = new Set(materials.map((item) => item.id));
@@ -68,13 +85,13 @@ export function CollectWorkspace({
   const handleDrop = (event: DragEvent<HTMLElement>, type: MaterialType) => {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files ?? []);
-    if (!files.length) return;
+    if (!files.length || isInputBusy) return;
     onUploadFiles(type, files);
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files ?? []).filter((file) => file.type.startsWith("image/"));
-    if (!files.length) return;
+    if (!files.length || isInputBusy) return;
     event.preventDefault();
     onPasteImages(files);
   };
@@ -102,6 +119,12 @@ export function CollectWorkspace({
               </button>
             ))}
           </div>
+          {busyMessage ? (
+            <div className="collector-busy" role="status" aria-live="polite">
+              <span className="collector-busy-dot" />
+              <span>{busyMessage}</span>
+            </div>
+          ) : null}
 
           {activePane === "text" ? (
             <section className="collector-pane">
@@ -118,6 +141,7 @@ export function CollectWorkspace({
                 <button
                   className="secondary-button"
                   type="button"
+                  disabled={isInputBusy}
                   onClick={() => {
                     const value = textValue.trim();
                     if (!value) return;
@@ -139,6 +163,7 @@ export function CollectWorkspace({
               <Dropzone
                 title="拖入一组截图"
                 body="也可以点击选择文件；粘贴框支持连续 Ctrl+V 粘贴截图。"
+                disabled={isInputBusy}
                 onClick={() => imageInputRef.current?.click()}
                 onDrop={(event) => handleDrop(event, "image")}
               />
@@ -148,6 +173,7 @@ export function CollectWorkspace({
                 placeholder="点击这里后直接 Ctrl+V 粘贴截图。"
                 onPaste={handlePaste}
                 readOnly
+                disabled={isInputBusy}
               />
               <input
                 ref={imageInputRef}
@@ -155,6 +181,7 @@ export function CollectWorkspace({
                 accept="image/*"
                 multiple
                 hidden
+                disabled={isInputBusy}
                 onChange={(event) => {
                   const files = Array.from(event.currentTarget.files ?? []);
                   if (files.length) onUploadFiles("image", files);
@@ -169,6 +196,7 @@ export function CollectWorkspace({
               <Dropzone
                 title="拖入一组文件"
                 body="支持 Markdown、TXT、Word .docx、PDF；上传后会读取页数和默认范围。"
+                disabled={isInputBusy}
                 onClick={() => documentInputRef.current?.click()}
                 onDrop={(event) => handleDrop(event, "file")}
               />
@@ -178,6 +206,7 @@ export function CollectWorkspace({
                 accept=".md,.markdown,.txt,.docx,.pdf"
                 multiple
                 hidden
+                disabled={isInputBusy}
                 onChange={(event) => {
                   const files = Array.from(event.currentTarget.files ?? []);
                   if (files.length) onUploadFiles("file", files);
@@ -192,6 +221,7 @@ export function CollectWorkspace({
               <Dropzone
                 title="拖入本地音视频或字幕"
                 body="支持 mp3、m4a、wav、mp4、mov、mkv、webm、srt、vtt、ass。"
+                disabled={isInputBusy}
                 onClick={() => mediaInputRef.current?.click()}
                 onDrop={(event) => handleDrop(event, "media")}
               />
@@ -201,6 +231,7 @@ export function CollectWorkspace({
                 accept=".mp3,.m4a,.wav,.aac,.flac,.mp4,.mov,.mkv,.webm,.srt,.vtt,.ass"
                 multiple
                 hidden
+                disabled={isInputBusy}
                 onChange={(event) => {
                   const files = Array.from(event.currentTarget.files ?? []);
                   if (files.length) onUploadFiles("media", files);
@@ -225,6 +256,7 @@ export function CollectWorkspace({
                 <button
                   className="secondary-button"
                   type="button"
+                  disabled={isInputBusy}
                   onClick={() => {
                     const urls = linkValue
                       .split(/\n+/)
@@ -237,7 +269,7 @@ export function CollectWorkspace({
                 >
                   加入链接材料
                 </button>
-                <button className="secondary-button" type="button" onClick={() => setLinkValue("")}>
+                <button className="secondary-button" type="button" disabled={isInputBusy} onClick={() => setLinkValue("")}>
                   清空链接
                 </button>
               </div>
@@ -343,11 +375,13 @@ export function CollectWorkspace({
 function Dropzone({
   title,
   body,
+  disabled = false,
   onClick,
   onDrop,
 }: {
   title: string;
   body: string;
+  disabled?: boolean;
   onClick: () => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
 }) {
@@ -355,6 +389,7 @@ function Dropzone({
     <button
       className="collector-dropzone"
       type="button"
+      disabled={disabled}
       onClick={onClick}
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}

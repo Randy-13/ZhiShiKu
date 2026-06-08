@@ -40,7 +40,7 @@ APP_ROOT = Path(__file__).resolve().parent
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    storage.init_storage()
+    workbench_settings.load_settings()
     graph_core.init_graph()
     yield
 
@@ -92,6 +92,7 @@ class ReadableDocumentRequest(BaseModel):
 
 class WorkbenchSettingsRequest(BaseModel):
     text_extraction_mode: str | None = None
+    storage_locations: dict[str, str] | None = None
 
 
 class MediaPlanSegmentRequest(BaseModel):
@@ -614,7 +615,7 @@ def test_image_api_setting(request: ImageApiSettingTestRequest) -> dict[str, str
             return diagnosis
         if diagnosis.get("ok") != "true":
             return diagnosis
-        output_dir = storage.ROOT / "writer" / "_api_tests"
+        output_dir = storage.WRITER_DIR / "_api_tests"
         stamp = datetime.now().strftime("%Y%m%d%H%M%S")
         output_path = output_dir / f"image_api_test_{stamp}.png"
         result = writer_tools.generate_image(
@@ -625,7 +626,7 @@ def test_image_api_setting(request: ImageApiSettingTestRequest) -> dict[str, str
         return {
             **diagnosis,
             "real_test": "true",
-            "generated_path": str(output_path.relative_to(storage.ROOT)),
+            "generated_path": storage.storage_relative(output_path),
             "message": f"图片 API 字段诊断通过，并已真实生成测试图片：{result.get('path')}",
         }
     except KeyError as exc:
@@ -932,7 +933,7 @@ def _search_local_markdown_by_title(title_hint: str) -> Path | None:
     normalized_title = _normalize_match_text(title_hint)
     search_roots = [
         storage.ROOT / "knowledge",
-        storage.ROOT / "raw_materials",
+        storage.RAW_MATERIAL_DIR,
         storage.KNOWLEDGE_DIR,
     ]
     best: tuple[int, Path] | None = None
@@ -2578,7 +2579,7 @@ def _writer_library_files(knowledge_ids: list[int]) -> list[dict[str, object]]:
             {
                 "library": "knowledge",
                 "knowledge_id": int(item["id"]),
-                "markdown_path": str(markdown_path.relative_to(storage.ROOT)),
+                "markdown_path": storage.storage_relative(markdown_path),
                 "title": item.get("title") or markdown_path.stem,
             }
         )
@@ -2857,7 +2858,7 @@ def writer_project_generate_draft(project_id: str, request: WriterProjectDraftRe
             digest=result.digest,
             cover_prompt=getattr(result, "cover_prompt", "") or project.get("cover_prompt"),
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
-            article_path=str(article_path.relative_to(storage.ROOT)),
+            article_path=storage.storage_relative(article_path),
         )
         return {**_writer_project_payload(project_id), "article": result.model_dump()}
     except HTTPException:
@@ -2885,13 +2886,13 @@ def writer_project_revise(project_id: str, request: WriterProjectReviseRequest) 
         version_path = writer_tools.write_article(workspace, result.markdown, f"article_revised_{datetime.now().strftime('%H%M%S')}.md")
         writer_tools.update_project(
             project_id,
-            article_path=str(article_path.relative_to(storage.ROOT)),
-            latest_revision_path=str(version_path.relative_to(storage.ROOT)),
+            article_path=storage.storage_relative(article_path),
+            latest_revision_path=storage.storage_relative(version_path),
             change_summary=getattr(result, "change_summary", ""),
             cover_prompt=getattr(result, "cover_prompt", "") or project.get("cover_prompt"),
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
         )
-        return {**_writer_project_payload(project_id), "revision": result.model_dump(), "version_path": str(version_path.relative_to(storage.ROOT))}
+        return {**_writer_project_payload(project_id), "revision": result.model_dump(), "version_path": storage.storage_relative(version_path)}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -3140,8 +3141,8 @@ def writer_article(request: WriterArticleRequest) -> dict[str, object]:
         article_path = writer_tools.write_article(workspace, result.markdown)
         return {
             **result.model_dump(),
-            "workspace": str(workspace.relative_to(storage.ROOT)),
-            "article_path": str(article_path.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
+            "article_path": storage.storage_relative(article_path),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3170,9 +3171,9 @@ def writer_revise(request: WriterReviseRequest) -> dict[str, object]:
         )
         return {
             **result.model_dump(),
-            "workspace": str(workspace.relative_to(storage.ROOT)),
-            "article_path": str(article_path.relative_to(storage.ROOT)),
-            "version_path": str(version_path.relative_to(storage.ROOT)),
+            "workspace": storage.storage_relative(workspace),
+            "article_path": storage.storage_relative(article_path),
+            "version_path": storage.storage_relative(version_path),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3187,7 +3188,7 @@ def writer_images(request: WriterImagesRequest) -> dict[str, object]:
             cover_prompt=request.cover_prompt,
             content_prompts=request.content_image_prompts,
         )
-        return {"workspace": str(workspace.relative_to(storage.ROOT)), **result}
+        return {"workspace": storage.storage_relative(workspace), **result}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -3226,7 +3227,7 @@ def writer_format(request: WriterFormatRequest) -> dict[str, object]:
             theme=request.theme,
             design_strategy=request.design_strategy or "",
         )
-        return {"workspace": str(workspace.relative_to(storage.ROOT)), **result}
+        return {"workspace": storage.storage_relative(workspace), **result}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -3252,7 +3253,7 @@ def writer_publish(request: WriterPublishRequest) -> dict[str, object]:
             digest=str(digest or ""),
             cover_path=request.cover_path,
         )
-        return {"workspace": str(workspace.relative_to(storage.ROOT)), "preflight": preflight, **result}
+        return {"workspace": storage.storage_relative(workspace), "preflight": preflight, **result}
     except HTTPException:
         raise
     except Exception as exc:
@@ -3270,7 +3271,7 @@ def writer_publish_preflight(request: WriterPublishRequest) -> dict[str, object]
             digest=request.digest,
             cover_path=request.cover_path,
         )
-        return {"workspace": str(workspace.relative_to(storage.ROOT)), **result}
+        return {"workspace": storage.storage_relative(workspace), **result}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

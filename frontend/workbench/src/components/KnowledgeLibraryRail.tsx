@@ -43,15 +43,15 @@ export function KnowledgeLibraryRail({
     if (!clean) return knowledge;
     return knowledge.filter((item) => `${item.title} ${item.note ?? ""} ${item.body}`.toLowerCase().includes(clean));
   }, [knowledge, query]);
-  const deletionTargets =
-    mode === "manage" ? (checkedIds.length ? checkedIds : selectedKnowledge && activeBucket === "original" ? [selectedKnowledge.id] : []) : [];
+  const currentLibraryIds = useMemo(() => new Set(knowledge.map((item) => item.id)), [knowledge]);
+  const deletionTargets = mode === "manage" ? checkedIds.filter((id) => currentLibraryIds.has(id)) : [];
 
   function toggleChecked(id: string) {
     onCheckedIdsChange(checkedIds.includes(id) ? checkedIds.filter((item) => item !== id) : [...checkedIds, id]);
   }
 
   async function handleDeleteSelected() {
-    if (!deletionTargets.length || isDeleting || activeBucket !== "original") return;
+    if (!deletionTargets.length || isDeleting) return;
     await onDeleteKnowledge(deletionTargets);
     onCheckedIdsChange([]);
   }
@@ -86,7 +86,7 @@ export function KnowledgeLibraryRail({
           <button
             className="secondary-button danger-button"
             type="button"
-            disabled={!deletionTargets.length || activeBucket !== "original" || isDeleting}
+            disabled={!deletionTargets.length || isDeleting}
             onClick={handleDeleteSelected}
           >
             {isDeleting ? t("library.deleting") : t("library.deleteSelected")}
