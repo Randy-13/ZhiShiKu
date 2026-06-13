@@ -312,6 +312,12 @@ def polish_raw_material(
 5. 不要总结成观点清单，不要写“核心知识点”，不要加入材料外的信息。
 6. 如果文本很短，也要尽量给出主题标题，并保留原文。
 
+截图类材料的额外硬性要求：
+1. 删除所有 OCR 包装信息，例如 [Screenshot N]、Title hint、Topic hint、Recognized text。
+2. 如果多张截图来自同一篇文章，必须按文章自然阅读顺序合并。
+3. 如果正文存在“1）/2）/3）/4）”等编号段落且 OCR 顺序错乱，必须按编号从小到大重排；标题、导语、总览数据放在“1）”之前。
+4. 只调整截图块/编号段落的顺序，不改写原文事实和数字，不把原文提炼成知识点。
+
 材料类型：{material_type}
 原始文本：
 {raw_text[:24000]}
@@ -642,19 +648,21 @@ def revise_wechat_article(
 def suggest_writer_images(
     article_markdown: str,
     topic: dict[str, Any] | None = None,
+    content_image_count: int = 1,
     setting: dict[str, Any] | None = None,
 ) -> WriterImageSuggestionResult:
     topic_json = json.dumps(topic or {}, ensure_ascii=False)
+    content_image_count = max(1, min(3, int(content_image_count or 1)))
     prompt = f"""
 你是微信公众号文章的视觉策划。请只生成图片建议，不要生成图片。
 
 要求：
 1. 必须给 1 条封面图提示词 cover_prompt。
-2. 内容配图只在有必要时给 0 到 2 条，不要为了凑数浪费生图成本。
+2. content_image_prompts 必须一次性给出 {content_image_count} 条，不能多也不能少；每条对应一张正文图片。
 3. 每条提示词要能直接交给图片模型使用，说明主体、构图、风格、文字要求。
 4. 图片文字必须要求“简体中文、少量文字、准确可读”。
 5. 封面图要适合公众号首图，主题明确，有吸引力，不要堆满文字。
-6. 如果文章更适合纯文字阅读，content_image_prompts 可以为空。
+6. 正文配图优先用于解释数据对比、结构关系、流程、关键概念或读者痛点，不要重复封面图。
 
 选题：
 {topic_json}

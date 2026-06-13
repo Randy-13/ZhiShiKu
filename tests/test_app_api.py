@@ -2199,6 +2199,59 @@ def test_publish_preflight_truncates_long_digest(tmp_path, monkeypatch):
     assert result["digest"].encode("utf-8").decode("utf-8") == result["digest"]
 
 
+def test_publish_preflight_verifies_wechat_access_token(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("wechat-token-check")
+    (workspace / "formatted.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+    (workspace / "article.md").write_text("# 标题\n\n正文", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(
+        writer_tools,
+        "refresh_wechat_access_token",
+        lambda timeout=20: {"ok": True, "message": "token ok", "ip": "", "raw": '{"expires_in":7200}'},
+    )
+    monkeypatch.setattr(writer_tools, "wechat_config", lambda: {"appid": "wx1234567890", "appsecret": "secret"})
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "wechat-config.json")
+    (tmp_path / "wechat-config.json").write_text('{"appid":"wx1234567890","appsecret":"secret"}', encoding="utf-8")
+
+    result = writer_tools.publish_preflight(workspace, "标题", digest="摘要")
+    api_check = next(item for item in result["checks"] if item["key"] == "wechat_api")
+
+    assert api_check["ok"] is True
+    assert api_check["detail"] == "token ok"
+    assert result["ok"] is True
+
+
+def test_publish_preflight_blocks_on_wechat_ip_whitelist_failure(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("wechat-whitelist-check")
+    (workspace / "formatted.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+    (workspace / "article.md").write_text("# 标题\n\n正文", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(
+        writer_tools,
+        "refresh_wechat_access_token",
+        lambda timeout=20: {
+            "ok": False,
+            "message": "微信接口返回错误：40164 invalid ip 218.94.142.39, not in whitelist",
+            "ip": "218.94.142.39",
+            "raw": '{"errcode":40164,"errmsg":"invalid ip 218.94.142.39, not in whitelist"}',
+        },
+    )
+    monkeypatch.setattr(writer_tools, "wechat_config", lambda: {"appid": "wx1234567890", "appsecret": "secret"})
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "wechat-config.json")
+    (tmp_path / "wechat-config.json").write_text('{"appid":"wx1234567890","appsecret":"secret"}', encoding="utf-8")
+
+    result = writer_tools.publish_preflight(workspace, "标题", digest="摘要")
+    api_check = next(item for item in result["checks"] if item["key"] == "wechat_api")
+
+    assert api_check["ok"] is False
+    assert api_check["ip"] == "218.94.142.39"
+    assert "40164" in api_check["detail"]
+    assert result["ok"] is False
+    assert any(item["key"] == "wechat_api" for item in result["blocking"])
+
+
 def test_format_article_injects_content_images(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("content-images")

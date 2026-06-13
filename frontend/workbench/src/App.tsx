@@ -332,8 +332,30 @@ export default function App() {
     [addActivity],
   );
 
+  const insertMaterials = useCallback(
+    (nextMaterials: SourceMaterial[]) => {
+      if (!nextMaterials.length) return;
+      const nextIds = new Set(nextMaterials.map((item) => item.id));
+      setMaterials((current) => [...nextMaterials, ...current.filter((item) => !nextIds.has(item.id))]);
+      setSelectedMaterialId(nextMaterials[0].id);
+      nextMaterials.forEach((material) => {
+        addActivity({ title: material.title, detail: "素材已进入收集队列", workspace: "collect", status: material.status === "error" ? "error" : "done" });
+      });
+    },
+    [addActivity],
+  );
+
   const createMaterial = useCallback(
-    (item: Pick<SourceMaterial, "type" | "title" | "source"> & { backendId?: number; error?: string; note?: string }) => {
+    (
+      item: Pick<SourceMaterial, "type" | "title" | "source"> & {
+        backendId?: number;
+        error?: string;
+        note?: string;
+        linkType?: string;
+        extractionStrategy?: string;
+        accessStatus?: string;
+      },
+    ) => {
       insertMaterial({
         id: uid("material"),
         type: item.type,
@@ -343,6 +365,9 @@ export default function App() {
         backendId: item.backendId,
         error: item.error,
         note: item.note,
+        linkType: item.linkType,
+        extractionStrategy: item.extractionStrategy,
+        accessStatus: item.accessStatus,
       });
     },
     [insertMaterial],
@@ -361,21 +386,23 @@ export default function App() {
           const pageInfo = await api.loadFilePageInfo(ids).catch(() => []);
           enriched = uploaded.map((item) => ({ ...item, ...(pageInfo.find((info) => info.id === item.id) ?? {}) }));
         }
-        enriched.forEach((item, index) => insertMaterial(materialFromUpload(type, item, files[index]?.name ?? "上传素材")));
+        insertMaterials(enriched.map((item, index) => materialFromUpload(type, item, files[index]?.name ?? "上传素材")));
       } catch (error) {
-        files.forEach((file) =>
-          createMaterial({
+        insertMaterials(
+          files.map((file) => ({
+            id: uid("material"),
             type,
             title: file.name,
             source: file.name,
+            status: "error" as const,
             error: error instanceof Error ? error.message : "上传旧后端失败",
-          }),
+          })),
         );
       } finally {
         setCollectInputBusy(null);
       }
     },
-    [createMaterial, insertMaterial],
+    [insertMaterials],
   );
 
   const pasteImages = useCallback(
@@ -385,23 +412,25 @@ export default function App() {
       try {
         const uploaded = await api.uploadPastedImages(files);
         if (!uploaded.length) throw new Error("旧后端没有返回粘贴截图结果");
-        uploaded.forEach((item, index) => insertMaterial(materialFromUpload("image", item, files[index]?.name ?? "粘贴截图")));
+        insertMaterials(uploaded.map((item, index) => materialFromUpload("image", item, files[index]?.name ?? "粘贴截图")));
       } catch (error) {
         const detail = error instanceof Error ? error.message : "粘贴截图上传失败";
-        files.forEach((file) =>
-          createMaterial({
+        insertMaterials(
+          files.map((file) => ({
+            id: uid("material"),
             type: "image",
             title: file.name || "本地暂存截图",
             source: "clipboard",
+            status: "captured" as const,
             note: `后端上传失败，已作为本地暂存素材继续：${detail}`,
-          }),
+          })),
         );
         addActivity({ title: "粘贴截图后端上传失败", detail, workspace: "collect", status: "error" });
       } finally {
         setCollectInputBusy(null);
       }
     },
-    [addActivity, createMaterial, insertMaterial],
+    [addActivity, insertMaterials],
   );
 
   const resolveLinks = useCallback(
@@ -517,6 +546,9 @@ export default function App() {
             title: inspected?.title?.trim() || url,
             source: inspected?.final_url?.trim() || url,
             note: noteParts.join(" | "),
+            linkType: inspected?.link_type,
+            extractionStrategy: inspected?.extraction_strategy,
+            accessStatus: inspected?.access_status,
           });
         } catch (error) {
           createMaterial({
@@ -537,6 +569,55 @@ export default function App() {
       }
     },
     [createMaterial, insertMaterial, language, materials],
+  );
+
+  const browserExtractCollectLink = useCallback(
+    async (id: string) => {
+      const material = materials.find((item) => item.id === id && item.type === "link");
+      if (!material) return;
+      setCollectInputBusy("browser-link");
+      setMaterials((current) =>
+        current.map((item) => (item.id === id ? { ...item, status: "learning", error: undefined } : item)),
+      );
+      try {
+        const draft = await api.browserExtractLink(material);
+        setCollectDraft(draft);
+        setMaterials((current) =>
+          current.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  status: "ready",
+                  error: undefined,
+                  linkType: item.linkType ?? "browser_webpage",
+                  extractionStrategy: "browser_automation_wait_scroll",
+                  accessStatus: "accessible",
+                }
+              : item,
+          ),
+        );
+        addActivity({
+          title: draft.title,
+          detail: language === "zh" ? "浏览器提取完成，请确认后加入原文库。" : "Browser extraction completed.",
+          workspace: "collect",
+          status: "done",
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Browser extraction failed";
+        setMaterials((current) =>
+          current.map((item) => (item.id === id ? { ...item, status: "error", error: detail } : item)),
+        );
+        addActivity({
+          title: language === "zh" ? "浏览器提取失败" : "Browser extraction failed",
+          detail,
+          workspace: "collect",
+          status: "error",
+        });
+      } finally {
+        setCollectInputBusy(null);
+      }
+    },
+    [addActivity, language, materials],
   );
 
   const generateCollectReadableDraft = useCallback(
@@ -960,18 +1041,35 @@ export default function App() {
     [language, requireProjectId, runWriterAction],
   );
 
-  const suggestWriterImages = useCallback((markdown?: string) => {
+  const suggestWriterImages = useCallback((markdown?: string, contentImageCount = 1) => {
     const project = writerState?.project;
     runWriterAction(language === "zh" ? "生成配图建议" : "Suggest images", () =>
-      api.suggestWriterProjectImages(requireProjectId(), markdown ?? project?.article_markdown, project?.topic ?? undefined),
+      api.suggestWriterProjectImages(requireProjectId(), markdown ?? project?.article_markdown, project?.topic ?? undefined, contentImageCount),
     );
   }, [language, requireProjectId, runWriterAction, writerState]);
 
-  const generateWriterImages = useCallback((coverPrompt?: string, contentImagePrompts?: string[]) => {
+  const generateWriterImages = useCallback((coverPrompt?: string, contentImagePrompts?: string[], onProgress?: (done: number, total: number) => void) => {
     const project = writerState?.project;
-    runWriterAction(language === "zh" ? "生成图片" : "Generate images", () =>
-      api.generateWriterProjectImages(requireProjectId(), coverPrompt ?? project?.cover_prompt, contentImagePrompts ?? project?.content_image_prompts ?? []),
-    );
+    runWriterAction(language === "zh" ? "生成图片" : "Generate images", async () => {
+      const projectId = requireProjectId();
+      const cover = (coverPrompt ?? project?.cover_prompt ?? "").trim();
+      const prompts = contentImagePrompts ?? project?.content_image_prompts ?? [];
+      const tasks: Array<{ kind: "cover" | "content"; prompt: string; index?: number }> = [];
+      if (cover) tasks.push({ kind: "cover", prompt: cover });
+      prompts.forEach((prompt, index) => {
+        const trimmed = prompt.trim();
+        if (trimmed) tasks.push({ kind: "content", prompt: trimmed, index: index + 1 });
+      });
+      if (!tasks.length) return api.generateWriterProjectImages(projectId, cover, prompts);
+      let latest: WriterProjectState | undefined;
+      onProgress?.(0, tasks.length);
+      for (const [index, task] of tasks.entries()) {
+        latest = await api.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index);
+        setWriterState(latest);
+        onProgress?.(index + 1, tasks.length);
+      }
+      return latest ?? api.writerProject(projectId);
+    });
   }, [language, requireProjectId, runWriterAction, writerState]);
 
   const formatWriterProject = useCallback(
@@ -1195,6 +1293,7 @@ export default function App() {
             onUploadFiles={uploadFiles}
             onPasteImages={pasteImages}
             onResolveLinks={resolveLinksV2}
+            onBrowserExtractLink={browserExtractCollectLink}
             onGenerateReadableDraft={generateCollectReadableDraft}
             onUpdateReadableDraft={setCollectDraft}
             onSaveReadableDraft={saveCollectDraftToOriginalLibrary}

@@ -51,6 +51,15 @@ class InspectLinkRequest(BaseModel):
     url: HttpUrl
 
 
+class BrowserExtractLinkRequest(BaseModel):
+    url: HttpUrl
+    title: str = ""
+    wait_ms: int = 3000
+    scroll_times: int = 5
+    scroll_pause_ms: int = 800
+    selector: str = ""
+
+
 class CollectQueueItem(BaseModel):
     id: int | None = None
     content: str = ""
@@ -513,6 +522,42 @@ def inspect_link(request: InspectLinkRequest) -> dict[str, object]:
     return success_payload(data={"ok": True, "item": _inspect_link(str(request.url))})
 
 
+@router.post("/collect/browser-extract-link")
+def browser_extract_link(request: BrowserExtractLinkRequest) -> dict[str, object]:
+    url = str(request.url)
+    inspection = _inspect_link(url)
+    link_type = str(inspection.get("link_type") or "")
+    if link_type in {"platform_douyin", "platform_bilibili", "platform_wechat_channels"}:
+        return success_payload(data={"ok": False, "error": "音视频平台链接请放入「音视频」入口读取。"})
+    if link_type == "pdf":
+        return success_payload(data={"ok": False, "error": "PDF 链接请使用文档解析流程，不需要浏览器提取。"})
+
+    try:
+        fetched = _browser_extract_webpage_text(
+            url=url,
+            title=request.title,
+            wait_ms=request.wait_ms,
+            scroll_times=request.scroll_times,
+            scroll_pause_ms=request.scroll_pause_ms,
+            selector=request.selector,
+        )
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError, TimeoutError, ValueError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+    title = request.title.strip() or fetched.get("title") or str(inspection.get("title") or url)
+    markdown = _render_link_markdown_block(1, url, title, fetched)
+    return success_payload(
+        data={
+            "ok": True,
+            "title": title,
+            "note": f"浏览器提取：等待 {fetched.get('wait_ms', request.wait_ms)}ms，滚动 {fetched.get('scroll_times', request.scroll_times)} 次。",
+            "markdown": markdown,
+            "source": fetched.get("source") or str(inspection.get("source") or url),
+            "item": fetched,
+        }
+    )
+
+
 @router.post("/collect/raw-markdown")
 def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object]:
     if not request.items:
@@ -592,7 +637,11 @@ def collect_readable_draft(request: CollectReadableDraftRequest) -> dict[str, ob
         return success_payload(data={"ok": False, "error": error, "errors": errors})
 
     body = _clean_raw_markdown_body(body)
-    polish_meta = _polish_raw_material(material_type, body, title)
+    polish_meta = (
+        _polish_screenshot_readable_draft(body, title)
+        if material_type == "screenshot"
+        else _polish_raw_material(material_type, body, title)
+    )
     if polish_meta["markdown"]:
         body = polish_meta["markdown"]
     if polish_meta["title"]:
@@ -1744,7 +1793,47 @@ def _tags_from_meta(meta: dict[str, str]) -> list[str]:
     return [item.strip() for item in re.split(r"[、,，;；]", raw) if item.strip()]
 
 
-def _polish_raw_material(material_type: str, body: str, fallback_title: str) -> dict[str, object]:
+def _polish_screenshot_readable_draft(body: str, fallback_title: str) -> dict[str, object]:
+    clean_body = _strip_screenshot_ocr_wrappers(body)
+    polish_meta = _polish_raw_material("screenshot", clean_body, fallback_title)
+    if polish_meta["markdown"]:
+        polish_meta["markdown"] = _strip_screenshot_ocr_wrappers(str(polish_meta["markdown"]))
+        return polish_meta
+
+    response = polish_meta["response"] if isinstance(polish_meta.get("response"), dict) else {}
+    if not response.get("status") or response.get("status") == "skipped":
+        response["status"] = "local_ordered_without_llm"
+    polish_meta["response"] = response
+    polish_meta["markdown"] = clean_body
+    return polish_meta
+
+
+def _strip_screenshot_ocr_wrappers(text: str) -> str:
+    blocks = re.split(r"\n\s*---\s*\n", text)
+    cleaned_blocks: list[str] = []
+    for block in blocks:
+        value = block.strip()
+        if not value:
+            continue
+        if re.search(r"(?im)^Recognized text:\s*$", value):
+            value = re.split(r"(?im)^Recognized text:\s*$", value, maxsplit=1)[-1]
+        lines = []
+        for line in value.splitlines():
+            stripped = line.strip()
+            if re.fullmatch(r"\[Screenshot\s+\d+\]", stripped, flags=re.I):
+                continue
+            if re.match(r"(?i)^(Title hint|Topic hint):", stripped):
+                continue
+            if re.match(r"(?i)^Recognized text:\s*$", stripped):
+                continue
+            lines.append(line)
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            cleaned_blocks.append(cleaned)
+    return _clean_raw_markdown_body("\n\n".join(cleaned_blocks))
+
+
+def _polish_raw_material(material_type: str, body: str, fallback_title: str, preserve_order: bool = False) -> dict[str, object]:
     response = {
         "enabled": False,
         "status": "skipped",
@@ -1757,7 +1846,9 @@ def _polish_raw_material(material_type: str, body: str, fallback_title: str) -> 
         "response": response,
         "extra_meta": {},
     }
-    if material_type != "screenshot" or len(body.strip()) < 12:
+    if preserve_order or material_type != "screenshot" or len(body.strip()) < 12:
+        if preserve_order:
+            response["status"] = "skipped_order_preserved"
         return result
 
     response["enabled"] = True
@@ -2325,18 +2416,79 @@ def _extract_wechat_article_text(url: str) -> dict[str, str]:
     }
 
 
-def _browser_extract_article_payload(url: str) -> dict[str, object]:
+def _browser_extract_webpage_text(
+    url: str,
+    title: str = "",
+    wait_ms: int = 3000,
+    scroll_times: int = 5,
+    scroll_pause_ms: int = 800,
+    selector: str = "",
+) -> dict[str, str]:
+    data = _browser_extract_article_payload(
+        url,
+        wait_ms=wait_ms,
+        scroll_times=scroll_times,
+        scroll_pause_ms=scroll_pause_ms,
+        selector=selector,
+    )
+    content = _collapse_space_multiline(str(data.get("content") or ""))
+    if len(content) < 80:
+        raise ValueError("浏览器提取到的正文为空或过短，请确认页面已加载完成，或尝试增加等待/滚动参数。")
+    return {
+        "title": _collapse_space(title or str(data.get("title") or url)),
+        "text": content,
+        "source": _collapse_space(str(data.get("source") or data.get("account_name") or urllib.parse.urlparse(url).netloc)),
+        "author": _collapse_space(str(data.get("author") or "")),
+        "published_at": _collapse_space(str(data.get("published_at") or "")),
+        "link_type": "browser_webpage",
+        "access_status": "accessible",
+        "extraction_strategy": "browser_automation_wait_scroll",
+        "wait_ms": str(_bounded_int(wait_ms, 0, 30000)),
+        "scroll_times": str(_bounded_int(scroll_times, 0, 30)),
+    }
+
+
+def _bounded_int(value: int, minimum: int, maximum: int) -> int:
     try:
-        return _browser_harness_extract_article_payload(url)
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = minimum
+    return max(minimum, min(maximum, parsed))
+
+
+def _browser_extract_article_payload(
+    url: str,
+    wait_ms: int = 3000,
+    scroll_times: int = 5,
+    scroll_pause_ms: int = 800,
+    selector: str = "",
+) -> dict[str, object]:
+    try:
+        return _browser_harness_extract_article_payload(url, wait_ms, scroll_times, scroll_pause_ms, selector)
     except (FileNotFoundError, subprocess.CalledProcessError):
-        return _agent_browser_extract_article_payload(url)
+        return _agent_browser_extract_article_payload(url, wait_ms, scroll_times, scroll_pause_ms, selector)
 
 
-def _browser_harness_extract_article_payload(url: str) -> dict[str, object]:
+def _browser_harness_extract_article_payload(
+    url: str,
+    wait_ms: int = 3000,
+    scroll_times: int = 5,
+    scroll_pause_ms: int = 800,
+    selector: str = "",
+) -> dict[str, object]:
+    wait_seconds = _bounded_int(wait_ms, 0, 30000) / 1000
+    scroll_count = _bounded_int(scroll_times, 0, 30)
+    pause_seconds = _bounded_int(scroll_pause_ms, 0, 5000) / 1000
+    selector_json = json.dumps(selector.strip(), ensure_ascii=False)
     code = f"""
 import json
+import time
 new_tab({json.dumps(url, ensure_ascii=False)})
 wait_for_load()
+time.sleep({wait_seconds})
+for _ in range({scroll_count}):
+    js("window.scrollBy(0, Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0) * 0.9)")
+    time.sleep({pause_seconds})
 payload = js(r'''
 (() => {{
   const clean = s => (s || "").replace(/\\s+/g, " ").trim();
@@ -2351,6 +2503,8 @@ payload = js(r'''
     const el = document.querySelector(`meta[property="${{name}}"], meta[name="${{name}}"]`);
     return el ? el.getAttribute("content") : "";
   }};
+  const requestedSelector = {selector_json};
+  const requested = requestedSelector ? document.querySelector(requestedSelector) : null;
   const ps = Array.from(document.querySelectorAll("article p, main p, .article p, .post p, .content p, p"))
     .map(p => clean(p.innerText)).filter(t => t.length > 20);
   const site = meta("og:site_name") || location.hostname.replace(/^www\\./, "");
@@ -2358,10 +2512,11 @@ payload = js(r'''
     url: location.href,
     title: pickText(["#activity-name", "h1"]) || document.title || meta("og:title"),
     account_name: pickText(["#js_name", ".profile_nickname"]) || site,
+    source: site,
     author: pickText(["#js_author_name", "[rel=author]", ".author", ".byline"]) || meta("author") || "",
     published_at: pickText(["#publish_time", "#js_publish_time", "time"]) || meta("article:published_time") || meta("date") || "",
     summary: meta("og:description") || meta("description") || "",
-    content: pickText(["#js_content", ".rich_media_content", "article", "main"]) || ps.join("\\n\\n") || document.body.innerText || ""
+    content: (requested && requested.innerText) || pickText(["#js_content", ".rich_media_content", "article", "main"]) || ps.join("\\n\\n") || document.body.innerText || ""
   }});
 }})()
 ''')
@@ -2382,9 +2537,18 @@ print(payload)
     return json.loads(output[-1])
 
 
-def _agent_browser_extract_article_payload(url: str) -> dict[str, object]:
+def _agent_browser_extract_article_payload(
+    url: str,
+    wait_ms: int = 3000,
+    scroll_times: int = 5,
+    scroll_pause_ms: int = 800,
+    selector: str = "",
+) -> dict[str, object]:
     command = _agent_browser_command()
     connection_args = _agent_browser_connection_args(command)
+    wait_value = str(_bounded_int(wait_ms, 0, 30000))
+    scroll_count = _bounded_int(scroll_times, 0, 30)
+    pause_value = str(_bounded_int(scroll_pause_ms, 0, 5000))
     subprocess.run(
         [command, *connection_args, "open", url],
         text=True,
@@ -2394,13 +2558,32 @@ def _agent_browser_extract_article_payload(url: str) -> dict[str, object]:
         timeout=60,
     )
     subprocess.run(
-        [command, *connection_args, "wait", "3000"],
+        [command, *connection_args, "wait", wait_value],
         text=True,
         encoding="utf-8",
         capture_output=True,
         check=True,
         timeout=20,
     )
+    for _ in range(scroll_count):
+        subprocess.run(
+            [command, *connection_args, "eval", "window.scrollBy(0, Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0) * 0.9)"],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+            timeout=20,
+        )
+        if pause_value != "0":
+            subprocess.run(
+                [command, *connection_args, "wait", pause_value],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=True,
+                timeout=20,
+            )
+    selector_json = json.dumps(selector.strip(), ensure_ascii=False)
     js_code = r'''
 (() => {
   const clean = s => (s || "").replace(/\s+/g, " ").trim();
@@ -2418,17 +2601,20 @@ def _agent_browser_extract_article_payload(url: str) -> dict[str, object]:
   const ps = Array.from(document.querySelectorAll("article p, main p, .article p, .post p, .content p, p"))
     .map(p => clean(p.innerText)).filter(t => t.length > 20);
   const site = meta("og:site_name") || location.hostname.replace(/^www\./, "");
+  const requestedSelector = __REQUESTED_SELECTOR__;
+  const requested = requestedSelector ? document.querySelector(requestedSelector) : null;
   return JSON.stringify({
     url: location.href,
     title: pickText(["#activity-name", "h1"]) || document.title || meta("og:title"),
     account_name: pickText(["#js_name", ".profile_nickname"]) || site,
+    source: site,
     author: pickText(["#js_author_name", "[rel=author]", ".author", ".byline"]) || meta("author") || "",
     published_at: pickText(["#publish_time", "#js_publish_time", "time"]) || meta("article:published_time") || meta("date") || "",
     summary: meta("og:description") || meta("description") || "",
-    content: pickText(["#js_content", ".rich_media_content", "article", "main"]) || ps.join("\n\n") || document.body.innerText || ""
+    content: (requested && requested.innerText) || pickText(["#js_content", ".rich_media_content", "article", "main"]) || ps.join("\n\n") || document.body.innerText || ""
   });
 })()
-'''
+'''.replace("__REQUESTED_SELECTOR__", selector_json)
     completed = subprocess.run(
         [command, *connection_args, "eval", js_code],
         text=True,

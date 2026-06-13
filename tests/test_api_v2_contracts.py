@@ -812,6 +812,49 @@ def test_v2_collect_inspect_link_classifies_special_platforms():
     assert item["extraction_strategy"] == "specialized_tool_or_browser"
 
 
+def test_v2_collect_browser_extract_link_returns_readable_markdown(monkeypatch):
+    def fake_inspect(url: str) -> dict[str, object]:
+        return {
+            "url": url,
+            "final_url": url,
+            "title": "Browser Article",
+            "link_type": "public_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "direct_fetch",
+            "source": "example.test",
+        }
+
+    def fake_browser_extract(**kwargs) -> dict[str, str]:
+        assert kwargs["wait_ms"] == 3000
+        assert kwargs["scroll_times"] == 5
+        return {
+            "title": "Browser Article",
+            "text": "browser extracted paragraph " * 8,
+            "source": "example.test",
+            "author": "Author",
+            "published_at": "2026-06-09",
+            "link_type": "browser_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "browser_automation_wait_scroll",
+        }
+
+    monkeypatch.setattr(api_v2, "_inspect_link", fake_inspect)
+    monkeypatch.setattr(api_v2, "_browser_extract_webpage_text", fake_browser_extract)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/browser-extract-link",
+        json={"url": "https://example.test/article", "title": "Manual Title"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True
+    assert payload["title"] == "Manual Title"
+    assert "Extraction Strategy: browser_automation_wait_scroll" in payload["markdown"]
+    assert "browser extracted paragraph" in payload["markdown"]
+
+
 def test_v2_collect_inspect_link_keeps_public_article_with_login_nav_accessible(monkeypatch):
     article = "\n".join(f"公共政策正文段落 {index}，这里是可以直接读取的公开网页内容。" for index in range(60))
     html = f"""
@@ -998,6 +1041,87 @@ def test_v2_collect_raw_markdown_polishes_screenshot_title_and_body(monkeypatch)
     text = (storage.ROOT / item["markdown_path"]).read_text(encoding="utf-8")
     assert "AI算力的超级周期正在展开" in text
     assert "文末广告" not in text
+
+
+def test_v2_collect_readable_draft_strips_screenshot_wrappers_and_sorts_article(monkeypatch):
+    ocr_text = (
+        "[Screenshot 1]\n"
+        "Title hint: 4）M2持平、M1上升\n"
+        "Topic hint: unknown\n"
+        "Recognized text:\n"
+        "4）M2持平、M1上升，居民存款搬家现象延续。\n\n---\n\n"
+        "[Screenshot 2]\n"
+        "Title hint: 2）融资结构分化加大\n"
+        "Topic hint: unknown\n"
+        "Recognized text:\n"
+        "2）融资结构分化加大，直接融资改善。\n"
+        "3）信贷结构偏弱，企业贷款多增。\n\n---\n\n"
+        "[Screenshot 3]\n"
+        "Title hint: 居民存款搬家\n"
+        "Topic hint: unknown\n"
+        "Recognized text:\n"
+        "居民存款搬家\n"
+        "5月金融数据显示，宏观流动性环境宽松。\n"
+        "1）社融回落，流动性环境宽松。"
+    )
+    seen_paths: list[str] = []
+    seen_llm_input: dict[str, str] = {}
+
+    def fake_ocr(image_paths):
+        seen_paths.extend(path.name for path in image_paths)
+        return ocr_text
+
+    def fake_polish(raw_text: str, material_type: str = "raw", setting=None):
+        seen_llm_input["raw_text"] = raw_text
+        assert material_type == "screenshot"
+        assert "[Screenshot" not in raw_text
+        assert "Title hint:" not in raw_text
+        assert "Recognized text:" not in raw_text
+        return RawMaterialPolishResult(
+            title="居民存款搬家",
+            markdown=(
+                "# 居民存款搬家\n\n"
+                "5月金融数据显示，宏观流动性环境宽松。\n\n"
+                "1）社融回落，流动性环境宽松。\n\n"
+                "2）融资结构分化加大，直接融资改善。\n\n"
+                "3）信贷结构偏弱，企业贷款多增。\n\n"
+                "4）M2持平、M1上升，居民存款搬家现象延续。"
+            ),
+        )
+
+    monkeypatch.setattr(api_v2.ocr_client, "recognize_screenshots", fake_ocr)
+    monkeypatch.setattr(api_v2.deepseek_client, "polish_raw_material", fake_polish)
+    monkeypatch.setattr(api_v2.api_settings, "active_setting", lambda: {"api_key": "test-key"})
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    screenshots = [
+        storage.save_image_bytes(png + bytes([index]), filename=f"clip-{index}.png", content_type="image/png")
+        for index in range(1, 5)
+    ]
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={
+            "material_type": "screenshot",
+            "items": [
+                {"id": item["id"], "title": f"截图 {index}"}
+                for index, item in enumerate(screenshots, start=1)
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True, payload
+    markdown = payload["markdown"]
+    assert [seen_paths.index(Path(item["image_path"]).name) for item in screenshots] == [0, 1, 2, 3]
+    assert seen_llm_input["raw_text"]
+    assert "[Screenshot" not in markdown
+    assert "Title hint:" not in markdown
+    assert "Recognized text:" not in markdown
+    assert markdown.index("居民存款搬家") < markdown.index("1）社融回落") < markdown.index("2）融资结构") < markdown.index("3）信贷结构") < markdown.index("4）M2持平")
 
 
 def test_v2_collect_raw_markdown_extracts_uploaded_documents():

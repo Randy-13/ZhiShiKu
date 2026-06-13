@@ -26,6 +26,9 @@ export type SourceMaterial = {
   backendId?: number;
   error?: string;
   note?: string;
+  linkType?: string;
+  extractionStrategy?: string;
+  accessStatus?: string;
 };
 
 export type KnowledgeItem = {
@@ -130,7 +133,16 @@ export type WriterProject = {
   };
   preflight?: {
     ok?: boolean;
-    checks?: Array<{ key?: string; label?: string; ok?: boolean; detail?: string; optional?: boolean }>;
+    checks?: Array<{
+      key?: string;
+      label?: string;
+      ok?: boolean;
+      detail?: string;
+      optional?: boolean;
+      fixed?: boolean;
+      ip?: string;
+      raw?: string;
+    }>;
     blocking?: Array<Record<string, unknown>>;
   };
   publish_result?: Record<string, unknown>;

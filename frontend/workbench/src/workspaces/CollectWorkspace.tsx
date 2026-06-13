@@ -7,7 +7,7 @@ import { EmptyState } from "../components/EmptyState";
 import { ObjectList } from "../components/ObjectList";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 
-export type CollectInputBusy = "image" | "file" | "media" | "link" | "paste-image" | null;
+export type CollectInputBusy = "image" | "file" | "media" | "link" | "browser-link" | "paste-image" | null;
 
 const panes: Array<{ id: MaterialType; labelKey: string; helper: string }> = [
   { id: "text", labelKey: "collect.type.text", helper: "键入、粘贴或临时记录" },
@@ -31,6 +31,7 @@ export function CollectWorkspace({
   onUploadFiles,
   onPasteImages,
   onResolveLinks,
+  onBrowserExtractLink,
   onGenerateReadableDraft,
   onUpdateReadableDraft,
   onSaveReadableDraft,
@@ -49,6 +50,7 @@ export function CollectWorkspace({
   onUploadFiles: (type: MaterialType, files: File[]) => void;
   onPasteImages: (files: File[]) => void;
   onResolveLinks: (urls: string[]) => void;
+  onBrowserExtractLink: (id: string) => void;
   onGenerateReadableDraft: (ids?: string[]) => void;
   onUpdateReadableDraft: (draft: ReadableDraftInput) => void;
   onSaveReadableDraft: () => void;
@@ -65,6 +67,8 @@ export function CollectWorkspace({
   const busyMessage =
     inputBusy === "link"
       ? "正在加入链接材料..."
+      : inputBusy === "browser-link"
+        ? t("collect.browserExtractBusy")
       : inputBusy === "image"
         ? "正在上传图片..."
         : inputBusy === "paste-image"
@@ -81,6 +85,8 @@ export function CollectWorkspace({
   }, [materials]);
 
   const selectedIds = checkedMaterialIds.length ? checkedMaterialIds : selectedMaterial ? [selectedMaterial.id] : [];
+  const browserExtractTarget =
+    selectedIds.length === 1 ? materials.find((item) => item.id === selectedIds[0] && isBrowserExtractableLink(item)) : undefined;
 
   const handleDrop = (event: DragEvent<HTMLElement>, type: MaterialType) => {
     event.preventDefault();
@@ -300,6 +306,19 @@ export function CollectWorkspace({
                   <button
                     className="secondary-button"
                     type="button"
+                    disabled={!browserExtractTarget || inputBusy === "browser-link"}
+                    title={browserExtractTarget ? "" : t("collect.browserExtractDisabled")}
+                    onClick={() => {
+                      if (!browserExtractTarget) return;
+                      onBrowserExtractLink(browserExtractTarget.id);
+                      setCheckedMaterialIds([]);
+                    }}
+                  >
+                    {inputBusy === "browser-link" ? t("collect.browserExtracting") : t("collect.browserExtract")}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
                     disabled={!selectedIds.length || isGeneratingReadable}
                     onClick={() => {
                       onGenerateReadableDraft(selectedIds);
@@ -370,6 +389,11 @@ export function CollectWorkspace({
       {rightRail}
     </section>
   );
+}
+
+function isBrowserExtractableLink(item: SourceMaterial) {
+  if (item.type !== "link") return false;
+  return item.linkType === "public_webpage" || item.linkType === "dynamic_webpage" || item.linkType === "browser_webpage";
 }
 
 function Dropzone({

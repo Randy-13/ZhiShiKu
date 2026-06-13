@@ -89,12 +89,17 @@ type Props = {
   onSelectTopic: (topic: Record<string, unknown>) => void;
   onGenerateDraft: () => void;
   onRevise: (instruction: string, markdown?: string) => void;
-  onSuggestImages: (markdown?: string) => void;
-  onGenerateImages: (coverPrompt?: string, contentPrompts?: string[]) => void;
+  onSuggestImages: (markdown?: string, contentImageCount?: number) => void;
+  onGenerateImages: (coverPrompt?: string, contentPrompts?: string[], onProgress?: (done: number, total: number) => void) => void;
   onFormat: (markdown?: string, designStrategy?: string) => void;
   onPreflight: () => void;
   onPublish: () => void;
 };
+
+type ImageProgress = {
+  done: number;
+  total: number;
+} | null;
 
 export function CreateWorkspace({
   language,
@@ -126,12 +131,14 @@ export function CreateWorkspace({
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [coverPrompt, setCoverPrompt] = useState("");
   const [contentPromptsText, setContentPromptsText] = useState("");
+  const [contentImageCount, setContentImageCount] = useState(1);
+  const [imageProgress, setImageProgress] = useState<ImageProgress>(null);
   const [pendingTopic, setPendingTopic] = useState<Record<string, unknown> | null>(null);
 
   const project = writerState?.project;
   const step = writerState?.step ?? "created";
   const nextAction = writerState?.next_action ?? "";
-  const visibleStep = visibleWriterStep(step, nextAction, isRunning);
+  const visibleStep = visibleWriterStep(step, nextAction);
   const articleMarkdown = markdownDraft || project?.article_markdown || "";
   const labels = steps.map((item) => (language === "zh" ? item.zh : item.en));
   const selectedLibraryFiles = useMemo(() => toWriterLibraryFiles(selectedKnowledgeFiles), [selectedKnowledgeFiles]);
@@ -142,6 +149,7 @@ export function CreateWorkspace({
   useEffect(() => {
     setMarkdownDraft("");
     setRevision("");
+    setImageProgress(null);
     setPendingTopic(null);
   }, [project?.id, project?.article_markdown]);
 
@@ -151,6 +159,8 @@ export function CreateWorkspace({
     setDesignStrategy(project?.design_strategy ?? "");
     setCoverPrompt(project?.cover_prompt ?? "");
     setContentPromptsText((project?.content_image_prompts ?? []).join("\n"));
+    const promptCount = project?.content_image_prompts?.length ?? 0;
+    if (promptCount >= 1 && promptCount <= 3) setContentImageCount(promptCount);
   }, [project?.id, project?.writing_strategy, project?.design_strategy, project?.cover_prompt, project?.content_image_prompts]);
 
   return (
@@ -218,8 +228,11 @@ export function CreateWorkspace({
               runPrimary(step, nextAction, {
                 onGenerateTopics,
                 onGenerateDraft,
-                onSuggestImages: () => onSuggestImages(articleMarkdown),
-                onGenerateImages: () => onGenerateImages(coverPrompt || project.cover_prompt, promptLines(contentPromptsText)),
+                onSuggestImages: () => onSuggestImages(articleMarkdown, contentImageCount),
+                onGenerateImages: () => {
+                  setImageProgress({ done: 0, total: Math.max(1, 1 + promptLines(contentPromptsText).length) });
+                  onGenerateImages(coverPrompt || project.cover_prompt, promptLines(contentPromptsText), (done, total) => setImageProgress({ done, total }));
+                },
                 onFormat: () => onFormat(articleMarkdown, designStrategy),
                 onPreflight,
                 onPublish,
@@ -253,6 +266,8 @@ export function CreateWorkspace({
               revision={revision}
               coverPrompt={coverPrompt}
               contentPromptsText={contentPromptsText}
+              contentImageCount={contentImageCount}
+              imageProgress={imageProgress}
               designStrategy={designStrategy}
               images={images}
               imageErrors={project.images?.errors ?? []}
@@ -271,6 +286,7 @@ export function CreateWorkspace({
               }}
               onCoverPromptChange={setCoverPrompt}
               onContentPromptsTextChange={setContentPromptsText}
+              onContentImageCountChange={setContentImageCount}
               onDesignStrategyChange={setDesignStrategy}
             />
           )}
@@ -294,6 +310,8 @@ function ProjectStageWorkspace({
   revision,
   coverPrompt,
   contentPromptsText,
+  contentImageCount,
+  imageProgress,
   designStrategy,
   images,
   imageErrors,
@@ -306,6 +324,7 @@ function ProjectStageWorkspace({
   onRevise,
   onCoverPromptChange,
   onContentPromptsTextChange,
+  onContentImageCountChange,
   onDesignStrategyChange,
 }: {
   language: "zh" | "en";
@@ -319,6 +338,8 @@ function ProjectStageWorkspace({
   revision: string;
   coverPrompt: string;
   contentPromptsText: string;
+  contentImageCount: number;
+  imageProgress: ImageProgress;
   designStrategy: string;
   images: Array<{ path?: string; prompt?: string }>;
   imageErrors: Array<{ kind?: string; index?: number; message?: string }>;
@@ -331,6 +352,7 @@ function ProjectStageWorkspace({
   onRevise: () => void;
   onCoverPromptChange: (value: string) => void;
   onContentPromptsTextChange: (value: string) => void;
+  onContentImageCountChange: (value: number) => void;
   onDesignStrategyChange: (value: string) => void;
 }) {
   const stageTitle = stageLabel(visibleStep, language);
@@ -391,15 +413,26 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
+      {visibleStep === "draft" && step === "draft" && nextAction === "suggest_images" ? (
+        <ImageSuggestionOptions
+          language={language}
+          value={contentImageCount}
+          onChange={onContentImageCountChange}
+        />
+      ) : null}
+
       {visibleStep === "images" ? (
         <ImageSection
           language={language}
           coverPrompt={coverPrompt}
           contentPromptsText={contentPromptsText}
+          contentImageCount={contentImageCount}
+          progress={imageProgress}
           images={images}
           errors={imageErrors}
           onCoverPromptChange={onCoverPromptChange}
           onContentPromptsTextChange={onContentPromptsTextChange}
+          onContentImageCountChange={onContentImageCountChange}
         />
       ) : null}
 
@@ -412,7 +445,7 @@ function ProjectStageWorkspace({
         </div>
       ) : null}
 
-      {step === "designed" || step === "publish_check" || step === "published" ? (
+      {step === "publish_check" || step === "published" ? (
         <PublishSection language={language} project={project} />
       ) : null}
     </div>
@@ -797,22 +830,71 @@ function ArticleEditor({
   );
 }
 
+function ImageSuggestionOptions({
+  language,
+  value,
+  onChange,
+}: {
+  language: "zh" | "en";
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <section className="project-section image-options-panel">
+      <div className="section-heading">
+        <h2>{language === "zh" ? "配图建议设置" : "Image suggestion settings"}</h2>
+        <span>{language === "zh" ? "生成前确认" : "Before suggestions"}</span>
+      </div>
+      <ImageCountSelect language={language} value={value} onChange={onChange} />
+    </section>
+  );
+}
+
+function ImageCountSelect({
+  language,
+  value,
+  onChange,
+}: {
+  language: "zh" | "en";
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="image-count-select">
+      <span>{language === "zh" ? "正文图片数量" : "Content image count"}</span>
+      <select value={value} onChange={(event) => onChange(Number(event.target.value))}>
+        {[1, 2, 3].map((count) => (
+          <option key={count} value={count}>
+            {language === "zh" ? `${count} 张` : `${count} image${count > 1 ? "s" : ""}`}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function ImageSection({
   language,
   coverPrompt,
   contentPromptsText,
+  contentImageCount,
+  progress,
   images,
   errors,
   onCoverPromptChange,
   onContentPromptsTextChange,
+  onContentImageCountChange,
 }: {
   language: "zh" | "en";
   coverPrompt: string;
   contentPromptsText: string;
+  contentImageCount: number;
+  progress: ImageProgress;
   images: Array<{ path?: string; prompt?: string }>;
   errors?: Array<{ kind?: string; index?: number; message?: string }>;
   onCoverPromptChange: (value: string) => void;
   onContentPromptsTextChange: (value: string) => void;
+  onContentImageCountChange: (value: number) => void;
 }) {
   return (
     <section className="project-section image-stage-panel">
@@ -820,6 +902,7 @@ function ImageSection({
         <h2>{language === "zh" ? "配图" : "Images"}</h2>
         <span>{images.length}</span>
       </div>
+      <ImageCountSelect language={language} value={contentImageCount} onChange={onContentImageCountChange} />
       <div className="prompt-grid">
         <label>
           <span>{language === "zh" ? "封面图提示词" : "Cover prompt"}</span>
@@ -830,6 +913,12 @@ function ImageSection({
           <textarea value={contentPromptsText} onChange={(event) => onContentPromptsTextChange(event.target.value)} placeholder={language === "zh" ? "每行一条提示词" : "One prompt per line"} />
         </label>
       </div>
+      {progress ? (
+        <div className="image-progress">
+          <span>{language === "zh" ? "生成进度" : "Generation progress"}</span>
+          <strong>{progress.done} / {progress.total}</strong>
+        </div>
+      ) : null}
       {images.length ? (
         <div className="generated-image-grid">
           {images.map((item, index) => (
@@ -982,15 +1071,9 @@ function stageLabel(step: WriterStep, language: "zh" | "en") {
   return language === "zh" ? labels[step].zh : labels[step].en;
 }
 
-function visibleWriterStep(step: WriterStep, nextAction: string, isRunning: boolean): WriterStep {
+function visibleWriterStep(step: WriterStep, nextAction: string): WriterStep {
   if (step === "published") return "published";
-  if (nextAction === "generate_topics") return "topics";
-  if (nextAction === "select_topic") return "topic";
-  if (nextAction === "generate_draft") return "draft";
-  if (nextAction === "suggest_images" || nextAction === "generate_images") return "images";
-  if (nextAction === "format_article") return "designed";
-  if (nextAction === "run_preflight") return "publish_check";
-  if (nextAction === "publish") return isRunning ? "published" : "publish_check";
+  if (step === "draft" && nextAction === "generate_images") return "images";
   return step;
 }
 

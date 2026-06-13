@@ -1405,6 +1405,32 @@ textarea {
   min-height: 132px;
 }
 
+.image-count-select,
+.image-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcf9;
+  padding: 10px 12px;
+}
+
+.image-count-select span,
+.image-progress span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.image-count-select select {
+  min-width: 112px;
+}
+
+.image-progress strong {
+  font-size: 14px;
+}
+
 .topic-card,
 .prompt-grid article,
 .generated-image-card {

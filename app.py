@@ -342,11 +342,18 @@ class WriterProjectReviseRequest(BaseModel):
 class WriterProjectImageSuggestionsRequest(BaseModel):
     markdown: str | None = None
     topic: dict[str, object] | None = None
+    content_image_count: int = 1
 
 
 class WriterProjectImagesRequest(BaseModel):
     cover_prompt: str | None = None
     content_image_prompts: list[str] = []
+
+
+class WriterProjectImageItemRequest(BaseModel):
+    kind: str
+    prompt: str
+    index: int | None = None
 
 
 class WriterProjectFormatRequest(BaseModel):
@@ -2910,7 +2917,14 @@ def writer_project_image_suggestions(project_id: str, request: WriterProjectImag
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鏂囩珷鍒濈")
         topic = request.topic if request.topic is not None else project.get("topic")
         setting = api_settings.active_setting()
-        result = deepseek_client.suggest_writer_images(markdown, topic=topic if isinstance(topic, dict) else None, setting=setting)
+        content_image_count = max(1, min(3, int(request.content_image_count or 1)))
+        result = deepseek_client.suggest_writer_images(
+            markdown,
+            topic=topic if isinstance(topic, dict) else None,
+            content_image_count=content_image_count,
+            setting=setting,
+        )
+        result.content_image_prompts = (result.content_image_prompts or [])[:content_image_count]
         writer_tools.update_project(
             project_id,
             cover_prompt=result.cover_prompt,
@@ -2944,6 +2958,26 @@ def writer_project_generate_images(project_id: str, request: WriterProjectImages
         return {**_writer_project_payload(project_id), "images": result}
     except HTTPException:
         raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/writer/projects/{project_id}/images/item")
+def writer_project_generate_image_item(project_id: str, request: WriterProjectImageItemRequest) -> dict[str, object]:
+    if request.kind not in {"cover", "content"}:
+        raise HTTPException(status_code=400, detail="Image kind must be cover or content")
+    try:
+        workspace = _writer_project_workspace(project_id)
+        result = writer_tools.generate_writer_image_item(
+            workspace,
+            request.kind,
+            request.prompt,
+            index=request.index,
+        )
+        writer_tools.update_project(project_id, images=result)
+        return {**_writer_project_payload(project_id), "images": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

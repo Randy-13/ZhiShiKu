@@ -255,6 +255,15 @@ export type InspectedLink = {
   published_at?: string;
 };
 
+export type BrowserExtractLinkResult = {
+  ok?: boolean;
+  error?: string;
+  title?: string;
+  note?: string;
+  markdown?: string;
+  source?: string;
+};
+
 export type WriterAdvanceResult = {
   draft: Partial<CreationDraft>;
   message: string;
@@ -581,6 +590,33 @@ export const api = {
       body: JSON.stringify({ url }),
     });
     return payload.data?.item ?? null;
+  },
+
+  async browserExtractLink(material: SourceMaterial): Promise<ReadableDraftInput> {
+    const payload = await requestJson<V2Payload<BrowserExtractLinkResult>>(
+      "/api/v2/collect/browser-extract-link",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: material.source,
+          title: material.title,
+          wait_ms: 3000,
+          scroll_times: 5,
+          scroll_pause_ms: 800,
+        }),
+      },
+      { timeoutMs: READABLE_DRAFT_TIMEOUT_MS },
+    );
+    const data = assertV2Ok(payload);
+    return {
+      title: firstString(data.title, material.title, "浏览器提取原文"),
+      note: firstString(data.note, material.note),
+      body: firstString(data.markdown),
+      sourceIds: [material.id],
+      materialType: "web_link",
+      source: firstString(data.source, material.source),
+    };
   },
 
   transcribeMedia(mediaIds: number[]) {
@@ -1152,11 +1188,11 @@ export const api = {
     });
   },
 
-  suggestWriterProjectImages(projectId: string, markdown?: string, topic?: Record<string, unknown>) {
+  suggestWriterProjectImages(projectId: string, markdown?: string, topic?: Record<string, unknown>, contentImageCount = 1) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/image-suggestions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, topic }),
+      body: JSON.stringify({ markdown, topic, content_image_count: contentImageCount }),
     });
   },
 
@@ -1165,6 +1201,14 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cover_prompt: coverPrompt, content_image_prompts: contentImagePrompts }),
+    });
+  },
+
+  generateWriterProjectImageItem(projectId: string, kind: "cover" | "content", prompt: string, index?: number) {
+    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/images/item`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, prompt, index }),
     });
   },
 

@@ -721,6 +721,8 @@ def publish_preflight(
             token_cache = json.loads(token_cache_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             token_cache = {}
+    config_ready = bool(config.get("appid") and config.get("appsecret"))
+    wechat_api_check: dict[str, Any] | None = refresh_wechat_access_token() if config_ready else None
     content_image_paths = sorted({str(path) for path in local_html_images(html_text, html_path.parent)})
     checks = [
         {
@@ -798,6 +800,19 @@ def publish_preflight(
                 else "无缓存；发布时会按官方 /cgi-bin/token 接口获取"
             ),
             "optional": True,
+        },
+        {
+            "key": "wechat_api",
+            "label": "微信 access_token / IP 白名单验证",
+            "ok": bool(wechat_api_check and wechat_api_check.get("ok")),
+            "detail": (
+                str(wechat_api_check.get("message") or "微信接口验证通过")
+                if wechat_api_check
+                else "配置 AppID/AppSecret 后再验证 access_token 和 IP 白名单状态"
+            ),
+            "optional": not config_ready,
+            "ip": str((wechat_api_check or {}).get("ip") or ""),
+            "raw": str((wechat_api_check or {}).get("raw") or ""),
         },
     ]
     blocking = [item for item in checks if not item.get("ok") and not item.get("optional")]
@@ -1026,65 +1041,133 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
         "retry_used": retry_used,
     }
 
+def _existing_image_item(path: Path, prompt: str) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return {
+        "path": _relative(path),
+        "absolute_path": str(path),
+        "prompt": prompt,
+        "reused_existing": True,
+    }
+
+
+def _image_metadata_path(workspace: Path) -> Path:
+    return workspace / "image_metadata.json"
+
+
+def _normalize_image_metadata(metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = metadata or {}
+    content_images = data.get("content_images") if isinstance(data.get("content_images"), list) else []
+    errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+    cover = data.get("cover") if isinstance(data.get("cover"), dict) else None
+    content_images = sorted(
+        [item for item in content_images if isinstance(item, dict)],
+        key=lambda item: int(item.get("index") or 0),
+    )
+    items = []
+    if cover:
+        items.append(cover)
+    items.extend(content_images)
+    return {
+        "items": items,
+        "cover": cover,
+        "content_images": content_images,
+        "errors": [item for item in errors if isinstance(item, dict)],
+        "partial": bool(errors),
+        "ok": not bool(errors),
+    }
+
+
+def load_writer_image_metadata(workspace: Path) -> dict[str, Any]:
+    path = _image_metadata_path(workspace)
+    if not path.exists():
+        return _normalize_image_metadata()
+    try:
+        return _normalize_image_metadata(json.loads(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError:
+        return _normalize_image_metadata({"errors": [{"kind": "metadata", "message": "image_metadata.json 格式不可读"}]})
+
+
+def _write_writer_image_metadata(workspace: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_image_metadata(metadata)
+    _image_metadata_path(workspace).write_text(
+        json.dumps(
+            {
+                "cover": normalized["cover"],
+                "content_images": normalized["content_images"],
+                "errors": normalized["errors"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return normalized
+
+
+def generate_writer_image_item(
+    workspace: Path,
+    kind: str,
+    prompt: str,
+    index: int | None = None,
+) -> dict[str, Any]:
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise ValueError("图片提示词不能为空")
+    metadata = load_writer_image_metadata(workspace)
+    errors = [
+        item for item in metadata["errors"]
+        if not (item.get("kind") == kind and (kind == "cover" or int(item.get("index") or 0) == int(index or 0)))
+    ]
+    metadata["errors"] = errors
+
+    if kind == "cover":
+        filename = "cover.png"
+        image_path = workspace / filename
+    elif kind == "content":
+        if not index or index < 1:
+            raise ValueError("正文配图 index 必须从 1 开始")
+        filename = f"content-{index}.png"
+        image_path = workspace / filename
+    else:
+        raise ValueError(f"未知图片类型：{kind}")
+
+    item = _existing_image_item(image_path, prompt)
+    if item is None:
+        try:
+            item = generate_image(prompt, image_path)
+        except Exception as exc:
+            message = f"生成封面图失败：{exc}" if kind == "cover" else f"生成正文配图 {index} 失败：{exc}"
+            metadata["errors"].append({"kind": kind, "index": index, "message": message})
+            item = _existing_image_item(image_path, prompt)
+
+    if item:
+        record = {"filename": filename, "prompt": prompt, "path": item["path"]}
+        if kind == "content":
+            record["index"] = index
+            remaining = [
+                existing for existing in metadata["content_images"]
+                if int(existing.get("index") or 0) != int(index or 0)
+            ]
+            metadata["content_images"] = [*remaining, record]
+        else:
+            metadata["cover"] = record
+
+    return _write_writer_image_metadata(workspace, metadata)
+
+
 def generate_writer_images(
     workspace: Path,
     cover_prompt: str | None = None,
     content_prompts: list[str] | None = None,
 ) -> dict[str, Any]:
-    generated = []
-    errors = []
-    metadata: dict[str, Any] = {"cover": None, "content_images": [], "errors": errors}
-    def existing_item(path: Path, prompt: str) -> dict[str, Any] | None:
-        if not path.exists():
-            return None
-        return {
-            "path": _relative(path),
-            "absolute_path": str(path),
-            "prompt": prompt,
-            "reused_existing": True,
-        }
-
     if cover_prompt:
-        cover_path = workspace / "cover.png"
-        cover_item = existing_item(cover_path, cover_prompt)
-        if cover_item is None:
-            try:
-                cover_item = generate_image(cover_prompt, cover_path)
-            except Exception as exc:
-                errors.append({"kind": "cover", "message": f"生成封面图失败：{exc}"})
-                cover_item = existing_item(cover_path, cover_prompt)
-        if cover_item:
-            generated.append(cover_item)
-            metadata["cover"] = {"filename": "cover.png", "prompt": cover_prompt, "path": cover_item["path"]}
+        generate_writer_image_item(workspace, "cover", cover_prompt)
     for index, prompt in enumerate(content_prompts or [], start=1):
         if prompt.strip():
-            filename = f"content-{index}.png"
-            image_path = workspace / filename
-            item = existing_item(image_path, prompt)
-            if item is None:
-                try:
-                    item = generate_image(prompt, image_path)
-                except Exception as exc:
-                    errors.append({"kind": "content", "index": index, "message": f"生成正文配图 {index} 失败：{exc}"})
-                    item = existing_item(image_path, prompt)
-            if item:
-                generated.append(item)
-                metadata["content_images"].append(
-                    {"filename": filename, "prompt": prompt, "path": item["path"], "index": index}
-                )
-    if metadata["cover"] or metadata["content_images"] or errors:
-        (workspace / "image_metadata.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    return {
-        "items": generated,
-        "cover": metadata["cover"],
-        "content_images": metadata["content_images"],
-        "errors": errors,
-        "partial": bool(errors),
-        "ok": not errors,
-    }
+            generate_writer_image_item(workspace, "content", prompt, index=index)
+    return load_writer_image_metadata(workspace)
 
 
 def content_images(workspace: Path) -> list[Path]:
@@ -1332,7 +1415,7 @@ def format_article(
 
     html_path = workspace / "formatted.html"
     ai_error = ""
-    if use_ai:
+    if use_ai and design_strategy.strip():
         try:
             html_text = deepseek_client.design_wechat_article_html(
                 article_path.read_text(encoding="utf-8"),
