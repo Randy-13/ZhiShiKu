@@ -18,6 +18,7 @@ export function AppShell({
   children,
   onSearchChange,
   onImport,
+  onOpenQueue,
   onSelect,
 }: {
   appName: string;
@@ -34,6 +35,7 @@ export function AppShell({
   children: ReactNode;
   onSearchChange: (value: string) => void;
   onImport: () => void;
+  onOpenQueue: () => void;
   onSelect: (id: WorkspaceId) => void;
 }) {
   return (
@@ -56,6 +58,7 @@ export function AppShell({
           search={search}
           onSearchChange={onSearchChange}
           onImport={onImport}
+          onOpenQueue={onOpenQueue}
         />
         {children}
       </main>

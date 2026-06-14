@@ -1,8 +1,9 @@
 import { CheckCircle2, Cookie, ExternalLink, FolderOpen, Plug, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { api } from "../api";
+import { authApi, quotaApi, settingsApi } from "../api";
 import type {
+  AuthContext,
   ApiSettingInput,
   ApiSettingItem,
   ApiSettingsPayload,
@@ -12,6 +13,7 @@ import type {
   ImageApiSettingInput,
   ImageApiSettingItem,
   ImageApiSettingsPayload,
+  QuotaStatus,
   StorageLocations,
   TrashFileItem,
   TrashStatus,
@@ -98,12 +100,17 @@ export function SettingsWorkspace({
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashMessage, setTrashMessage] = useState("");
   const [trashModalOpen, setTrashModalOpen] = useState(false);
+  const [authContext, setAuthContext] = useState<AuthContext>();
+  const [quotaStatus, setQuotaStatus] = useState<QuotaStatus>();
+  const [quotaMessage, setQuotaMessage] = useState("");
+
+  const localDiagnosticsVisible = authContext ? authContext.deploymentMode !== "cloud" || authContext.user?.role === "admin" : false;
 
   async function refreshCookieStatus() {
     setCookieLoading(true);
     setCookieActionMessage("");
     try {
-      setCookieStatus(await api.bilibiliCookieStatus());
+      setCookieStatus(await settingsApi.bilibiliCookieStatus());
     } catch (error) {
       setCookieStatus({ ok: false, message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -111,11 +118,20 @@ export function SettingsWorkspace({
     }
   }
 
+  async function refreshQuotaStatus() {
+    setQuotaMessage("");
+    try {
+      setQuotaStatus(await quotaApi.me());
+    } catch (error) {
+      setQuotaMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function openCookieLogin() {
     setCookieLoading(true);
     setCookieActionMessage("");
     try {
-      const result = await api.openBilibiliCookieLogin();
+      const result = await settingsApi.openBilibiliCookieLogin();
       setCookieActionMessage(result.message || (language === "zh" ? "已打开 B 站登录窗口。" : "Opened Bilibili login window."));
     } catch (error) {
       setCookieActionMessage(error instanceof Error ? error.message : String(error));
@@ -128,7 +144,7 @@ export function SettingsWorkspace({
     setStorageLoading(true);
     setStorageMessage("");
     try {
-      const settings = await api.workbenchSettings();
+      const settings = await settingsApi.workbenchSettings();
       const locations = settings.storage_locations ?? {};
       setStorageLocations(locations);
       setStorageDraft(locations);
@@ -143,7 +159,7 @@ export function SettingsWorkspace({
     setStorageLoading(true);
     setStorageMessage("");
     try {
-      const payload = await api.saveWorkbenchSettings({
+      const payload = await settingsApi.saveWorkbenchSettings({
         text_extraction_mode: textExtractionMode,
         storage_locations: Object.fromEntries(
           storageFields
@@ -167,7 +183,7 @@ export function SettingsWorkspace({
     setTrashLoading(true);
     setTrashMessage("");
     try {
-      setTrashStatus(await api.trashStatus());
+      setTrashStatus(await settingsApi.trashStatus());
     } catch (error) {
       setTrashMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -179,7 +195,7 @@ export function SettingsWorkspace({
     setTrashLoading(true);
     setTrashMessage("");
     try {
-      const result = await api.clearTrash();
+      const result = await settingsApi.clearTrash();
       setTrashStatus(result);
       setTrashMessage(
         language === "zh"
@@ -194,9 +210,22 @@ export function SettingsWorkspace({
   }
 
   useEffect(() => {
-    refreshCookieStatus();
-    refreshStorageLocations();
-    refreshTrashStatus();
+    authApi
+      .me()
+      .then((context) => {
+        setAuthContext(context);
+        const canSeeLocalDiagnostics = context.deploymentMode !== "cloud" || context.user?.role === "admin";
+        refreshCookieStatus();
+        refreshQuotaStatus();
+        if (canSeeLocalDiagnostics) {
+          refreshStorageLocations();
+          refreshTrashStatus();
+        }
+      })
+      .catch(() => {
+        refreshCookieStatus();
+        refreshQuotaStatus();
+      });
   }, []);
 
   return (
@@ -230,53 +259,95 @@ export function SettingsWorkspace({
               {language === "zh" ? "配置 API" : "Configure API"}
             </button>
           </div>
-          <div className="settings-action-card">
-            <div>
-              <h2>{language === "zh" ? "垃圾箱" : "Trash"}</h2>
-              <p className="hint">
-                {language === "zh"
-                  ? `${trashStatus?.file_count ?? 0} 个文件，${formatBytes(trashStatus?.size_bytes ?? 0)}`
-                  : `${trashStatus?.file_count ?? 0} file(s), ${formatBytes(trashStatus?.size_bytes ?? 0)}`}
-              </p>
-            </div>
-            <button className="secondary-button" type="button" onClick={() => setTrashModalOpen(true)}>
-              <Trash2 size={16} />
-              {language === "zh" ? "管理垃圾箱" : "Manage trash"}
-            </button>
-          </div>
-          <div className="storage-settings-card">
+          <div className="quota-settings-card">
             <div className="dependency-check-title">
-              <FolderOpen size={17} />
-              <h2>{t("settings.storage")}</h2>
+              <CheckCircle2 size={17} />
+              <h2>{language === "zh" ? "额度与用量" : "Quota and usage"}</h2>
             </div>
-            <p className="hint">{t("settings.storage.body")}</p>
-            <div className="storage-location-list">
-              {storageFields.map((field) => (
-                <label key={field.key} className={field.editable ? "storage-location-row" : "storage-location-row readonly"}>
-                  <span>
-                    <strong>{language === "zh" ? field.zh : field.en}</strong>
-                    <small>{language === "zh" ? field.noteZh : field.noteEn}</small>
-                  </span>
-                  <input
-                    value={storageDraft[field.key] ?? storageLocations[field.key] ?? ""}
-                    readOnly={!field.editable}
-                    onChange={(event) => setStorageDraft((current) => ({ ...current, [field.key]: event.target.value }))}
-                  />
-                </label>
-              ))}
-            </div>
-            {storageMessage ? <p className={storageMessage.toLowerCase().includes("error") || storageMessage.includes("失败") ? "inline-error" : "hint"}>{storageMessage}</p> : null}
-            <div className="dependency-actions">
-              <button className="secondary-button" type="button" onClick={refreshStorageLocations} disabled={storageLoading}>
-                <RefreshCw size={16} />
-                {language === "zh" ? "刷新位置" : "Refresh"}
-              </button>
-              <button className="secondary-button" type="button" onClick={saveStorageLocations} disabled={storageLoading}>
-                <Save size={16} />
-                {storageLoading ? (language === "zh" ? "处理中" : "Saving") : (language === "zh" ? "保存位置" : "Save paths")}
-              </button>
-            </div>
+            {quotaMessage ? <p className="inline-error">{quotaMessage}</p> : null}
+            {quotaStatus ? (
+              <div className="quota-metric-list">
+                <QuotaMetric
+                  label={language === "zh" ? "链接解析" : "Link parsing"}
+                  used={quotaStatus.daily.link_parse_daily.used ?? 0}
+                  limit={quotaStatus.daily.link_parse_daily.limit}
+                />
+                <QuotaMetric
+                  label={language === "zh" ? "AI 生成" : "AI generation"}
+                  used={quotaStatus.daily.llm_generate_daily.used ?? 0}
+                  limit={quotaStatus.daily.llm_generate_daily.limit}
+                />
+                <QuotaMetric
+                  label={language === "zh" ? "并发任务" : "Concurrent jobs"}
+                  used={quotaStatus.jobs.concurrent_jobs.used ?? 0}
+                  limit={quotaStatus.jobs.concurrent_jobs.limit}
+                />
+                <QuotaMetric
+                  label={language === "zh" ? "存储空间" : "Storage"}
+                  used={quotaStatus.uploads.storage_bytes.used ?? 0}
+                  limit={quotaStatus.uploads.storage_bytes.limit}
+                  formatter={formatBytes}
+                />
+                <div className="quota-limit-row">
+                  <span>{language === "zh" ? "单文件上传" : "Single upload"}</span>
+                  <strong>{formatBytes(quotaStatus.uploads.single_upload_bytes.limit)}</strong>
+                </div>
+              </div>
+            ) : (
+              <p className="hint">{language === "zh" ? "正在读取额度..." : "Loading quota..."}</p>
+            )}
           </div>
+          {localDiagnosticsVisible ? (
+            <>
+              <div className="settings-action-card">
+                <div>
+                  <h2>{language === "zh" ? "垃圾箱" : "Trash"}</h2>
+                  <p className="hint">
+                    {language === "zh"
+                      ? `${trashStatus?.file_count ?? 0} 个文件，${formatBytes(trashStatus?.size_bytes ?? 0)}`
+                      : `${trashStatus?.file_count ?? 0} file(s), ${formatBytes(trashStatus?.size_bytes ?? 0)}`}
+                  </p>
+                </div>
+                <button className="secondary-button" type="button" onClick={() => setTrashModalOpen(true)}>
+                  <Trash2 size={16} />
+                  {language === "zh" ? "管理垃圾箱" : "Manage trash"}
+                </button>
+              </div>
+              <div className="storage-settings-card">
+                <div className="dependency-check-title">
+                  <FolderOpen size={17} />
+                  <h2>{t("settings.storage")}</h2>
+                </div>
+                <p className="hint">{t("settings.storage.body")}</p>
+                <div className="storage-location-list">
+                  {storageFields.map((field) => (
+                    <label key={field.key} className={field.editable ? "storage-location-row" : "storage-location-row readonly"}>
+                      <span>
+                        <strong>{language === "zh" ? field.zh : field.en}</strong>
+                        <small>{language === "zh" ? field.noteZh : field.noteEn}</small>
+                      </span>
+                      <input
+                        value={storageDraft[field.key] ?? storageLocations[field.key] ?? ""}
+                        readOnly={!field.editable}
+                        onChange={(event) => setStorageDraft((current) => ({ ...current, [field.key]: event.target.value }))}
+                      />
+                    </label>
+                  ))}
+                </div>
+                {storageMessage ? <p className={storageMessage.toLowerCase().includes("error") || storageMessage.includes("失败") ? "inline-error" : "hint"}>{storageMessage}</p> : null}
+                <div className="dependency-actions">
+                  <button className="secondary-button" type="button" onClick={refreshStorageLocations} disabled={storageLoading}>
+                    <RefreshCw size={16} />
+                    {language === "zh" ? "刷新位置" : "Refresh"}
+                  </button>
+                  <button className="secondary-button" type="button" onClick={saveStorageLocations} disabled={storageLoading}>
+                    <Save size={16} />
+                    {storageLoading ? (language === "zh" ? "处理中" : "Saving") : (language === "zh" ? "保存位置" : "Save paths")}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : null}
           <div>
             <h2>{t("settings.extraction")}</h2>
             <p className="hint">{t("settings.extraction.body")}</p>
@@ -300,7 +371,7 @@ export function SettingsWorkspace({
                 </StatusBadge>
               </div>
               <p className="hint">{cookieStatus?.message || (language === "zh" ? "检查 B 站字幕提取所需的登录 Cookie。" : "Check login cookies required for Bilibili subtitles.")}</p>
-              {cookieStatus?.path ? <small className="dependency-path">{cookieStatus.path}</small> : null}
+              {localDiagnosticsVisible && cookieStatus?.path ? <small className="dependency-path">{cookieStatus.path}</small> : null}
               <div className="dependency-meta">
                 {typeof cookieStatus?.cookie_count === "number" ? <span>{language === "zh" ? `Cookie 数：${cookieStatus.cookie_count}` : `Cookies: ${cookieStatus.cookie_count}`}</span> : null}
                 {cookieStatus?.last_modified ? <span>{language === "zh" ? `更新：${cookieStatus.last_modified}` : `Updated: ${cookieStatus.last_modified}`}</span> : null}
@@ -314,16 +385,18 @@ export function SettingsWorkspace({
                   <RefreshCw size={16} />
                   {language === "zh" ? "重新检查" : "Recheck"}
                 </button>
-                <button className="secondary-button" type="button" onClick={openCookieLogin} disabled={cookieLoading}>
-                  <ExternalLink size={16} />
-                  {language === "zh" ? "登录获取 Cookie" : "Log in"}
-                </button>
+                {localDiagnosticsVisible ? (
+                  <button className="secondary-button" type="button" onClick={openCookieLogin} disabled={cookieLoading}>
+                    <ExternalLink size={16} />
+                    {language === "zh" ? "登录获取 Cookie" : "Log in"}
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
         </section>
 
-        <section className="content-panel runtime-log-panel">
+        {localDiagnosticsVisible ? <section className="content-panel runtime-log-panel">
           <div className="section-heading">
             <h2>{t("settings.runtimeLog")}</h2>
             <span>{activities.length}</span>
@@ -343,12 +416,12 @@ export function SettingsWorkspace({
           ) : (
             <p className="hint">{t("settings.runtimeLog.empty")}</p>
           )}
-        </section>
+        </section> : null}
       </div>
 
       {rightRail}
       {apiModalOpen ? <ApiSettingsModal language={language} onClose={() => setApiModalOpen(false)} /> : null}
-      {trashModalOpen ? (
+      {trashModalOpen && localDiagnosticsVisible ? (
         <TrashModal
           language={language}
           status={trashStatus}
@@ -361,7 +434,7 @@ export function SettingsWorkspace({
             setTrashLoading(true);
             setTrashMessage("");
             try {
-              const result = await api.deleteTrashFiles(paths);
+              const result = await settingsApi.deleteTrashFiles(paths);
               setTrashStatus(result);
               setTrashMessage(language === "zh" ? `已彻底删除 ${result.deleted?.length ?? 0} 个文件。` : `Deleted ${result.deleted?.length ?? 0} file(s).`);
             } catch (error) {
@@ -374,7 +447,7 @@ export function SettingsWorkspace({
             setTrashLoading(true);
             setTrashMessage("");
             try {
-              const result = await api.restoreTrashFiles(paths);
+              const result = await settingsApi.restoreTrashFiles(paths);
               setTrashStatus(result);
               setTrashMessage(language === "zh" ? `已恢复 ${result.restored?.length ?? 0} 个文件。` : `Restored ${result.restored?.length ?? 0} file(s).`);
             } catch (error) {
@@ -386,6 +459,31 @@ export function SettingsWorkspace({
         />
       ) : null}
     </section>
+  );
+}
+
+function QuotaMetric({
+  label,
+  used,
+  limit,
+  formatter = (value: number) => String(value),
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  formatter?: (value: number) => string;
+}) {
+  const ratio = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  return (
+    <div className="quota-metric">
+      <div>
+        <span>{label}</span>
+        <strong>
+          {formatter(used)} / {formatter(limit)}
+        </strong>
+      </div>
+      <progress value={ratio} max={100} aria-label={label} />
+    </div>
   );
 }
 
@@ -548,7 +646,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   useEffect(() => {
     let alive = true;
     setIsLoading(true);
-    Promise.all([api.apiSettings(), api.imageApiSettings()])
+    Promise.all([settingsApi.apiSettings(), settingsApi.imageApiSettings()])
       .then(([chat, image]) => {
         if (!alive) return;
         setChatPayload(chat);
@@ -575,7 +673,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   }, [chatPayload, imagePayload, mode]);
 
   async function refresh(nextMode = mode) {
-    const payload = nextMode === "chat" ? await api.apiSettings() : await api.imageApiSettings();
+    const payload = nextMode === "chat" ? await settingsApi.apiSettings() : await settingsApi.imageApiSettings();
     if (nextMode === "chat") setChatPayload(payload);
     else setImagePayload(payload);
     setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], nextMode));
@@ -585,7 +683,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setIsSaving(true);
     setMessage("");
     try {
-      const payload = mode === "chat" ? await api.saveApiSetting(toChatInput(form)) : await api.saveImageApiSetting(toImageInput(form));
+      const payload = mode === "chat" ? await settingsApi.saveApiSetting(toChatInput(form)) : await settingsApi.saveImageApiSetting(toImageInput(form));
       if (mode === "chat") setChatPayload(payload);
       else setImagePayload(payload);
       const saved = payload.item ?? payload.items?.find((item) => item.id === payload.active_id);
@@ -604,8 +702,8 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setTestResult(undefined);
     try {
       const result = mode === "chat"
-        ? await api.testApiSetting(toChatInput(form))
-        : await api.testImageApiSetting(toImageInput(form), { realTest: form.real_image_test });
+        ? await settingsApi.testApiSetting(toChatInput(form))
+        : await settingsApi.testImageApiSetting(toImageInput(form), { realTest: form.real_image_test });
       setTestResult(result);
       setMessage(isTestOk(result) ? (language === "zh" ? "测试通过。" : "Test passed.") : resultMessage(result));
     } catch (error) {
@@ -618,7 +716,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   async function activate(id: string) {
     setMessage("");
     try {
-      const payload = mode === "chat" ? await api.setActiveApiSetting(id) : await api.setActiveImageApiSetting(id);
+      const payload = mode === "chat" ? await settingsApi.setActiveApiSetting(id) : await settingsApi.setActiveImageApiSetting(id);
       if (mode === "chat") setChatPayload(payload);
       else setImagePayload(payload);
       setMessage(language === "zh" ? "已启用该配置。" : "Setting activated.");
@@ -630,7 +728,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   async function remove(id: string) {
     setMessage("");
     try {
-      const payload = mode === "chat" ? await api.deleteApiSetting(id) : await api.deleteImageApiSetting(id);
+      const payload = mode === "chat" ? await settingsApi.deleteApiSetting(id) : await settingsApi.deleteImageApiSetting(id);
       if (mode === "chat") setChatPayload(payload);
       else setImagePayload(payload);
       setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], mode));

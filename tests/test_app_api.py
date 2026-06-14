@@ -57,6 +57,23 @@ def setup_storage(tmp_path, monkeypatch):
     graph_core.init_graph()
 
 
+def test_public_beta_info_pages_and_favicon_are_available():
+    client = TestClient(app.app)
+
+    for path, expected_text in [
+        ("/public-beta", "知识酷内测说明"),
+        ("/privacy", "隐私说明"),
+        ("/data-retention", "数据保存说明"),
+    ]:
+        response = client.get(path)
+        assert response.status_code == 200
+        assert expected_text in response.text
+
+    favicon_response = client.get("/favicon.ico")
+    assert favicon_response.status_code == 200
+    assert favicon_response.headers["content-type"] in {"image/x-icon", "image/vnd.microsoft.icon"}
+
+
 def test_upload_image_and_dedupe(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     client = TestClient(app.app)
@@ -75,6 +92,456 @@ def test_upload_image_and_dedupe(tmp_path, monkeypatch):
 
     image_response = client.get(f"/api/images/{first['id']}/file")
     assert image_response.status_code == 200
+
+
+def _register_app_cloud_member(invite_code: str, email: str, username: str) -> tuple[TestClient, dict[str, object]]:
+    with storage.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO invitations (
+                id, code, role, max_uses, used_count, expires_at, created_at, status
+            ) VALUES (?, ?, 'member', 1, 0, NULL, '2026-01-01T00:00:00', 'active')
+            """,
+            (f"invite-{invite_code}", invite_code),
+        )
+        conn.commit()
+    client = TestClient(app.app, base_url="http://testserver")
+    response = client.post(
+        "/api/auth/register-with-invite",
+        json={
+            "invite_code": invite_code,
+            "email": email,
+            "username": username,
+            "password": "password-123",
+        },
+    )
+    assert response.status_code == 200
+    return client, response.json()["data"]
+
+
+def test_cloud_upload_rejects_single_file_over_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    monkeypatch.setitem(app.quota_service.DEFAULT_LIMITS, "single_upload_bytes", 4)
+    setup_storage(tmp_path, monkeypatch)
+    client, _payload = _register_app_cloud_member("UPLOAD-SIZE", "upload-size@example.test", "upload_size")
+
+    response = client.post("/api/files", files={"files": ("too-large.txt", b"12345", "text/plain")})
+
+    assert response.status_code == 413
+    assert "4 bytes" in response.json()["detail"]
+
+
+def test_cloud_upload_rejects_when_storage_quota_would_be_exceeded(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    monkeypatch.setitem(app.quota_service.DEFAULT_LIMITS, "single_upload_bytes", 100)
+    monkeypatch.setitem(app.quota_service.DEFAULT_LIMITS, "storage_bytes", 8)
+    setup_storage(tmp_path, monkeypatch)
+    client, payload = _register_app_cloud_member("UPLOAD-STORAGE", "upload-storage@example.test", "upload_storage")
+
+    first = client.post("/api/files", files={"files": ("first.txt", b"123456", "text/plain")})
+    assert first.status_code == 200
+    item = first.json()["items"][0]
+    assert item["owner_user_id"] == payload["user"]["id"]
+
+    response = client.post("/api/files", files={"files": ("second.txt", b"abcd", "text/plain")})
+
+    assert response.status_code == 429
+    assert "8 bytes" in response.json()["detail"]
+
+
+def test_cloud_upload_duplicate_scope_is_per_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, first_payload = _register_app_cloud_member("UPLOAD-OWNER-A", "owner-a@example.test", "owner_a")
+    second_client, second_payload = _register_app_cloud_member("UPLOAD-OWNER-B", "owner-b@example.test", "owner_b")
+
+    content = b"same-user-visible-content"
+    first = first_client.post("/api/files", files={"files": ("same.txt", content, "text/plain")})
+    assert first.status_code == 200
+    first_item = first.json()["items"][0]
+    assert first_item["duplicate"] is False
+    assert first_item["owner_user_id"] == first_payload["user"]["id"]
+    assert first_item["workspace_id"] == first_payload["workspace"]["id"]
+
+    first_again = first_client.post("/api/files", files={"files": ("same.txt", content, "text/plain")})
+    assert first_again.status_code == 200
+    first_again_item = first_again.json()["items"][0]
+    assert first_again_item["duplicate"] is True
+    assert first_again_item["id"] == first_item["id"]
+
+    second = second_client.post("/api/files", files={"files": ("same.txt", content, "text/plain")})
+    assert second.status_code == 200
+    second_item = second.json()["items"][0]
+    assert second_item["duplicate"] is False
+    assert second_item["id"] != first_item["id"]
+    assert second_item["file_hash"] != first_item["file_hash"]
+    assert second_item["file_path"] == first_item["file_path"]
+    assert second_item["owner_user_id"] == second_payload["user"]["id"]
+    assert second_item["workspace_id"] == second_payload["workspace"]["id"]
+
+
+def test_cloud_uploaded_file_reads_are_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, _first_payload = _register_app_cloud_member("READ-OWNER-A", "read-a@example.test", "read_a")
+    second_client, _second_payload = _register_app_cloud_member("READ-OWNER-B", "read-b@example.test", "read_b")
+
+    uploaded = first_client.post("/api/files", files={"files": ("private.txt", b"private text", "text/plain")})
+    assert uploaded.status_code == 200
+    file_id = uploaded.json()["items"][0]["id"]
+
+    owner_read = first_client.get(f"/api/files/{file_id}/raw")
+    assert owner_read.status_code == 200
+    assert owner_read.content == b"private text"
+
+    other_read = second_client.get(f"/api/files/{file_id}/raw")
+    assert other_read.status_code == 404
+
+
+def test_cloud_media_transcripts_are_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, _first_payload = _register_app_cloud_member("MEDIA-OWNER-A", "media-a@example.test", "media_a")
+    second_client, _second_payload = _register_app_cloud_member("MEDIA-OWNER-B", "media-b@example.test", "media_b")
+
+    uploaded = first_client.post(
+        "/api/media/upload",
+        files={
+            "files": (
+                "private.srt",
+                "1\n00:00:01,000 --> 00:00:03,000\n私有字幕\n".encode("utf-8"),
+                "application/x-subrip",
+            )
+        },
+    )
+    assert uploaded.status_code == 200
+    media_id = uploaded.json()["items"][0]["id"]
+
+    owner_list = first_client.get("/api/media/transcripts")
+    assert owner_list.status_code == 200
+    assert [item["id"] for item in owner_list.json()["items"]] == [media_id]
+
+    other_list = second_client.get("/api/media/transcripts")
+    assert other_list.status_code == 200
+    assert other_list.json()["items"] == []
+
+    other_read = second_client.get(f"/api/media/{media_id}/transcript")
+    assert other_read.status_code == 404
+
+
+def test_cloud_knowledge_reads_and_mutations_are_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, first_payload = _register_app_cloud_member("KNOW-OWNER-A", "know-a@example.test", "know_a")
+    second_client, _second_payload = _register_app_cloud_member("KNOW-OWNER-B", "know-b@example.test", "know_b")
+
+    created = first_client.post(
+        "/api/knowledge/commit-draft",
+        json={"title": "A 的知识", "note": "只属于 A", "body": "A 的正文", "source_ids": []},
+    )
+    assert created.status_code == 200
+    knowledge_id = created.json()["item"]["id"]
+    assert created.json()["item"]["owner_user_id"] == first_payload["user"]["id"]
+
+    first_list = first_client.get("/api/knowledge")
+    assert first_list.status_code == 200
+    assert [item["id"] for item in first_list.json()["items"]] == [knowledge_id]
+
+    second_list = second_client.get("/api/knowledge")
+    assert second_list.status_code == 200
+    assert second_list.json()["items"] == []
+
+    second_read = second_client.get(f"/api/knowledge/{knowledge_id}")
+    assert second_read.status_code == 404
+
+    second_update = second_client.post(
+        f"/api/knowledge/{knowledge_id}",
+        json={"title": "被越权修改", "note": "", "body": "不应写入"},
+    )
+    assert second_update.status_code == 404
+
+    second_delete = second_client.post("/api/knowledge/delete-not-ingested", json={"knowledge_ids": [knowledge_id]})
+    assert second_delete.status_code == 200
+    assert second_delete.json()["deleted"] == []
+    assert second_delete.json()["skipped"][0]["reason"] == "not_found"
+
+    still_visible = first_client.get(f"/api/knowledge/{knowledge_id}")
+    assert still_visible.status_code == 200
+    assert still_visible.json()["content"] == "> 只属于 A\n\nA 的正文"
+
+
+def test_cloud_generate_file_knowledge_is_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        api_settings,
+        "active_setting",
+        lambda: {
+            "id": "test",
+            "name": "Cloud File API",
+            "provider": "compatible",
+            "base_url": "https://example.com/v1",
+            "model": "file-model",
+            "api_key": "test-key",
+        },
+    )
+    monkeypatch.setattr(
+        deepseek_client,
+        "generate_knowledge_from_text",
+        lambda raw_text, setting=None: (
+            KnowledgeResult(
+                title="Cloud 文件知识",
+                topic="文件输入",
+                tags=["文件"],
+                focus_question="文件讲了什么？",
+                clusters=[],
+                investment_insights="文件输入洞察。",
+            ),
+            raw_text,
+        ),
+    )
+    first_client, first_payload = _register_app_cloud_member("KNOW-FILE-A", "know-file-a@example.test", "know_file_a")
+    second_client, second_payload = _register_app_cloud_member("KNOW-FILE-B", "know-file-b@example.test", "know_file_b")
+
+    first_file = first_client.post("/api/files", files={"files": ("same.md", b"# Same\n\nAlpha", "text/markdown")})
+    second_file = second_client.post("/api/files", files={"files": ("same.md", b"# Same\n\nAlpha", "text/markdown")})
+    assert first_file.status_code == 200
+    assert second_file.status_code == 200
+
+    first_generated = first_client.post(
+        "/api/knowledge/generate-from-files",
+        json={"file_ids": [first_file.json()["items"][0]["id"]]},
+    )
+    second_generated = second_client.post(
+        "/api/knowledge/generate-from-files",
+        json={"file_ids": [second_file.json()["items"][0]["id"]]},
+    )
+    assert first_generated.status_code == 200
+    assert second_generated.status_code == 200
+    first_item = first_generated.json()["item"]
+    second_item = second_generated.json()["item"]
+    assert first_item["id"] != second_item["id"]
+    assert first_item["image_hash"] != second_item["image_hash"]
+    assert first_item["owner_user_id"] == first_payload["user"]["id"]
+    assert second_item["owner_user_id"] == second_payload["user"]["id"]
+
+    assert [item["id"] for item in first_client.get("/api/knowledge").json()["items"]] == [first_item["id"]]
+    assert [item["id"] for item in second_client.get("/api/knowledge").json()["items"]] == [second_item["id"]]
+
+
+def test_cloud_graph_ingest_cannot_touch_other_users_knowledge(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, _first_payload = _register_app_cloud_member("GRAPH-OWNER-A", "graph-a@example.test", "graph_a")
+    second_client, _second_payload = _register_app_cloud_member("GRAPH-OWNER-B", "graph-b@example.test", "graph_b")
+
+    created = first_client.post(
+        "/api/knowledge/commit-draft",
+        json={"title": "A 图谱知识", "note": "", "body": "# A 图谱知识\n\n正文", "source_ids": []},
+    )
+    assert created.status_code == 200
+    knowledge_id = created.json()["item"]["id"]
+
+    blocked = second_client.post("/api/knowledge/ingest-to-graph", json={"knowledge_ids": [knowledge_id]})
+    assert blocked.status_code == 200
+    body = blocked.json()
+    assert body["ok"] is False
+    assert body["results"][0]["ok"] is False
+    assert body["results"][0]["error"] == "Knowledge not found"
+
+    still_owned = first_client.get(f"/api/knowledge/{knowledge_id}")
+    assert still_owned.status_code == 200
+    assert still_owned.json()["item"]["graph_status"] == "not_ingested"
+
+
+def test_cloud_writer_projects_are_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, first_payload = _register_app_cloud_member("WRITER-OWNER-A", "writer-a@example.test", "writer_a")
+    second_client, second_payload = _register_app_cloud_member("WRITER-OWNER-B", "writer-b@example.test", "writer_b")
+
+    first_knowledge = first_client.post(
+        "/api/knowledge/commit-draft",
+        json={"title": "A 写作素材", "note": "", "body": "A 写作素材正文", "source_ids": []},
+    )
+    second_knowledge = second_client.post(
+        "/api/knowledge/commit-draft",
+        json={"title": "B 写作素材", "note": "", "body": "B 写作素材正文", "source_ids": []},
+    )
+    assert first_knowledge.status_code == 200
+    assert second_knowledge.status_code == 200
+
+    created = first_client.post(
+        "/api/writer/projects",
+        json={"name": "A 的创作项目", "knowledge_ids": [first_knowledge.json()["item"]["id"]]},
+    )
+    assert created.status_code == 200
+    project = created.json()["project"]
+    assert project["owner_user_id"] == first_payload["user"]["id"]
+    assert project["workspace_id"] == first_payload["workspace"]["id"]
+
+    assert [item["id"] for item in first_client.get("/api/writer/projects").json()["items"]] == [project["id"]]
+    assert second_client.get("/api/writer/projects").json()["items"] == []
+    assert second_client.get(f"/api/writer/projects/{project['id']}").status_code == 404
+
+    other_confirm = second_client.post(
+        f"/api/writer/projects/{project['id']}/knowledge",
+        json={"knowledge_ids": [second_knowledge.json()["item"]["id"]], "library_files": []},
+    )
+    assert other_confirm.status_code == 404
+
+    own_confirm_other_knowledge = first_client.post(
+        f"/api/writer/projects/{project['id']}/knowledge",
+        json={"knowledge_ids": [second_knowledge.json()["item"]["id"]], "library_files": []},
+    )
+    assert own_confirm_other_knowledge.status_code == 404
+
+    own_read = first_client.get(f"/api/writer/projects/{project['id']}")
+    assert own_read.status_code == 200
+    assert own_read.json()["project"]["owner_user_id"] == first_payload["user"]["id"]
+
+
+def test_cloud_legacy_writer_paths_are_scoped_to_owned_projects(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, _first_payload = _register_app_cloud_member("WRITER-LEGACY-A", "writer-legacy-a@example.test", "writer_legacy_a")
+    second_client, _second_payload = _register_app_cloud_member("WRITER-LEGACY-B", "writer-legacy-b@example.test", "writer_legacy_b")
+
+    second_knowledge = second_client.post(
+        "/api/knowledge/commit-draft",
+        json={"title": "B 的旧入口素材", "note": "", "body": "B 的素材正文", "source_ids": []},
+    )
+    assert second_knowledge.status_code == 200
+    second_knowledge_id = second_knowledge.json()["item"]["id"]
+
+    assert first_client.get(f"/api/writer/session?ids={second_knowledge_id}").status_code == 404
+    assert first_client.post("/api/writer/topics", json={"knowledge_ids": [second_knowledge_id]}).status_code == 404
+
+    legacy_workspace = writer_tools.dated_workspace("legacy-shared-workspace")
+    legacy_html = legacy_workspace / "formatted.html"
+    legacy_html.write_text("<html><body>legacy</body></html>", encoding="utf-8")
+    legacy_workspace_path = str(legacy_workspace.relative_to(storage.ROOT))
+    legacy_html_path = str(legacy_html.relative_to(storage.ROOT))
+
+    assert first_client.get("/api/writer/workspaces").json()["items"] == []
+    assert first_client.get("/api/writer/workspace", params={"path": legacy_workspace_path}).status_code == 404
+    assert first_client.get("/api/writer/file", params={"path": legacy_html_path}).status_code == 404
+
+    first_project = first_client.post("/api/writer/projects", json={"name": "A 旧预览项目", "knowledge_ids": []})
+    second_project = second_client.post("/api/writer/projects", json={"name": "B 旧预览项目", "knowledge_ids": []})
+    assert first_project.status_code == 200
+    assert second_project.status_code == 200
+    first_workspace = writer_tools.resolve_project_workspace(first_project.json()["project"]["id"])
+    second_workspace = writer_tools.resolve_project_workspace(second_project.json()["project"]["id"])
+    first_html = first_workspace / "formatted.html"
+    second_html = second_workspace / "formatted.html"
+    first_html.write_text("<html><body>first owned</body></html>", encoding="utf-8")
+    second_html.write_text("<html><body>second owned</body></html>", encoding="utf-8")
+
+    owner_preview = first_client.get("/api/writer/file", params={"path": str(first_html.relative_to(storage.ROOT))})
+    other_preview = first_client.get("/api/writer/file", params={"path": str(second_html.relative_to(storage.ROOT))})
+    owner_workspace = first_client.get("/api/writer/workspace", params={"path": str(first_workspace.relative_to(storage.ROOT))})
+    other_workspace = first_client.get("/api/writer/workspace", params={"path": str(second_workspace.relative_to(storage.ROOT))})
+
+    assert owner_preview.status_code == 200
+    assert "first owned" in owner_preview.text
+    assert other_preview.status_code == 404
+    assert owner_workspace.status_code == 200
+    assert other_workspace.status_code == 404
+
+
+def test_cloud_member_cannot_operate_wechat_publish_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    client, _payload = _register_app_cloud_member("PUBLISH-TOOLS", "publish-tools@example.test", "publish_tools")
+
+    def forbidden_call(*args, **kwargs):
+        raise AssertionError("publish tool should not be called for cloud members")
+
+    monkeypatch.setattr(writer_tools, "check_wechat_publish_ip", forbidden_call)
+    monkeypatch.setattr(writer_tools, "refresh_wechat_access_token", forbidden_call)
+    monkeypatch.setattr(writer_tools, "publish_preflight", forbidden_call)
+    monkeypatch.setattr(writer_tools, "publish_draft", forbidden_call)
+
+    project_response = client.post("/api/writer/projects", json={"name": "发布权限项目", "knowledge_ids": []})
+    assert project_response.status_code == 200
+    project_id = project_response.json()["project"]["id"]
+    workspace = writer_tools.resolve_project_workspace(project_id)
+    (workspace / "formatted.html").write_text("<html><body>ready</body></html>", encoding="utf-8")
+    workspace_path = str(workspace.relative_to(storage.ROOT))
+
+    assert client.get("/api/writer/publish/ip-check").status_code == 403
+    assert client.post("/api/writer/publish/token/refresh").status_code == 403
+    assert client.post("/api/writer/publish/preflight", json={"workspace": workspace_path, "title": "标题"}).status_code == 403
+    assert client.post("/api/writer/publish", json={"workspace": workspace_path, "title": "标题"}).status_code == 403
+    assert client.post(f"/api/writer/projects/{project_id}/publish/preflight", json={"title": "标题"}).status_code == 403
+    assert client.post(f"/api/writer/projects/{project_id}/publish", json={"title": "标题"}).status_code == 403
+
+
+def test_cloud_mining_projects_are_scoped_to_owner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, first_payload = _register_app_cloud_member("MINING-OWNER-A", "mining-a@example.test", "mining_a")
+    second_client, second_payload = _register_app_cloud_member("MINING-OWNER-B", "mining-b@example.test", "mining_b")
+
+    created = first_client.post("/api/mining/projects", json={"name": "A 的策略学习"})
+    assert created.status_code == 200
+    project = created.json()["project"]
+    assert project["owner_user_id"] == first_payload["user"]["id"]
+    assert project["workspace_id"] == first_payload["workspace"]["id"]
+
+    first_list = first_client.get("/api/mining/projects")
+    second_list = second_client.get("/api/mining/projects")
+    assert first_list.status_code == 200
+    assert second_list.status_code == 200
+    assert [item["id"] for item in first_list.json()["items"]] == [project["id"]]
+    assert second_list.json()["items"] == []
+
+    assert second_client.get(f"/api/mining/projects/{project['id']}").status_code == 404
+    assert second_client.patch(f"/api/mining/projects/{project['id']}", json={"name": "越权改名"}).status_code == 404
+    assert second_client.post(f"/api/mining/projects/{project['id']}/learn-creation-strategy").status_code == 404
+
+    first_file = first_client.post("/api/files", files={"files": ("first.txt", b"first sample", "text/plain")})
+    second_file = second_client.post("/api/files", files={"files": ("second.txt", b"second sample", "text/plain")})
+    assert first_file.status_code == 200
+    assert second_file.status_code == 200
+    first_file_id = first_file.json()["items"][0]["id"]
+    second_file_item = second_file.json()["items"][0]
+    assert second_file_item["owner_user_id"] == second_payload["user"]["id"]
+
+    own_attach = first_client.post(
+        f"/api/mining/projects/{project['id']}/sources",
+        json={"sources": [{"source_type": "file", "source_id": first_file_id, "title": "A 样本"}]},
+    )
+    assert own_attach.status_code == 200
+    assert own_attach.json()["results"][0]["ok"] is True
+    assert len(own_attach.json()["sources"]) == 1
+
+    other_source_attach = first_client.post(
+        f"/api/mining/projects/{project['id']}/sources",
+        json={"sources": [{"source_type": "file", "source_id": second_file_item["id"], "title": "B 样本"}]},
+    )
+    assert other_source_attach.status_code == 200
+    assert other_source_attach.json()["results"][0]["ok"] is False
+    assert len(other_source_attach.json()["sources"]) == 1
+
+    other_project_attach = second_client.post(
+        f"/api/mining/projects/{project['id']}/sources",
+        json={"sources": [{"source_type": "file", "source_id": second_file_item["id"], "title": "B 样本"}]},
+    )
+    assert other_project_attach.status_code == 404
 
 
 def test_mining_project_create_rename_and_empty_learn(tmp_path, monkeypatch):

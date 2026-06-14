@@ -15,7 +15,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 from pydantic import BaseModel, HttpUrl
 
 import api_settings
@@ -30,11 +30,16 @@ import web_settings
 import writer_tools
 from markdown_writer import render_knowledge_markdown
 from src.materials.entities import MaterialType
+from src.auth import create_invitation, current_context, login, logout, register_with_invite
+from src import jobs as job_service
+from src import quotas as quota_service
 from src.shared.app_shell import GLOBAL_LIBRARIES, PRIMARY_SECTIONS, WORKSPACE_ENTRIES
 from src.shared.responses import success_payload
 
 
 router = APIRouter(prefix="/api/v2", tags=["v2-contracts"])
+auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
+jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 class CollectTextRequest(BaseModel):
@@ -198,6 +203,55 @@ class WebSettingsRequest(BaseModel):
     language: str = "zh-CN"
 
 
+class AuthLoginRequest(BaseModel):
+    identifier: str
+    password: str
+
+
+class AuthRegisterInviteRequest(BaseModel):
+    invite_code: str
+    email: str
+    username: str
+    password: str
+
+
+class AdminInvitationRequest(BaseModel):
+    role: str = "member"
+    max_uses: int = 1
+    days: int = 14
+
+
+class JobCreateRequest(BaseModel):
+    kind: str
+    payload: dict[str, object] = {}
+    auto_start: bool = True
+
+
+class MediaTranscriptJobRequest(BaseModel):
+    media_ids: list[int]
+
+
+class WriterImageGenerateJobRequest(BaseModel):
+    project_id: str
+    cover_prompt: str | None = None
+    content_image_prompts: list[str] = []
+
+
+class WriterImageItemJobRequest(BaseModel):
+    project_id: str
+    kind: str
+    prompt: str
+    index: int | None = None
+
+
+class WriterPublishPreflightJobRequest(BaseModel):
+    project_id: str
+    title: str = ""
+    author: str = "Bobo"
+    digest: str | None = None
+    cover_path: str | None = None
+
+
 class ApiSettingRequest(BaseModel):
     id: str | None = None
     name: str = ""
@@ -227,6 +281,110 @@ class AsrSettingRequest(BaseModel):
     timeout: float | None = None
 
 
+@auth_router.get("/me")
+def auth_me(request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        return success_payload(data=current_context(request, conn))
+
+
+@auth_router.post("/login")
+def auth_login(payload: AuthLoginRequest, request: Request, response: Response) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        return success_payload(data=login(conn, response, payload.identifier, payload.password, request))
+
+
+@auth_router.post("/logout")
+def auth_logout(request: Request, response: Response) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        return success_payload(data=logout(conn, response, request))
+
+
+@auth_router.post("/register-with-invite")
+def auth_register_with_invite(payload: AuthRegisterInviteRequest, request: Request, response: Response) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        return success_payload(
+            data=register_with_invite(
+                conn,
+                response,
+                request,
+                invite_code=payload.invite_code,
+                email=payload.email,
+                username=payload.username,
+                password=payload.password,
+            )
+        )
+
+
+@auth_router.post("/admin/invitations")
+def auth_admin_create_invitation(payload: AdminInvitationRequest, request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        if context["user"]["role"] != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有管理员可以创建邀请码")
+        return success_payload(data=create_invitation(conn, role=payload.role, max_uses=payload.max_uses, days=payload.days))
+
+
+@jobs_router.get("")
+def jobs_list(request: Request, limit: int = 30) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        return success_payload(data={"items": job_service.list_jobs(conn, user_id=context["user"]["id"], limit=limit)})
+
+
+@jobs_router.post("")
+def jobs_create(payload: JobCreateRequest, request: Request, background_tasks: BackgroundTasks) -> dict[str, object]:
+    if not payload.kind.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务类型不能为空")
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        kind = payload.kind.strip()
+        _validate_supported_job(kind)
+        _validate_job_payload(kind, payload.payload, context, require_executable=payload.auto_start)
+        _enforce_concurrent_jobs(conn, context)
+        _consume_job_quota(conn, context, kind, payload.payload)
+        item = job_service.create_job(
+            conn,
+            user_id=context["user"]["id"],
+            workspace_id=context["workspace"]["id"],
+            kind=kind,
+            payload=payload.payload,
+        )
+        if payload.auto_start:
+            background_tasks.add_task(_run_job, item["id"], context)
+        return success_payload(data={"item": item})
+
+
+@jobs_router.get("/{job_id}")
+def jobs_detail(job_id: str, request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        try:
+            item = job_service.get_job(conn, user_id=context["user"]["id"], job_id=job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from exc
+        return success_payload(data={"item": item})
+
+
+@jobs_router.post("/{job_id}/cancel")
+def jobs_cancel(job_id: str, request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        try:
+            item = job_service.cancel_job(conn, user_id=context["user"]["id"], job_id=job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from exc
+        return success_payload(data={"item": item})
+
+
 @router.get("/material-types")
 def material_types() -> dict[str, object]:
     return success_payload(
@@ -241,9 +399,13 @@ def material_types() -> dict[str, object]:
 
 
 @router.get("/app-shell")
-def app_shell() -> dict[str, object]:
+def app_shell(request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        auth_context = current_context(request, conn)
     return success_payload(
         data={
+            "auth": auth_context,
             "primarySections": [
                 {
                     "id": section.id,
@@ -298,6 +460,33 @@ def settings_overview() -> dict[str, object]:
             ]
         }
     )
+
+
+@router.get("/quotas/me")
+def quota_status(request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        user_id, workspace_id = quota_service.user_ids(context)
+        return success_payload(
+            data={
+                "deploymentMode": context.get("deploymentMode"),
+                "enforced": quota_service.is_enforced(context),
+                "daily": {
+                    "link_parse_daily": quota_service.check_daily(conn, user_id=user_id, workspace_id=workspace_id, key="link_parse_daily"),
+                    "llm_generate_daily": quota_service.check_daily(conn, user_id=user_id, workspace_id=workspace_id, key="llm_generate_daily"),
+                },
+                "jobs": {
+                    "concurrent_jobs": quota_service.check_concurrent_jobs(conn, user_id=user_id),
+                },
+                "uploads": {
+                    "single_upload_bytes": {
+                        "limit": quota_service.DEFAULT_LIMITS["single_upload_bytes"],
+                    },
+                    "storage_bytes": quota_service.check_storage(conn, user_id=user_id),
+                },
+            }
+        )
 
 
 @router.get("/settings/web")
@@ -382,18 +571,18 @@ def test_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
 
 
 @router.get("/libraries/{library_id}/files")
-def library_files(library_id: str, pending_focus: bool = False) -> dict[str, object]:
-    return success_payload(data={"items": _list_library_files(library_id, pending_focus=pending_focus)})
+def library_files(library_id: str, request: Request, pending_focus: bool = False) -> dict[str, object]:
+    return success_payload(data={"items": _list_library_files(library_id, pending_focus=pending_focus, context=_request_context(request))})
 
 
 @router.get("/libraries/{library_id}/file")
-def library_file(library_id: str, markdown_path: str) -> dict[str, object]:
-    item, text = _read_library_file(library_id, markdown_path)
+def library_file(library_id: str, markdown_path: str, request: Request) -> dict[str, object]:
+    item, text = _read_library_file(library_id, markdown_path, context=_request_context(request))
     return success_payload(data={"item": item, "markdown": text})
 
 
 @router.post("/libraries/{library_id}/file")
-def update_library_file(library_id: str, markdown_path: str, request: LibraryFileUpdateRequest) -> dict[str, object]:
+def update_library_file(library_id: str, markdown_path: str, request: LibraryFileUpdateRequest, http_request: Request) -> dict[str, object]:
     if not request.markdown.strip():
         return success_payload(data={"ok": False, "error": "Markdown 正文不能为空"})
     path = _resolve_library_markdown_path(library_id, markdown_path)
@@ -407,8 +596,10 @@ def update_library_file(library_id: str, markdown_path: str, request: LibraryFil
 
 
 @router.delete("/libraries/{library_id}/file")
-def delete_library_file(library_id: str, markdown_path: str) -> dict[str, object]:
+def delete_library_file(library_id: str, markdown_path: str, request: Request) -> dict[str, object]:
+    context = _request_context(request)
     path = _resolve_library_markdown_path(library_id, markdown_path)
+    _assert_library_file_visible(path, context)
     trashed_path = _move_library_file_to_trash(library_id, path)
     return success_payload(
         data={
@@ -424,24 +615,30 @@ def delete_library_file(library_id: str, markdown_path: str) -> dict[str, object
 
 
 @router.get("/settings/trash")
-def settings_trash_status() -> dict[str, object]:
-    return success_payload(data={**_trash_status(), "items": _list_trash_files()})
+def settings_trash_status(request: Request) -> dict[str, object]:
+    status_payload = _trash_status()
+    if not _local_diagnostics_visible(request):
+        return success_payload(data={**status_payload, "path": "", "items": [], "redacted": True})
+    return success_payload(data={**status_payload, "items": _list_trash_files(), "redacted": False})
 
 
 @router.post("/settings/trash/delete")
-def delete_selected_trash_files(request: TrashSelectionRequest) -> dict[str, object]:
+def delete_selected_trash_files(request: TrashSelectionRequest, http_request: Request) -> dict[str, object]:
+    _require_local_diagnostics(http_request)
     result = _delete_trash_paths(request.trash_paths)
     return success_payload(data={"ok": True, **result, **_trash_status(), "items": _list_trash_files()})
 
 
 @router.post("/settings/trash/restore")
-def restore_selected_trash_files(request: TrashSelectionRequest) -> dict[str, object]:
+def restore_selected_trash_files(request: TrashSelectionRequest, http_request: Request) -> dict[str, object]:
+    _require_local_diagnostics(http_request)
     result = _restore_trash_paths(request.trash_paths)
     return success_payload(data={"ok": True, **result, **_trash_status(), "items": _list_trash_files()})
 
 
 @router.delete("/settings/trash")
-def clear_settings_trash() -> dict[str, object]:
+def clear_settings_trash(request: Request) -> dict[str, object]:
+    _require_local_diagnostics(request)
     status = _trash_status()
     deleted_files = int(status["file_count"])
     deleted_bytes = int(status["size_bytes"])
@@ -518,12 +715,14 @@ def collect_web_link(request: CollectWebLinkRequest) -> dict[str, object]:
 
 
 @router.post("/collect/inspect-link")
-def inspect_link(request: InspectLinkRequest) -> dict[str, object]:
+def inspect_link(request: InspectLinkRequest, http_request: Request) -> dict[str, object]:
+    _consume_daily_quota(_request_context(http_request), "link_parse_daily", "链接解析")
     return success_payload(data={"ok": True, "item": _inspect_link(str(request.url))})
 
 
 @router.post("/collect/browser-extract-link")
-def browser_extract_link(request: BrowserExtractLinkRequest) -> dict[str, object]:
+def browser_extract_link(request: BrowserExtractLinkRequest, http_request: Request) -> dict[str, object]:
+    _consume_daily_quota(_request_context(http_request), "link_parse_daily", "链接解析")
     url = str(request.url)
     inspection = _inspect_link(url)
     link_type = str(inspection.get("link_type") or "")
@@ -559,7 +758,7 @@ def browser_extract_link(request: BrowserExtractLinkRequest) -> dict[str, object
 
 
 @router.post("/collect/raw-markdown")
-def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object]:
+def collect_raw_markdown(request: CollectRawMarkdownRequest, http_request: Request) -> dict[str, object]:
     if not request.items:
         return success_payload(data={"ok": False, "error": "待分析队列不能为空"})
 
@@ -577,6 +776,8 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
         return success_payload(data={"ok": False, "error": error, "errors": errors})
 
     body = _clean_raw_markdown_body(body)
+    context = _request_context(http_request)
+    _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
     polish_meta = _polish_raw_material(material_type, body, title)
     if polish_meta["markdown"]:
         body = polish_meta["markdown"]
@@ -584,6 +785,7 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
         title = polish_meta["title"]
     title = _resolve_raw_title(request.title, title, body)
 
+    owner_meta = _owner_meta(context)
     item = _write_raw_markdown(
         material_type=material_type,
         title=title,
@@ -592,6 +794,7 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
         extra_meta={
             "队列数量": str(len(request.items)),
             "失败数量": str(len(errors)),
+            **owner_meta,
             **polish_meta["extra_meta"],
         },
     )
@@ -599,7 +802,7 @@ def collect_raw_markdown(request: CollectRawMarkdownRequest) -> dict[str, object
 
 
 @router.post("/collect/raw-file")
-def collect_raw_file(request: CollectRawFileRequest) -> dict[str, object]:
+def collect_raw_file(request: CollectRawFileRequest, http_request: Request) -> dict[str, object]:
     title = request.title.strip() or _markdown_title(request.markdown) or "raw-material"
     markdown = request.markdown.strip()
     if not markdown:
@@ -607,7 +810,8 @@ def collect_raw_file(request: CollectRawFileRequest) -> dict[str, object]:
 
     material_type = request.material_type.strip() or "text"
     source = request.source.strip() or material_type
-    extra_meta = {"人工备注": request.note.strip()} if request.note.strip() else None
+    extra_meta = {"人工备注": request.note.strip()} if request.note.strip() else {}
+    extra_meta.update(_owner_meta(_request_context(http_request)))
     item = _write_raw_markdown(
         material_type=material_type,
         title=title,
@@ -619,24 +823,29 @@ def collect_raw_file(request: CollectRawFileRequest) -> dict[str, object]:
 
 
 @router.post("/collect/readable-draft")
-def collect_readable_draft(request: CollectReadableDraftRequest) -> dict[str, object]:
+def collect_readable_draft(request: CollectReadableDraftRequest, http_request: Request) -> dict[str, object]:
+    return success_payload(data=_build_readable_draft(request, context=_request_context(http_request)))
+
+
+def _build_readable_draft(request: CollectReadableDraftRequest, context: dict[str, object]) -> dict[str, object]:
     if not request.items:
-        return success_payload(data={"ok": False, "error": "待处理队列不能为空"})
+        return {"ok": False, "error": "待处理队列不能为空"}
 
     material_type = request.material_type.strip()
     title = request.title.strip() or _default_raw_title(material_type, request.items)
     try:
         body, sources, errors = _extract_queue_text(material_type, request.items, parser_mode=request.parser_mode)
     except (KeyError, ValueError, OSError) as exc:
-        return success_payload(data={"ok": False, "error": str(exc)})
+        return {"ok": False, "error": str(exc)}
 
     if not body.strip():
         error = "未提取到可生成原文草稿的文本"
         if errors:
             error = f"{error}：" + "；".join(errors[:3])
-        return success_payload(data={"ok": False, "error": error, "errors": errors})
+        return {"ok": False, "error": error, "errors": errors}
 
     body = _clean_raw_markdown_body(body)
+    _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
     polish_meta = (
         _polish_screenshot_readable_draft(body, title)
         if material_type == "screenshot"
@@ -654,26 +863,25 @@ def collect_readable_draft(request: CollectReadableDraftRequest) -> dict[str, ob
     if errors:
         note_parts.append(f"提取异常：{'；'.join(errors[:3])}")
 
-    return success_payload(
-        data={
-            "ok": True,
-            "title": title,
-            "note": " ".join(part for part in note_parts if part).strip(),
-            "markdown": body,
-            "source": "; ".join(sources)[:1000] if sources else material_type,
-            "errors": errors,
-            "polish": polish_meta["response"],
-        }
-    )
+    return {
+        "ok": True,
+        "title": title,
+        "note": " ".join(part for part in note_parts if part).strip(),
+        "markdown": body,
+        "source": "; ".join(sources)[:1000] if sources else material_type,
+        "errors": errors,
+        "polish": polish_meta["response"],
+    }
 
 
 @router.post("/learn/refine-knowledge-cluster")
-def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest) -> dict[str, object]:
+def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest, http_request: Request) -> dict[str, object]:
     if not request.raw_paths:
         return success_payload(data={"ok": False, "error": "请先从原料库选择待处理文件"})
 
     try:
-        sources = [_read_raw_material_file(path) for path in request.raw_paths]
+        context = _request_context(http_request)
+        sources = [_read_raw_material_file(path, context=context) for path in request.raw_paths]
         combined_raw_text = _combine_raw_material_sources(sources)
         if not combined_raw_text.strip():
             return success_payload(data={"ok": False, "error": "选中的原料文件没有可学习文本"})
@@ -685,6 +893,7 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest) 
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
             return success_payload(data={"ok": True, "item": existing, "skipped": True})
 
+        _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
         setting = api_settings.active_setting()
         knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
             combined_raw_text,
@@ -709,7 +918,7 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest) 
 
 
 @router.post("/learn/focus-file")
-def learn_save_focus_file(request: LearnSaveFocusRequest) -> dict[str, object]:
+def learn_save_focus_file(request: LearnSaveFocusRequest, http_request: Request) -> dict[str, object]:
     if not request.raw_paths:
         return success_payload(data={"ok": False, "error": "请先选择本次重点库文件对应的原料"})
     markdown = request.markdown.strip()
@@ -717,16 +926,21 @@ def learn_save_focus_file(request: LearnSaveFocusRequest) -> dict[str, object]:
         return success_payload(data={"ok": False, "error": "重点库 Markdown 不能为空"})
 
     try:
-        sources = [_read_raw_material_file(path) for path in request.raw_paths]
+        context = _request_context(http_request)
+        owner_meta = _owner_meta(context)
+        sources = [_read_raw_material_file(path, context=context) for path in request.raw_paths]
         source_hash = _raw_sources_hash(sources)
         entry = storage.create_or_update_knowledge_entry(
             [],
             source_hash,
             source_type="raw_materials",
             source_ids=[item["relative_path"] for item in sources],
+            owner_user_id=owner_meta.get("owner_user_id") or None,
+            workspace_id=owner_meta.get("workspace_id") or None,
         )
         title = request.title.strip() or _markdown_title(markdown) or "focus-knowledge"
         markdown_path = storage.markdown_path_for(title, source_hash, entry.get("created_at"))
+        markdown = _with_owner_meta(markdown, owner_meta)
         markdown_path.write_text(markdown, encoding="utf-8")
         meta = _markdown_meta(markdown)
         updated = storage.update_knowledge_entry(
@@ -739,6 +953,8 @@ def learn_save_focus_file(request: LearnSaveFocusRequest) -> dict[str, object]:
             error_message=None,
             graph_status="not_ingested",
             graph_error_message=None,
+            owner_user_id=owner_meta.get("owner_user_id") or None,
+            workspace_id=owner_meta.get("workspace_id") or None,
         )
         return success_payload(
             data={
@@ -753,33 +969,43 @@ def learn_save_focus_file(request: LearnSaveFocusRequest) -> dict[str, object]:
 
 
 @router.get("/mine/perspectives")
-def mine_perspectives() -> dict[str, object]:
-    return success_payload(data={"items": _list_perspective_profiles()})
+def mine_perspectives(request: Request) -> dict[str, object]:
+    context = _request_context(request)
+    return success_payload(data={"items": _list_perspective_profiles(context=context)})
 
 
 @router.post("/mine/perspectives")
-def mine_save_perspective(profile: MinePerspectiveProfile) -> dict[str, object]:
-    saved = storage.upsert_perspective_profile(profile.model_dump())
-    return success_payload(data={"ok": True, "item": saved, "items": _list_perspective_profiles()})
+def mine_save_perspective(profile: MinePerspectiveProfile, request: Request) -> dict[str, object]:
+    context = _request_context(request)
+    owner_meta = _owner_meta(context)
+    saved = storage.upsert_perspective_profile(
+        profile.model_dump(),
+        owner_user_id=owner_meta.get("owner_user_id") or None,
+        workspace_id=owner_meta.get("workspace_id") or None,
+    )
+    return success_payload(data={"ok": True, "item": saved, "items": _list_perspective_profiles(context=context)})
 
 
 @router.delete("/mine/perspectives/{profile_id}")
-def mine_delete_perspective(profile_id: str) -> dict[str, object]:
+def mine_delete_perspective(profile_id: str, request: Request) -> dict[str, object]:
     if not profile_id.startswith("custom_"):
         return success_payload(data={"ok": False, "error": "预设视角不能删除，请先复制为自定义视角"})
     try:
-        deleted = storage.delete_perspective_profile(profile_id)
+        context = _request_context(request)
+        deleted = storage.delete_perspective_profile(profile_id, owner_user_id=_owner_meta(context).get("owner_user_id") or None)
     except KeyError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
-    return success_payload(data={"ok": True, "item": deleted, "items": _list_perspective_profiles()})
+    return success_payload(data={"ok": True, "item": deleted, "items": _list_perspective_profiles(context=context)})
 
 
 @router.post("/mine/interpret")
-def mine_interpret(request: MineInterpretRequest) -> dict[str, object]:
+def mine_interpret(request: MineInterpretRequest, http_request: Request) -> dict[str, object]:
     if not request.sources:
         return success_payload(data={"ok": False, "error": "请先从全局库勾选原料库或重点库文件加入待解读队列"})
     try:
-        sources = [_read_mine_source(item) for item in request.sources]
+        context = _request_context(http_request)
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
+        _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
         setting = api_settings.active_setting()
         result = deepseek_client.interpret_from_perspective(
             sources,
@@ -801,14 +1027,16 @@ def mine_interpret(request: MineInterpretRequest) -> dict[str, object]:
 
 
 @router.post("/mine/perspective-file")
-def mine_save_perspective_file(request: MineSavePerspectiveRequest) -> dict[str, object]:
+def mine_save_perspective_file(request: MineSavePerspectiveRequest, http_request: Request) -> dict[str, object]:
     if not request.sources:
         return success_payload(data={"ok": False, "error": "视角解读必须保留来源文件"})
     markdown = request.markdown.strip()
     if not markdown:
         return success_payload(data={"ok": False, "error": "视角 Markdown 不能为空"})
     try:
-        sources = [_read_mine_source(item) for item in request.sources]
+        context = _request_context(http_request)
+        owner_meta = _owner_meta(context)
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
         title = request.title.strip() or _markdown_title(markdown) or f"{request.perspective.name}视角解读"
         source_hash = hashlib.sha256(
             "|".join(f"{item['library']}:{item['relative_path']}" for item in sources).encode("utf-8")
@@ -817,6 +1045,7 @@ def mine_save_perspective_file(request: MineSavePerspectiveRequest) -> dict[str,
         dated_dir = storage.MINING_DIR / datetime.now().strftime("%Y-%m-%d")
         dated_dir.mkdir(parents=True, exist_ok=True)
         path = dated_dir / f"{storage.safe_filename(title, fallback='perspective')}_{source_hash[:8]}.md"
+        markdown = _with_owner_meta(markdown, owner_meta)
         path.write_text(markdown, encoding="utf-8")
         return success_payload(
             data={
@@ -839,27 +1068,33 @@ def mine_save_perspective_file(request: MineSavePerspectiveRequest) -> dict[str,
 
 
 @router.get("/create/projects")
-def create_projects() -> dict[str, object]:
-    return success_payload(data={"items": writer_tools.list_projects()})
+def create_projects(request: Request) -> dict[str, object]:
+    owner_user_id, include_ownerless = _writer_project_scope(_request_context(request))
+    return success_payload(data={"items": writer_tools.list_projects(owner_user_id=owner_user_id, include_ownerless=include_ownerless)})
 
 
 @router.post("/create/projects")
-def create_project(request: CreateProjectRequest) -> dict[str, object]:
+def create_project(request: CreateProjectRequest, http_request: Request) -> dict[str, object]:
+    owner_meta = _owner_meta(_request_context(http_request))
     project = writer_tools.create_project(
         name=request.name,
         project_type=request.project_type,
         description=request.description,
+        owner_user_id=owner_meta.get("owner_user_id") or None,
+        workspace_id=owner_meta.get("workspace_id") or None,
     )
     return success_payload(data={"item": project})
 
 
 @router.get("/create/projects/{project_id}")
-def read_create_project(project_id: str) -> dict[str, object]:
-    return success_payload(data={"item": writer_tools.load_project(project_id)})
+def read_create_project(project_id: str, request: Request) -> dict[str, object]:
+    return success_payload(data={"item": _load_writer_project(project_id, _request_context(request))})
 
 
 @router.patch("/create/projects/{project_id}")
-def update_create_project(project_id: str, request: UpdateCreateProjectRequest) -> dict[str, object]:
+def update_create_project(project_id: str, request: UpdateCreateProjectRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    _load_writer_project(project_id, context)
     updates: dict[str, object] = {}
     if request.name is not None:
         updates["name"] = request.name.strip() or "未命名创作项目"
@@ -872,31 +1107,37 @@ def update_create_project(project_id: str, request: UpdateCreateProjectRequest) 
 
 
 @router.post("/create/projects/{project_id}/library-files")
-def update_create_project_files(project_id: str, request: CreateProjectFilesRequest) -> dict[str, object]:
-    sources = [_read_create_source(item) for item in request.files]
+def update_create_project_files(project_id: str, request: CreateProjectFilesRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    _load_writer_project(project_id, context)
+    sources = [_read_create_source(item, context=context) for item in request.files]
     project = writer_tools.set_project_library_files(project_id, sources)
     return success_payload(data={"item": project})
 
 
 @router.post("/create/projects/{project_id}/writer/topics")
-def create_writer_topics(project_id: str, request: CreateWriterTopicRequest) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
-    sources = _project_writer_sources(project, request.library_files)
+def create_writer_topics(project_id: str, request: CreateWriterTopicRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    project = _load_writer_project(project_id, context)
+    sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
+    _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
     setting = api_settings.active_setting()
     result = deepseek_client.generate_topics(_writer_markdown_files(sources), setting=setting)
     return success_payload(data={"ok": True, **result.model_dump()})
 
 
 @router.post("/create/projects/{project_id}/writer/article")
-def create_writer_article(project_id: str, request: CreateWriterArticleRequest) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
+def create_writer_article(project_id: str, request: CreateWriterArticleRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    project = _load_writer_project(project_id, context)
     if project.get("type") != "article":
         return success_payload(data={"ok": False, "error": "当前只实现文章项目，图文和视频创作暂未开放"})
-    sources = _project_writer_sources(project, request.library_files)
+    sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
+    _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
     setting = api_settings.active_setting()
     result = deepseek_client.generate_wechat_article(
         request.topic,
@@ -918,13 +1159,15 @@ def create_writer_article(project_id: str, request: CreateWriterArticleRequest) 
 
 
 @router.post("/create/projects/{project_id}/writer/revise")
-def create_writer_revise(project_id: str, request: CreateWriterReviseRequest) -> dict[str, object]:
+def create_writer_revise(project_id: str, request: CreateWriterReviseRequest, http_request: Request) -> dict[str, object]:
     if not request.instruction.strip():
         return success_payload(data={"ok": False, "error": "请填写修改要求"})
-    project = writer_tools.load_project(project_id)
-    sources = _project_writer_sources(project, request.library_files)
+    context = _request_context(http_request)
+    project = _load_writer_project(project_id, context)
+    sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
+    _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
     setting = api_settings.active_setting()
     result = deepseek_client.revise_wechat_article(
         request.markdown,
@@ -953,8 +1196,9 @@ def create_writer_revise(project_id: str, request: CreateWriterReviseRequest) ->
 
 
 @router.post("/create/projects/{project_id}/writer/format")
-def create_writer_format(project_id: str, request: CreateWriterFormatRequest) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
+def create_writer_format(project_id: str, request: CreateWriterFormatRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    project = _load_writer_project(project_id, context)
     if project.get("type") != "article":
         return success_payload(data={"ok": False, "error": "当前只实现文章项目，图文和视频创作暂未开放"})
     workspace = writer_tools.resolve_project_workspace(project_id)
@@ -971,8 +1215,10 @@ def create_writer_format(project_id: str, request: CreateWriterFormatRequest) ->
 
 
 @router.post("/create/projects/{project_id}/writer/publish/preflight")
-def create_writer_publish_preflight(project_id: str, request: CreateWriterPublishPreflightRequest) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
+def create_writer_publish_preflight(project_id: str, request: CreateWriterPublishPreflightRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
+    project = _load_writer_project(project_id, context)
     workspace = writer_tools.resolve_project_workspace(project_id)
     title = request.title.strip() or project.get("name") or "未命名文章"
     result = writer_tools.publish_preflight(
@@ -992,8 +1238,10 @@ def create_writer_publish_preflight(project_id: str, request: CreateWriterPublis
 
 
 @router.post("/create/projects/{project_id}/writer/publish")
-def create_writer_publish(project_id: str, request: CreateWriterPublishPreflightRequest) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
+def create_writer_publish(project_id: str, request: CreateWriterPublishPreflightRequest, http_request: Request) -> dict[str, object]:
+    context = _request_context(http_request)
+    _require_local_or_admin(context, "公网内测普通用户不能发布到服务器公众号")
+    project = _load_writer_project(project_id, context)
     workspace = writer_tools.resolve_project_workspace(project_id)
     title = request.title.strip() or project.get("name") or "未命名文章"
     preflight = writer_tools.publish_preflight(
@@ -1023,7 +1271,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
     return success_payload(
         data={
             "ok": True,
-            "project": writer_tools.load_project(project_id),
+            "project": _load_writer_project(project_id, context),
             "workspace": storage.storage_relative(workspace),
             "preflight": preflight,
             **result,
@@ -1105,7 +1353,536 @@ def _settings_error_section(section_id: str, label: str, error: object) -> dict[
     }
 
 
-def _list_library_files(library_id: str, pending_focus: bool = False) -> list[dict[str, object]]:
+def _local_diagnostics_visible(request: Request) -> bool:
+    try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        return context["deploymentMode"] == "local" or context["user"]["role"] == "admin"
+    except HTTPException:
+        return False
+
+
+def _require_local_diagnostics(request: Request) -> None:
+    if not _local_diagnostics_visible(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="普通 cloud 用户不能操作本地诊断文件")
+
+
+def _request_context(request: Request) -> dict[str, object]:
+    with storage.connect() as conn:
+        return current_context(request, conn)
+
+
+def _require_local_or_admin(context: dict[str, object], detail: str) -> None:
+    user = context.get("user") or {}
+    if context.get("deploymentMode") == "local" or (isinstance(user, dict) and user.get("role") == "admin"):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def _quota_detail(label: str, status_payload: dict[str, object]) -> str:
+    used = status_payload.get("used", 0)
+    limit = status_payload.get("limit", 0)
+    return f"{label}今日额度已用完（{used}/{limit}）"
+
+
+def _consume_daily_quota(context: dict[str, object], key: str, label: str) -> None:
+    with storage.connect() as conn:
+        _consume_daily_quota_in_conn(conn, context, key, label)
+
+
+def _enforce_concurrent_jobs(conn, context: dict[str, object]) -> None:
+    if not quota_service.is_enforced(context):
+        return
+    user_id, _workspace_id = quota_service.user_ids(context)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    result = quota_service.check_concurrent_jobs(conn, user_id=user_id)
+    if not result["allowed"]:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=_quota_detail("并发任务", result))
+
+
+LLM_JOB_KINDS = {"learn_refine", "mine_interpret", "writer_topics", "writer_article", "writer_revise"}
+IMAGE_JOB_KINDS = {"image_generate", "writer_image_item"}
+PUBLISH_JOB_KINDS = {"publish_preflight"}
+SUPPORTED_JOB_KINDS = {"readable_draft", "media_transcript", *LLM_JOB_KINDS, *IMAGE_JOB_KINDS, *PUBLISH_JOB_KINDS}
+
+
+def _validate_supported_job(kind: str) -> None:
+    if kind.strip() not in SUPPORTED_JOB_KINDS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"暂不支持的任务类型：{kind}")
+
+
+def _consume_daily_quota_in_conn(conn, context: dict[str, object], key: str, label: str) -> None:
+    if not quota_service.is_enforced(context):
+        return
+    user_id, workspace_id = quota_service.user_ids(context)
+    if not user_id or not workspace_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    result = quota_service.consume_daily(conn, user_id=user_id, workspace_id=workspace_id, key=key)
+    if not result["allowed"]:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=_quota_detail(label, result))
+    conn.commit()
+
+
+def _consume_job_quota(conn, context: dict[str, object], kind: str, payload: object | None = None) -> None:
+    if kind == "learn_refine":
+        if isinstance(payload, dict):
+            _request, _sources, _combined_raw_text, _source_hash, existing = _learn_refine_job_inputs(payload, context)
+            if existing and existing.get("markdown_path") and existing.get("status") == "ready":
+                return
+        _consume_daily_quota_in_conn(conn, context, "llm_generate_daily", "AI 生成")
+        return
+    if kind in LLM_JOB_KINDS:
+        _consume_daily_quota_in_conn(conn, context, "llm_generate_daily", "AI 生成")
+
+
+def _job_payload_dict(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务 payload 必须是对象")
+    return payload
+
+
+def _job_project_id(payload: dict[str, object]) -> str:
+    project_id = str(payload.get("project_id") or payload.get("projectId") or "").strip()
+    if not project_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务缺少 project_id")
+    return project_id
+
+
+def _validate_job_payload(kind: str, payload: object, context: dict[str, object], *, require_executable: bool = True) -> None:
+    payload_dict = _job_payload_dict(payload)
+    try:
+        if kind == "readable_draft":
+            if require_executable:
+                CollectReadableDraftRequest.model_validate(payload_dict)
+            return
+        if kind == "learn_refine":
+            _learn_refine_job_inputs(payload_dict, context)
+            return
+        if kind == "mine_interpret":
+            _mine_interpret_job_inputs(payload_dict, context)
+            return
+        if kind == "media_transcript":
+            request = MediaTranscriptJobRequest.model_validate(payload_dict)
+            _validate_media_job_items(request.media_ids, context)
+            return
+        if kind == "image_generate":
+            project = _load_writer_project(_job_project_id(payload_dict), context)
+            request = WriterImageGenerateJobRequest.model_validate(payload_dict)
+            cover_prompt = request.cover_prompt or project.get("cover_prompt")
+            content_prompts = request.content_image_prompts or project.get("content_image_prompts") or []
+            if not cover_prompt and not content_prompts:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="璇峰厛鐢熸垚鎴栧～鍐欓厤鍥炬彁绀鸿瘝")
+            return
+        if kind == "writer_image_item":
+            _load_writer_project(_job_project_id(payload_dict), context)
+            request = WriterImageItemJobRequest.model_validate(payload_dict)
+            if request.kind not in {"cover", "content"}:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image kind must be cover or content")
+            if not request.prompt.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="璇峰～鍐欓厤鍥炬彁绀鸿瘝")
+            if request.kind == "content" and (request.index is None or request.index < 1):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Content image index must be greater than 0")
+            return
+        if kind == "publish_preflight":
+            _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
+            _load_writer_project(_job_project_id(payload_dict), context)
+            WriterPublishPreflightJobRequest.model_validate(payload_dict)
+            return
+        if kind == "writer_topics":
+            project = _load_writer_project(_job_project_id(payload_dict), context)
+            request = CreateWriterTopicRequest.model_validate(payload_dict)
+            if not _project_writer_sources(project, request.library_files, context=context):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从全局库加入库文件")
+            return
+        if kind == "writer_article":
+            project = _load_writer_project(_job_project_id(payload_dict), context)
+            if project.get("type") != "article":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前只实现文章项目，图文和视频创作暂未开放")
+            request = CreateWriterArticleRequest.model_validate(payload_dict)
+            if not _project_writer_sources(project, request.library_files, context=context):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从全局库加入库文件")
+            return
+        if kind == "writer_revise":
+            project = _load_writer_project(_job_project_id(payload_dict), context)
+            request = CreateWriterReviseRequest.model_validate(payload_dict)
+            if not request.instruction.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请填写修改要求")
+            if not _project_writer_sources(project, request.library_files, context=context):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从全局库加入库文件")
+            return
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"暂不支持的任务类型：{kind}")
+
+
+def _run_job(job_id: str, context: dict[str, object]) -> None:
+    storage.init_storage()
+    with storage.connect() as conn:
+        if not job_service.start_job(conn, job_id=job_id):
+            return
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return
+        job = job_service.job_row_to_dict(row)
+    try:
+        result = _execute_job(job, context)
+        if result.get("ok") is False:
+            raise ValueError(str(result.get("error") or "任务处理失败"))
+        with storage.connect() as conn:
+            job_service.complete_job(conn, job_id=job_id, result=result, message="任务处理完成")
+    except Exception as exc:
+        with storage.connect() as conn:
+            job_service.fail_job(conn, job_id=job_id, error=str(exc))
+
+
+def _execute_job(job: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    kind = str(job.get("kind") or "")
+    payload = job.get("payload") or {}
+    if kind == "readable_draft" and isinstance(payload, dict):
+        request = CollectReadableDraftRequest.model_validate(payload)
+        return _build_readable_draft(request, context=context)
+    if kind == "learn_refine" and isinstance(payload, dict):
+        return _execute_learn_refine_job(payload, context)
+    if kind == "mine_interpret" and isinstance(payload, dict):
+        return _execute_mine_interpret_job(payload, context)
+    if kind == "media_transcript" and isinstance(payload, dict):
+        return _execute_media_transcript_job(payload, context)
+    if kind == "image_generate" and isinstance(payload, dict):
+        return _execute_writer_images_job(payload, context)
+    if kind == "writer_image_item" and isinstance(payload, dict):
+        return _execute_writer_image_item_job(payload, context)
+    if kind == "publish_preflight" and isinstance(payload, dict):
+        return _execute_publish_preflight_job(payload, context)
+    if kind == "writer_topics" and isinstance(payload, dict):
+        return _execute_writer_topics_job(payload, context)
+    if kind == "writer_article" and isinstance(payload, dict):
+        return _execute_writer_article_job(payload, context)
+    if kind == "writer_revise" and isinstance(payload, dict):
+        return _execute_writer_revise_job(payload, context)
+    raise ValueError(f"暂不支持的任务类型：{kind}")
+
+
+def _learn_refine_job_inputs(
+    payload: dict[str, object],
+    context: dict[str, object],
+) -> tuple[LearnRefineKnowledgeClusterRequest, list[dict[str, str]], str, str, dict[str, object] | None]:
+    request = LearnRefineKnowledgeClusterRequest.model_validate(payload)
+    if not request.raw_paths:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从原文库选择待处理文件")
+    try:
+        sources = [_read_raw_material_file(path, context=context) for path in request.raw_paths]
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    combined_raw_text = _combine_raw_material_sources(sources)
+    if not combined_raw_text.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="閫変腑鐨勫師鏂欐枃浠舵病鏈夊彲瀛︿範鏂囨湰")
+    source_hash = _raw_sources_hash(sources)
+    existing = storage.get_knowledge_by_hash(source_hash)
+    return request, sources, combined_raw_text, source_hash, existing
+
+
+def _execute_learn_refine_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    request, sources, combined_raw_text, source_hash, existing = _learn_refine_job_inputs(payload, context)
+    if existing and existing.get("markdown_path") and existing.get("status") == "ready":
+        return {"ok": True, "item": existing, "skipped": True}
+    setting = api_settings.active_setting()
+    knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
+        combined_raw_text,
+        setting=setting,
+    )
+    _ = learned_raw_text
+    if request.title.strip():
+        knowledge.title = request.title.strip()
+    markdown = _render_focus_markdown(knowledge, sources)
+    return {
+        "ok": True,
+        "source_files": sources,
+        "source_hash": source_hash,
+        "cluster_count": len(knowledge.clusters),
+        "markdown": markdown,
+        "existing_item": existing,
+    }
+
+
+def _mine_interpret_job_inputs(
+    payload: dict[str, object],
+    context: dict[str, object],
+) -> tuple[MineInterpretRequest, list[dict[str, str]]]:
+    request = MineInterpretRequest.model_validate(payload)
+    if not request.sources:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从全局库勾选原文库或重点库文件加入待解读队列")
+    try:
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return request, sources
+
+
+def _execute_mine_interpret_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    request, sources = _mine_interpret_job_inputs(payload, context)
+    setting = api_settings.active_setting()
+    result = deepseek_client.interpret_from_perspective(
+        sources,
+        request.perspective.model_dump(),
+        setting=setting,
+    )
+    markdown = _render_perspective_markdown(result, request.perspective, sources)
+    return {
+        "ok": True,
+        "markdown": markdown,
+        "source_files": sources,
+        "title": result.title,
+        "perspective": request.perspective.model_dump(),
+    }
+
+
+def _media_item_visible(item: dict[str, object], context: dict[str, object]) -> bool:
+    user = context.get("user") or {}
+    if not isinstance(user, dict):
+        return False
+    if context.get("deploymentMode") == "local" or user.get("role") == "admin":
+        return True
+    return bool(item.get("owner_user_id") and str(item.get("owner_user_id")) == str(user.get("id") or ""))
+
+
+def _assert_media_item_visible(item: dict[str, object], context: dict[str, object]) -> None:
+    if not _media_item_visible(item, context):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="媒体文件不存在")
+
+
+def _validate_media_job_items(media_ids: list[int], context: dict[str, object]) -> None:
+    if not media_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先选择音视频素材")
+    for media_id in media_ids:
+        try:
+            item = storage.get_media_source(int(media_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="媒体文件不存在") from exc
+        _assert_media_item_visible(item, context)
+
+
+def _execute_media_transcript_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    request = MediaTranscriptJobRequest.model_validate(payload)
+    _validate_media_job_items(request.media_ids, context)
+    results: list[dict[str, object]] = []
+    for media_id in request.media_ids:
+        try:
+            item = storage.get_media_source(int(media_id))
+            _assert_media_item_visible(item, context)
+            storage.update_media_source(int(media_id), status="transcribing", error_message=None)
+            transcript, transcript_kind = _ensure_media_transcript_with_platform_import(item)
+            refreshed = storage.get_media_source(int(media_id))
+            formatted = media_parser.format_media_transcript(refreshed, transcript)
+            storage.update_media_source(int(media_id), status="ready", error_message=None)
+            refreshed = storage.get_media_source(int(media_id))
+            results.append(
+                {
+                    "ok": True,
+                    "item": refreshed,
+                    "transcript": formatted,
+                    "transcript_kind": transcript_kind,
+                }
+            )
+        except Exception as exc:
+            try:
+                updated = storage.update_media_source(int(media_id), status="error", error_message=str(exc))
+            except Exception:
+                updated = {"id": media_id}
+            results.append({"ok": False, "item": updated, "error": str(exc)})
+    return {"ok": any(item.get("ok") for item in results), "items": results}
+
+
+def _execute_writer_images_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    request = WriterImageGenerateJobRequest.model_validate(payload)
+    project = _load_writer_project(request.project_id, context)
+    cover_prompt = request.cover_prompt or project.get("cover_prompt")
+    content_prompts = request.content_image_prompts or project.get("content_image_prompts") or []
+    if not cover_prompt and not content_prompts:
+        return {"ok": False, "error": "璇峰厛鐢熸垚鎴栧～鍐欓厤鍥炬彁绀鸿瘝"}
+    workspace = writer_tools.resolve_project_workspace(request.project_id)
+    images = writer_tools.generate_writer_images(
+        workspace,
+        cover_prompt=str(cover_prompt) if cover_prompt else None,
+        content_prompts=[str(item) for item in content_prompts],
+    )
+    project = writer_tools.update_project(request.project_id, images=images)
+    return {
+        "ok": True,
+        "project_id": request.project_id,
+        "project": project,
+        "images": images,
+        "partial": bool(images.get("partial")),
+    }
+
+
+def _execute_writer_image_item_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    request = WriterImageItemJobRequest.model_validate(payload)
+    _load_writer_project(request.project_id, context)
+    if request.kind not in {"cover", "content"}:
+        return {"ok": False, "error": "Image kind must be cover or content"}
+    if not request.prompt.strip():
+        return {"ok": False, "error": "璇峰～鍐欓厤鍥炬彁绀鸿瘝"}
+    if request.kind == "content" and (request.index is None or request.index < 1):
+        return {"ok": False, "error": "Content image index must be greater than 0"}
+    workspace = writer_tools.resolve_project_workspace(request.project_id)
+    images = writer_tools.generate_writer_image_item(
+        workspace,
+        request.kind,
+        request.prompt,
+        index=request.index,
+    )
+    project = writer_tools.update_project(request.project_id, images=images)
+    return {
+        "ok": True,
+        "project_id": request.project_id,
+        "project": project,
+        "images": images,
+        "partial": bool(images.get("partial")),
+    }
+
+
+def _execute_publish_preflight_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
+    request = WriterPublishPreflightJobRequest.model_validate(payload)
+    project = _load_writer_project(request.project_id, context)
+    workspace = writer_tools.resolve_project_workspace(request.project_id)
+    title = request.title.strip() or project.get("name") or "未命名文章"
+    result = writer_tools.publish_preflight(
+        workspace,
+        str(title),
+        author=request.author or "Bobo",
+        digest=request.digest,
+        cover_path=request.cover_path,
+    )
+    return {
+        "ok": True,
+        "project_id": request.project_id,
+        "project": project,
+        "workspace": storage.storage_relative(workspace),
+        "preflight": result,
+    }
+
+
+def _execute_writer_topics_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    project_id = _job_project_id(payload)
+    request = CreateWriterTopicRequest.model_validate(payload)
+    project = _load_writer_project(project_id, context)
+    sources = _project_writer_sources(project, request.library_files, context=context)
+    if not sources:
+        return {"ok": False, "error": "请先从全局库加入库文件"}
+    setting = api_settings.active_setting()
+    result = deepseek_client.generate_topics(_writer_markdown_files(sources), setting=setting)
+    return {"ok": True, "project_id": project_id, "project": project, **result.model_dump()}
+
+
+def _execute_writer_article_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    project_id = _job_project_id(payload)
+    request = CreateWriterArticleRequest.model_validate(payload)
+    project = _load_writer_project(project_id, context)
+    if project.get("type") != "article":
+        return {"ok": False, "error": "当前只实现文章项目，图文和视频创作暂未开放"}
+    sources = _project_writer_sources(project, request.library_files, context=context)
+    if not sources:
+        return {"ok": False, "error": "请先从全局库加入库文件"}
+    setting = api_settings.active_setting()
+    result = deepseek_client.generate_wechat_article(
+        request.topic,
+        _writer_markdown_files(sources),
+        setting=setting,
+    )
+    workspace = writer_tools.resolve_project_workspace(project_id)
+    article_path = writer_tools.write_article(workspace, result.markdown)
+    project = writer_tools.update_project(project_id, topic=request.topic)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        **result.model_dump(),
+        "project": project,
+        "workspace": storage.storage_relative(workspace),
+        "article_path": storage.storage_relative(article_path),
+    }
+
+
+def _execute_writer_revise_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
+    project_id = _job_project_id(payload)
+    request = CreateWriterReviseRequest.model_validate(payload)
+    if not request.instruction.strip():
+        return {"ok": False, "error": "请填写修改要求"}
+    project = _load_writer_project(project_id, context)
+    sources = _project_writer_sources(project, request.library_files, context=context)
+    if not sources:
+        return {"ok": False, "error": "请先从全局库加入库文件"}
+    setting = api_settings.active_setting()
+    result = deepseek_client.revise_wechat_article(
+        request.markdown,
+        request.instruction,
+        _writer_markdown_files(sources),
+        setting=setting,
+    )
+    workspace = writer_tools.resolve_project_workspace(project_id)
+    article_path = writer_tools.write_article(workspace, result.markdown)
+    version_path = writer_tools.write_article(
+        workspace,
+        result.markdown,
+        f"article_revised_{datetime.now().strftime('%H%M%S')}.md",
+    )
+    project = writer_tools.update_project(project_id)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        **result.model_dump(),
+        "project": project,
+        "workspace": storage.storage_relative(workspace),
+        "article_path": storage.storage_relative(article_path),
+        "version_path": storage.storage_relative(version_path),
+    }
+
+
+def _owner_meta(context: dict[str, object]) -> dict[str, str]:
+    user = context.get("user") or {}
+    workspace = context.get("workspace") or {}
+    if not isinstance(user, dict) or not isinstance(workspace, dict):
+        return {}
+    return {
+        "owner_user_id": str(user.get("id") or ""),
+        "workspace_id": str(workspace.get("id") or ""),
+    }
+
+
+def _writer_project_scope(context: dict[str, object]) -> tuple[str | None, bool]:
+    user = context.get("user") or {}
+    if context.get("deploymentMode") == "cloud" and isinstance(user, dict) and user.get("role") != "admin":
+        return str(user.get("id") or ""), False
+    return None, True
+
+
+def _load_writer_project(project_id: str, context: dict[str, object]) -> dict[str, object]:
+    owner_user_id, include_ownerless = _writer_project_scope(context)
+    try:
+        return writer_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=include_ownerless)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="创作项目不存在") from exc
+
+
+def _library_file_visible(path: Path, context: dict[str, object]) -> bool:
+    user = context.get("user") or {}
+    if not isinstance(user, dict):
+        return False
+    if context.get("deploymentMode") == "local" or user.get("role") == "admin":
+        return True
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    meta = _markdown_meta(text)
+    owner = meta.get("owner_user_id") or meta.get("Owner User ID")
+    return bool(owner and owner == user.get("id"))
+
+
+def _assert_library_file_visible(path: Path, context: dict[str, object]) -> None:
+    if not _library_file_visible(path, context):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="库文件不存在")
+
+
+def _list_library_files(library_id: str, pending_focus: bool = False, context: dict[str, object] | None = None) -> list[dict[str, object]]:
     roots = _library_scan_roots(library_id)
     if not roots:
         raise ValueError(f"Unsupported library: {library_id}")
@@ -1132,6 +1909,8 @@ def _list_library_files(library_id: str, pending_focus: bool = False) -> list[di
                 continue
             seen.add(identity)
             seen.add(resolved)
+            if context is not None and not _library_file_visible(path, context):
+                continue
             files.append(path)
     files = sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)
     items = [_library_file_payload(path, library_id) for path in files[:200]]
@@ -1166,8 +1945,10 @@ def _library_file_payload(path: Path, library_id: str) -> dict[str, object]:
     }
 
 
-def _read_library_file(library_id: str, markdown_path: str) -> tuple[dict[str, object], str]:
+def _read_library_file(library_id: str, markdown_path: str, context: dict[str, object] | None = None) -> tuple[dict[str, object], str]:
     path = _resolve_library_markdown_path(library_id, markdown_path)
+    if context is not None:
+        _assert_library_file_visible(path, context)
     text = path.read_text(encoding="utf-8", errors="ignore")
     return _library_file_payload(path, library_id), text
 
@@ -1519,6 +2300,22 @@ def _markdown_meta(text: str) -> dict[str, str]:
     return meta
 
 
+def _with_owner_meta(markdown: str, owner_meta: dict[str, str]) -> str:
+    clean_meta = {key: value for key, value in owner_meta.items() if value}
+    if not clean_meta:
+        return markdown
+    text = markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
+    existing = _markdown_meta(text)
+    lines = text.splitlines()
+    insert_at = 1 if lines and lines[0].startswith("#") else 0
+    additions = [f"- {key}：{value}" for key, value in clean_meta.items() if key not in existing]
+    if not additions:
+        return text
+    if insert_at < len(lines) and lines[insert_at].strip():
+        additions.append("")
+    return "\n".join([*lines[:insert_at], *additions, *lines[insert_at:]]).strip() + "\n"
+
+
 def _default_library_status(library_id: str) -> str:
     return {"raw": "未处理", "focus": "已提炼", "perspective": "已解读"}.get(library_id, "")
 
@@ -1598,23 +2395,32 @@ def _default_perspective_profiles() -> list[dict[str, object]]:
     ]
 
 
-def _list_perspective_profiles() -> list[dict[str, object]]:
+def _list_perspective_profiles(context: dict[str, object] | None = None) -> list[dict[str, object]]:
     defaults = []
     for item in _default_perspective_profiles():
         profile = dict(item)
         profile["origin"] = "preset"
         profile["readonly"] = True
         defaults.append(profile)
-    custom = storage.list_perspective_profiles()
+    owner_user_id = None
+    include_ownerless = True
+    if context is not None and context.get("deploymentMode") == "cloud":
+        user = context.get("user") or {}
+        if isinstance(user, dict) and user.get("role") != "admin":
+            owner_user_id = str(user.get("id") or "")
+            include_ownerless = False
+    custom = storage.list_perspective_profiles(owner_user_id=owner_user_id, include_ownerless=include_ownerless)
     custom_ids = {item.get("id") for item in custom}
     return [*custom, *[item for item in defaults if item.get("id") not in custom_ids]]
 
 
-def _read_mine_source(source: LibrarySourceRequest) -> dict[str, str]:
+def _read_mine_source(source: LibrarySourceRequest, context: dict[str, object] | None = None) -> dict[str, str]:
     library = source.library.strip()
     if library not in {"raw", "focus"}:
         raise ValueError("挖掘队列当前只支持原料库和重点库文件")
     path = _resolve_library_markdown_path(library, source.markdown_path)
+    if context is not None:
+        _assert_library_file_visible(path, context)
     text = path.read_text(encoding="utf-8", errors="ignore")
     return {
         "library": library,
@@ -1624,11 +2430,13 @@ def _read_mine_source(source: LibrarySourceRequest) -> dict[str, str]:
     }
 
 
-def _read_create_source(source: LibrarySourceRequest) -> dict[str, str]:
+def _read_create_source(source: LibrarySourceRequest, context: dict[str, object] | None = None) -> dict[str, str]:
     library = source.library.strip()
     if library not in {"raw", "focus", "perspective"}:
         raise ValueError("创作项目只支持原料库、重点库和视角库文件")
     path = _resolve_library_markdown_path(library, source.markdown_path)
+    if context is not None:
+        _assert_library_file_visible(path, context)
     text = path.read_text(encoding="utf-8", errors="ignore")
     relative_path = storage.storage_relative(path)
     return {
@@ -1639,11 +2447,15 @@ def _read_create_source(source: LibrarySourceRequest) -> dict[str, str]:
         "text": text,
     }
 
-def _project_writer_sources(project: dict[str, object], request_files: list[LibrarySourceRequest] | None) -> list[dict[str, str]]:
+def _project_writer_sources(
+    project: dict[str, object],
+    request_files: list[LibrarySourceRequest] | None,
+    context: dict[str, object] | None = None,
+) -> list[dict[str, str]]:
     if request_files is not None:
-        return [_read_create_source(item) for item in request_files]
+        return [_read_create_source(item, context=context) for item in request_files]
     files = project.get("library_files") or []
-    return [_read_create_source(LibrarySourceRequest(**item)) for item in files]
+    return [_read_create_source(LibrarySourceRequest(**item), context=context) for item in files]
 
 
 def _writer_markdown_files(sources: list[dict[str, str]]) -> list[tuple[str, str]]:
@@ -1712,8 +2524,10 @@ def _processed_raw_material_paths() -> set[str]:
     return processed
 
 
-def _read_raw_material_file(relative_path: str) -> dict[str, str]:
+def _read_raw_material_file(relative_path: str, context: dict[str, object] | None = None) -> dict[str, str]:
     path = _resolve_library_markdown_path("raw", relative_path)
+    if context is not None:
+        _assert_library_file_visible(path, context)
     text = path.read_text(encoding="utf-8", errors="ignore")
     return {
         "title": _markdown_title(text) or path.stem,

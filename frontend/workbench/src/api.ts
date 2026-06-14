@@ -9,16 +9,94 @@ import type {
   TextExtractionMode,
   WriterProjectState,
 } from "./domain";
+import { requestJson, unwrapV2 } from "./apiCore";
+import { authApi } from "./apiAuth";
+import { collectApi } from "./apiCollect";
+import { jobsApi } from "./apiJobs";
+import { libraryApi } from "./apiLibrary";
+import { mineApi } from "./apiMine";
+import { quotaApi } from "./apiQuota";
+import { settingsApi } from "./apiSettings";
+import { writerApi } from "./apiWriter";
+import type { V2Payload } from "./apiCore";
 
-const API_BASE = "";
 const READABLE_DRAFT_TIMEOUT_MS = 120_000;
 const DRAFT_META_TIMEOUT_MS = 30_000;
 
 export type LibraryKind = "original" | "focus" | "perspective";
 
-type V2Payload<T> = {
-  data?: T;
-  meta?: Record<string, unknown>;
+export type DeploymentMode = "local" | "cloud";
+
+export type AuthUser = {
+  id: string;
+  email: string;
+  username: string;
+  role: "admin" | "member" | string;
+  status: string;
+};
+
+export type AuthWorkspace = {
+  id: string;
+  name: string;
+  ownerUserId: string;
+};
+
+export type AuthContext = {
+  deploymentMode: DeploymentMode;
+  authenticated: boolean;
+  user: AuthUser | null;
+  workspace: AuthWorkspace | null;
+};
+
+export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
+
+export type JobEvent = {
+  id: number;
+  jobId: string;
+  status: JobStatus | string;
+  message: string;
+  detail: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type JobItem = {
+  id: string;
+  ownerUserId: string;
+  workspaceId: string;
+  kind: string;
+  status: JobStatus;
+  payload: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  events?: JobEvent[];
+};
+
+export type QuotaCounter = {
+  allowed?: boolean;
+  used?: number;
+  projected?: number;
+  limit: number;
+  remaining?: number;
+};
+
+export type QuotaStatus = {
+  deploymentMode: DeploymentMode;
+  enforced: boolean;
+  daily: {
+    link_parse_daily: QuotaCounter;
+    llm_generate_daily: QuotaCounter;
+  };
+  jobs: {
+    concurrent_jobs: QuotaCounter;
+  };
+  uploads: {
+    single_upload_bytes: Pick<QuotaCounter, "limit">;
+    storage_bytes: QuotaCounter;
+  };
 };
 
 type LibraryFilePayload = Record<string, unknown> & {
@@ -66,48 +144,6 @@ type ReadableDraftPayload = {
   source?: string;
   errors?: string[];
 };
-
-async function requestJson<T>(path: string, init?: RequestInit, options?: { timeoutMs?: number }): Promise<T> {
-  const timeoutMs = options?.timeoutMs;
-  const controller = timeoutMs ? new AbortController() : undefined;
-  const timeoutId = controller
-    ? window.setTimeout(() => controller.abort(), timeoutMs)
-    : undefined;
-  const signal = controller?.signal ?? init?.signal;
-  try {
-    const response = await fetch(`${API_BASE}${path}`, { ...init, signal });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(readError(text) || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Readable original generation timed out. For Douyin links, upload the local video/subtitle or configure ASR, then try again.");
-    }
-    throw error;
-  } finally {
-    if (timeoutId) window.clearTimeout(timeoutId);
-  }
-}
-
-function readError(text: string) {
-  if (!text) return "";
-  try {
-    const payload = JSON.parse(text) as { detail?: unknown; message?: unknown };
-    const detail = payload.detail ?? payload.message;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      const record = detail as Record<string, unknown>;
-      const message = record.message;
-      if (typeof message === "string") return message;
-      return JSON.stringify(detail);
-    }
-    return String(detail ?? text);
-  } catch {
-    return text;
-  }
-}
 
 function joinUniqueMessages(messages: string[]) {
   const seen = new Set<string>();
@@ -433,218 +469,107 @@ type MineInterpretPayload = {
 
 export const api = {
   health() {
-    return requestJson<{ status: string }>("/api/health");
+    return settingsApi.health();
   },
 
   workbenchSettings() {
-    return requestJson<WorkbenchSettings>("/api/workbench-settings");
+    return settingsApi.workbenchSettings();
+  },
+
+  async quotaStatus(): Promise<QuotaStatus> {
+    return quotaApi.me();
   },
 
   saveWorkbenchSettings(settings: WorkbenchSettings) {
-    return requestJson<WorkbenchSettings>("/api/workbench-settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settings),
-    });
+    return settingsApi.saveWorkbenchSettings(settings);
   },
 
   bilibiliCookieStatus() {
-    return requestJson<BilibiliCookieStatus>("/api/media/bilibili-cookies");
+    return settingsApi.bilibiliCookieStatus();
   },
 
   openBilibiliCookieLogin(url = "https://space.bilibili.com/520819684") {
-    return requestJson<BilibiliCookieLoginResult>("/api/media/bilibili-cookies/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
+    return settingsApi.openBilibiliCookieLogin(url);
   },
 
   apiSettings() {
-    return requestJson<ApiSettingsPayload>("/api/api-settings");
+    return settingsApi.apiSettings();
   },
 
   saveApiSetting(setting: ApiSettingInput) {
-    return requestJson<ApiSettingsPayload>("/api/api-settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(setting),
-    });
+    return settingsApi.saveApiSetting(setting);
   },
 
   setActiveApiSetting(id: string) {
-    return requestJson<ApiSettingsPayload>("/api/api-settings/active", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
+    return settingsApi.setActiveApiSetting(id);
   },
 
   deleteApiSetting(id: string) {
-    return requestJson<ApiSettingsPayload>(`/api/api-settings/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
+    return settingsApi.deleteApiSetting(id);
   },
 
   testApiSetting(setting: ApiSettingInput) {
-    return requestJson<ApiTestResult>("/api/api-settings/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ setting }),
-    });
+    return settingsApi.testApiSetting(setting);
   },
 
   imageApiSettings() {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings");
+    return settingsApi.imageApiSettings();
   },
 
   saveImageApiSetting(setting: ImageApiSettingInput) {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(setting),
-    });
+    return settingsApi.saveImageApiSetting(setting);
   },
 
   setActiveImageApiSetting(id: string) {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings/active", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
+    return settingsApi.setActiveImageApiSetting(id);
   },
 
   deleteImageApiSetting(id: string) {
-    return requestJson<ImageApiSettingsPayload>(`/api/image-api-settings/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
+    return settingsApi.deleteImageApiSetting(id);
   },
 
   testImageApiSetting(setting: ImageApiSettingInput, options?: { realTest?: boolean; prompt?: string }) {
-    return requestJson<ApiTestResult>("/api/image-api-settings/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ setting, real_test: options?.realTest ?? false, prompt: options?.prompt }),
-    });
+    return settingsApi.testImageApiSetting(setting, options);
   },
 
   async uploadMaterial(type: MaterialType, files: File[]): Promise<UploadedItem[]> {
-    const path = type === "image" ? "/api/images" : type === "media" ? "/api/media/upload" : "/api/files";
-    const payload = await requestJson<{ items?: UploadedItem[]; item?: UploadedItem }>(path, {
-      method: "POST",
-      body: asFileList(files),
-    });
-    return payload.items ?? (payload.item ? [payload.item] : []);
+    return collectApi.uploadMaterial(type, files);
   },
 
   async uploadPastedImages(files: File[]): Promise<UploadedItem[]> {
-    const normalizedFiles = files.map((file, index) => normalizeClipboardImage(file, index));
-    try {
-      return await this.uploadMaterial("image", normalizedFiles);
-    } catch (multipartError) {
-      const images = await Promise.all(
-        normalizedFiles.map(async (file, index) => ({
-          filename: file.name || `clipboard-${Date.now()}-${index + 1}.png`,
-          content_type: file.type || "image/png",
-          data_url: await fileToDataUrl(file),
-        })),
-      );
-      try {
-        const payload = await requestJson<{ items?: UploadedItem[] }>("/api/images/paste", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ images }),
-        });
-        return payload.items ?? [];
-      } catch (pasteError) {
-        const first = multipartError instanceof Error ? multipartError.message : "";
-        const second = pasteError instanceof Error ? pasteError.message : "";
-        throw new Error(joinUniqueMessages([first, second]) || "粘贴截图上传失败");
-      }
-    }
+    return collectApi.uploadPastedImages(files);
   },
 
   async loadFilePageInfo(fileIds: number[]): Promise<UploadedItem[]> {
-    if (!fileIds.length) return [];
-    const payload = await requestJson<{ items?: UploadedItem[] }>("/api/files/page-info", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_ids: fileIds }),
-    });
-    return payload.items ?? [];
+    return collectApi.loadFilePageInfo(fileIds);
   },
 
   async resolveMediaUrl(url: string): Promise<UploadedItem | null> {
-    const payload = await requestJson<{ item?: UploadedItem }>("/api/media/resolve-url", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    return payload.item ?? null;
+    return collectApi.resolveMediaUrl(url);
   },
 
   async inspectLink(url: string): Promise<InspectedLink | null> {
-    const payload = await requestJson<V2Payload<{ ok?: boolean; item?: InspectedLink }>>("/api/v2/collect/inspect-link", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    return payload.data?.item ?? null;
+    return collectApi.inspectLink(url);
   },
 
   async browserExtractLink(material: SourceMaterial): Promise<ReadableDraftInput> {
-    const payload = await requestJson<V2Payload<BrowserExtractLinkResult>>(
-      "/api/v2/collect/browser-extract-link",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: material.source,
-          title: material.title,
-          wait_ms: 3000,
-          scroll_times: 5,
-          scroll_pause_ms: 800,
-        }),
-      },
-      { timeoutMs: READABLE_DRAFT_TIMEOUT_MS },
-    );
-    const data = assertV2Ok(payload);
-    return {
-      title: firstString(data.title, material.title, "浏览器提取原文"),
-      note: firstString(data.note, material.note),
-      body: firstString(data.markdown),
-      sourceIds: [material.id],
-      materialType: "web_link",
-      source: firstString(data.source, material.source),
-    };
+    return collectApi.browserExtractLink(material);
   },
 
   transcribeMedia(mediaIds: number[]) {
-    return requestJson<{ items?: Array<Record<string, unknown>> }>("/api/media/transcript", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ media_ids: mediaIds }),
-    });
+    return collectApi.transcribeMedia(mediaIds);
   },
 
   async listKnowledge(): Promise<KnowledgeItem[]> {
-    const payload = await requestJson<{ items?: Array<Record<string, unknown>> }>("/api/knowledge");
-    return (payload.items ?? []).map((item, index) => toKnowledge(item, undefined, index));
+    return libraryApi.listKnowledge();
   },
 
   async listLibraryFiles(library: LibraryKind, pendingFocus = false): Promise<KnowledgeItem[]> {
-    const query = library === "original" && pendingFocus ? "?pending_focus=true" : "";
-    const payload = await requestJson<V2Payload<{ items?: LibraryFilePayload[] }>>(
-      `/api/v2/libraries/${libraryBucketToV2(library)}/files${query}`,
-    );
-    return (payload.data?.items ?? []).map((item, index) => toLibraryKnowledge(item, index));
+    return libraryApi.listLibraryFiles(library, pendingFocus);
   },
 
   async readLibraryFile(library: LibraryKind, markdownPath: string): Promise<KnowledgeItem> {
-    const payload = await requestJson<V2Payload<{ item?: LibraryFilePayload; markdown?: string }>>(
-      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
-    );
-    return toLibraryKnowledge({ ...(payload.data?.item ?? {}), markdown: payload.data?.markdown }, Date.now());
+    return libraryApi.readLibraryFile(library, markdownPath);
   },
 
   async updateLibraryFile(
@@ -652,245 +577,63 @@ export const api = {
     markdownPath: string,
     payload: { title: string; note: string; body: string },
   ): Promise<KnowledgeItem> {
-    const response = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: LibraryFilePayload; markdown?: string }>>(
-      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: payload.title, note: payload.note, markdown: payload.body }),
-      },
-    );
-    const data = assertV2Ok(response);
-    return toLibraryKnowledge({ ...(data.item ?? {}), markdown: data.markdown }, Date.now());
+    return libraryApi.updateLibraryFile(library, markdownPath, payload);
   },
 
   async deleteLibraryFile(library: LibraryKind, markdownPath: string): Promise<TrashStatus> {
-    const response = await requestJson<V2Payload<{ ok: boolean; error?: string; trash?: TrashStatus }>>(
-      `/api/v2/libraries/${libraryBucketToV2(library)}/file?markdown_path=${encodeURIComponent(markdownPath)}`,
-      { method: "DELETE" },
-    );
-    const data = assertV2Ok(response);
-    return data.trash ?? { path: "", file_count: 0, size_bytes: 0 };
+    return libraryApi.deleteLibraryFile(library, markdownPath);
   },
 
   async trashStatus(): Promise<TrashStatus> {
-    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash");
-    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+    return settingsApi.trashStatus();
   },
 
   async clearTrash(): Promise<TrashStatus> {
-    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash", { method: "DELETE" });
-    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+    return settingsApi.clearTrash();
   },
 
   async deleteTrashFiles(trashPaths: string[]): Promise<TrashStatus> {
-    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trash_paths: trashPaths }),
-    });
-    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+    return settingsApi.deleteTrashFiles(trashPaths);
   },
 
   async restoreTrashFiles(trashPaths: string[]): Promise<TrashStatus> {
-    const response = await requestJson<V2Payload<TrashStatus>>("/api/v2/settings/trash/restore", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trash_paths: trashPaths }),
-    });
-    return response.data ?? { path: "", file_count: 0, size_bytes: 0 };
+    return settingsApi.restoreTrashFiles(trashPaths);
   },
 
   async createRawLibraryFile(materials: SourceMaterial[], title = ""): Promise<RawLibraryResult> {
-    if (!materials.length) throw new Error("No material selected for raw library file.");
-    const materialType = rawMaterialType(materials);
-    const items = materials.map((material) => ({
-      id: material.backendId,
-      content: material.type === "text" ? material.source : "",
-      url: material.type === "link" || material.type === "media" ? material.source : "",
-      title: material.title,
-      link_type: "",
-      extraction_strategy: "",
-      access_status: material.status,
-    }));
-    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown>; errors?: string[] }>>(
-      "/api/v2/collect/raw-markdown",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ material_type: materialType, title, items }),
-      },
-    );
-    const data = assertV2Ok(payload);
-    return {
-      item: toLibraryKnowledge({ ...(data.item ?? {}), library: "raw" }, Date.now()),
-      errors: data.errors ?? [],
-    };
+    return collectApi.createRawLibraryFile(materials, title);
   },
 
   async createReadableDraft(materials: SourceMaterial[], parserMode: TextExtractionMode): Promise<ReadableDraftInput> {
-    if (!materials.length) throw new Error("No material selected for readable draft.");
-    let readable: KnowledgeItem;
-    const textOnly = materials.every((material) => material.type === "text" && !material.backendId);
-    const backendReady = materials.every(
-      (material) => material.type === "text" || material.type === "link" || typeof material.backendId === "number",
-    );
-    if (textOnly) {
-      readable = localReadableDocument(materials);
-    } else if (backendReady) {
-      const payload = await requestJson<V2Payload<ReadableDraftPayload>>("/api/v2/collect/readable-draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          material_type: rawMaterialType(materials),
-          title: materials.length === 1 ? materials[0]?.title ?? "" : "",
-          parser_mode: parserMode,
-          items: materials.map((material) => ({
-            id: material.backendId,
-            content: material.type === "text" ? material.source : "",
-            url: material.type === "link" || material.type === "media" ? material.source : "",
-            title: material.title,
-            link_type: "",
-            extraction_strategy: "",
-            access_status: material.status,
-          })),
-        }),
-      }, { timeoutMs: READABLE_DRAFT_TIMEOUT_MS });
-      const data = assertV2Ok(payload);
-      readable = {
-        id: `readable-${Date.now()}`,
-        title: firstString(data.title, materials[0]?.title, "Readable document"),
-        note: firstString(data.note),
-        body: firstString(data.markdown),
-        sourceIds: materials.map((material) => material.id),
-        status: "draft",
-        confidence: "needsReview",
-      };
-    } else {
-      readable = await this.readableDocument(materials, parserMode);
-    }
-    const meta = await this
-      .knowledgeDraftMeta(materials, readable.body, "zh", DRAFT_META_TIMEOUT_MS)
-      .catch(() => ({ title: readable.title, note: readable.note ?? "" }));
-    return {
-      title: meta.title?.trim() || readable.title || materials[0]?.title || "未命名原文",
-      note: meta.note?.trim() || readable.note || `来源素材：${materials.map((item) => item.title).join("、")}`,
-      body: readable.body,
-      sourceIds: materials.map((material) => material.id),
-      materialType: rawMaterialType(materials),
-      source: materials.map((material) => material.source || material.title).filter(Boolean).join("; "),
-    };
+    return collectApi.createReadableDraft(materials, parserMode);
   },
 
   async saveRawDraft(draft: ReadableDraftInput): Promise<KnowledgeItem> {
-    const requestBody = {
-      material_type: draft.materialType,
-      title: draft.title,
-      note: draft.note,
-      markdown: draft.body,
-      source: draft.source,
-    };
-    try {
-      const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown> }>>(
-        "/api/v2/collect/raw-file",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
-        },
-      );
-      const data = assertV2Ok(payload);
-      return toLibraryKnowledge({ ...(data.item ?? {}), library: "raw" }, Date.now());
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("Not Found") && !message.includes("404")) throw error;
-      const fallback = await this.createRawLibraryFile(
-        [
-          {
-            id: `draft-${Date.now()}`,
-            type: draft.materialType === "screenshot" ? "image" : draft.materialType === "document" ? "file" : draft.materialType === "web_link" ? "link" : draft.materialType === "media" ? "media" : "text",
-            title: draft.title,
-            source: draft.body,
-            status: "ready",
-            note: draft.note,
-          },
-        ],
-        draft.title,
-      );
-      return {
-        ...fallback.item,
-        title: draft.title || fallback.item.title,
-        note: draft.note || fallback.item.note,
-        body: draft.body,
-      };
-    }
+    return collectApi.saveRawDraft(draft);
   },
 
   async refineKnowledgeCluster(rawPaths: string[], title = ""): Promise<FocusDraftPayload> {
-    const payload = await requestJson<V2Payload<FocusDraftPayload>>("/api/v2/learn/refine-knowledge-cluster", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw_paths: rawPaths, title }),
-    });
-    return assertV2Ok(payload);
+    return collectApi.refineKnowledgeCluster(rawPaths, title);
   },
 
   async saveFocusFile(rawPaths: string[], markdown: string, title = ""): Promise<KnowledgeItem> {
-    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown> }>>(
-      "/api/v2/learn/focus-file",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw_paths: rawPaths, markdown, title }),
-      },
-    );
-    const data = assertV2Ok(payload);
-    return toLibraryKnowledge({ ...(data.item ?? {}), library: "focus" }, Date.now());
+    return collectApi.saveFocusFile(rawPaths, markdown, title);
   },
 
   async listPerspectiveProfiles(): Promise<PerspectiveProfile[]> {
-    const payload = await requestJson<V2Payload<{ items?: PerspectivePayload[] }>>("/api/v2/mine/perspectives");
-    return (payload.data?.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+    return mineApi.listPerspectiveProfiles();
   },
 
   async savePerspectiveProfile(profile: PerspectiveProfile): Promise<PerspectiveProfile[]> {
-    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; items?: PerspectivePayload[] }>>(
-      "/api/v2/mine/perspectives",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toPerspectivePayload(profile)),
-      },
-    );
-    const data = assertV2Ok(payload);
-    return (data.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+    return mineApi.savePerspectiveProfile(profile);
   },
 
   async deletePerspectiveProfile(profileId: string): Promise<PerspectiveProfile[]> {
-    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; items?: PerspectivePayload[] }>>(
-      `/api/v2/mine/perspectives/${encodeURIComponent(profileId)}`,
-      { method: "DELETE" },
-    );
-    const data = assertV2Ok(payload);
-    return (data.items ?? []).map((item, index) => toPerspectiveProfile(item, index));
+    return mineApi.deletePerspectiveProfile(profileId);
   },
 
   async interpretPerspective(sources: KnowledgeItem[], perspective: PerspectiveProfile): Promise<PerspectiveDraft> {
-    const payload = await requestJson<V2Payload<MineInterpretPayload>>("/api/v2/mine/interpret", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sources: sources.map(toMineSource),
-        perspective: toPerspectivePayload(perspective),
-      }),
-    });
-    const data = assertV2Ok(payload);
-    return {
-      title: firstString(data.title, `${perspective.name}视角解读`),
-      markdown: firstString(data.markdown),
-      sourceFiles: data.source_files ?? [],
-      perspective: toPerspectiveProfile(data.perspective ?? toPerspectivePayload(perspective)),
-    };
+    return mineApi.interpretPerspective(sources, perspective);
   },
 
   async savePerspectiveFile(
@@ -899,233 +642,67 @@ export const api = {
     markdown: string,
     title = "",
   ): Promise<KnowledgeItem> {
-    const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown> }>>(
-      "/api/v2/mine/perspective-file",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sources: sources.map(toMineSource),
-          perspective: toPerspectivePayload(perspective),
-          markdown,
-          title,
-        }),
-      },
-    );
-    const data = assertV2Ok(payload);
-    return toLibraryKnowledge({ ...(data.item ?? {}), library: "perspective" }, Date.now());
+    return mineApi.savePerspectiveFile(sources, perspective, markdown, title);
   },
 
   async readKnowledge(knowledgeId: number): Promise<KnowledgeItem> {
-    const payload = await requestJson<{ item?: Record<string, unknown>; content?: string }>(`/api/knowledge/${knowledgeId}`);
-    return toKnowledge({ ...(payload.item ?? {}), markdown: payload.content }, undefined, knowledgeId);
+    return libraryApi.readKnowledge(knowledgeId);
   },
 
   async updateKnowledge(knowledgeId: number, payload: { title: string; note: string; body: string }): Promise<KnowledgeItem> {
-    const response = await requestJson<{ item?: Record<string, unknown>; content?: string }>(
-      `/api/knowledge/${knowledgeId}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-    ).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("Method Not Allowed") && !message.includes("405")) throw error;
-      return requestJson<{ item?: Record<string, unknown>; content?: string }>("/api/knowledge/commit-draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          backend_id: knowledgeId,
-          title: payload.title,
-          note: "",
-          body: payload.body,
-          source_ids: [],
-        }),
-      });
-    });
-    return toKnowledge({ ...(response.item ?? {}), markdown: response.content }, undefined, knowledgeId);
+    return libraryApi.updateKnowledge(knowledgeId, payload);
   },
 
   async deleteKnowledge(knowledgeIds: number[]): Promise<{ items: KnowledgeItem[]; deleted: Array<Record<string, unknown>>; skipped: Array<Record<string, unknown>> }> {
-    const payload = await requestJson<{
-      items?: Array<Record<string, unknown>>;
-      deleted?: Array<Record<string, unknown>>;
-      skipped?: Array<Record<string, unknown>>;
-    }>("/api/knowledge/delete-not-ingested", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds }),
-    });
-    return {
-      items: (payload.items ?? []).map((item, index) => toKnowledge(item, undefined, index)),
-      deleted: payload.deleted ?? [],
-      skipped: payload.skipped ?? [],
-    };
+    return libraryApi.deleteKnowledge(knowledgeIds);
   },
 
   knowledgeDraftMeta(materials: SourceMaterial[], body: string, language: string, timeoutMs?: number) {
-    return requestJson<{ title?: string; note?: string }>("/api/knowledge/draft-meta", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        materials: materials.map((material) => ({
-          title: material.title,
-          type: material.type,
-          source: material.source,
-        })),
-        body,
-        language,
-      }),
-    }, timeoutMs ? { timeoutMs } : undefined);
+    return collectApi.knowledgeDraftMeta(materials, body, language, timeoutMs);
   },
 
   async commitKnowledgeDraft(draft: KnowledgeDraft): Promise<KnowledgeItem> {
-    const payload = await requestJson<{ item?: Record<string, unknown>; content?: string }>("/api/knowledge/commit-draft", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        backend_id: draft.backendId,
-        title: draft.title,
-        note: draft.note,
-        body: draft.body,
-        source_ids: draft.sourceIds,
-      }),
-    });
-    return toKnowledge({ ...(payload.item ?? {}), markdown: payload.content }, undefined, Number(payload.item?.id ?? Date.now()));
+    return libraryApi.commitKnowledgeDraft(draft);
   },
 
   async readableDocument(materials: SourceMaterial[], parserMode: TextExtractionMode): Promise<KnowledgeItem> {
-    const imageIds = materials.filter((material) => material.type === "image" && material.backendId).map((material) => material.backendId!);
-    const fileIds = materials.filter((material) => material.type === "file" && material.backendId).map((material) => material.backendId!);
-    const mediaIds = materials
-      .filter((material) => (material.type === "media" || material.type === "link") && material.backendId)
-      .map((material) => material.backendId!);
-    if (!imageIds.length && !fileIds.length && !mediaIds.length) {
-      throw new Error("Selected materials do not have backend records for text extraction.");
-    }
-    const payload = await requestJson<{ title?: string; note?: string; markdown?: string; raw_text?: string; cleaned_by?: string }>(
-      "/api/materials/readable-document",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_ids: imageIds, file_ids: fileIds, media_ids: mediaIds, parser_mode: parserMode }),
-      },
-    ).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("Not Found") || message.includes("404")) {
-        throw new Error("后端还没有加载可读原文接口。请重启知识酷后端后刷新页面，再点击生成知识。");
-      }
-      throw error;
-    });
-    return {
-      id: `readable-${Date.now()}`,
-      title: firstString(payload.title, materials[0]?.title, "Readable document"),
-      note: firstString(payload.note, payload.cleaned_by ? `cleaned by ${payload.cleaned_by}` : ""),
-      body: firstString(payload.markdown, payload.raw_text),
-      sourceIds: materials.map((material) => material.id),
-      status: "draft",
-      confidence: payload.cleaned_by === "llm" ? "high" : "needsReview",
-    };
+    return collectApi.readableDocument(materials, parserMode);
   },
 
   async generateKnowledge(material: SourceMaterial, parserMode: TextExtractionMode = "local_ocr"): Promise<KnowledgeItem> {
-    if (!material.backendId) {
-      throw new Error("该素材还没有后端记录，请先上传或解析到旧后端。");
-    }
-
-    if (material.type === "image") {
-      const payload = await requestJson<{ item?: Record<string, unknown> }>("/api/knowledge/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_ids: [material.backendId], parser_mode: parserMode }),
-      });
-      return toKnowledge(payload.item ?? {}, material);
-    }
-
-    if (material.type === "file") {
-      const payload = await requestJson<{ item?: Record<string, unknown>; items?: Array<Record<string, unknown>> }>(
-        "/api/knowledge/generate-from-files",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_ids: [material.backendId] }),
-        },
-      );
-      return toKnowledge(payload.item ?? payload.items?.[0] ?? {}, material);
-    }
-
-    if (material.type === "media" || material.type === "link") {
-      const payload = await requestJson<{ item?: Record<string, unknown>; items?: Array<Record<string, unknown>> }>(
-        "/api/knowledge/generate-from-media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ media_ids: [material.backendId] }),
-        },
-      );
-      return toKnowledge(payload.item ?? payload.items?.[0] ?? {}, material);
-    }
-
-    throw new Error("文本素材没有旧后端生成接口，将使用本地知识草稿。");
+    return collectApi.generateKnowledge(material, parserMode);
   },
 
   ingestKnowledge(knowledgeIds: number[]) {
-    return requestJson("/api/knowledge/ingest-to-graph", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds }),
-    });
+    return libraryApi.ingestKnowledge(knowledgeIds);
   },
 
   writerSession(knowledgeIds: number[]) {
-    const query = knowledgeIds.length ? `?ids=${knowledgeIds.join(",")}` : "";
-    return requestJson<Record<string, unknown>>(`/api/writer/session${query}`);
+    return writerApi.writerSession(knowledgeIds);
   },
 
   writerTopics(knowledgeIds: number[]) {
-    return requestJson<Record<string, unknown>>("/api/writer/topics", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds }),
-    });
+    return writerApi.writerTopics(knowledgeIds);
   },
 
   writerArticle(knowledgeIds: number[], topic: Record<string, unknown>) {
-    return requestJson<Record<string, unknown>>("/api/writer/article", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds, topic }),
-    });
+    return writerApi.writerArticle(knowledgeIds, topic);
   },
 
   writerRevise(knowledgeIds: number[], markdown: string, workspace?: string) {
-    return requestJson<Record<string, unknown>>("/api/writer/revise", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        knowledge_ids: knowledgeIds,
-        markdown,
-        workspace,
-        instruction: "请保留核心观点，压缩铺垫，增强结构和发布可读性。",
-      }),
-    });
+    return writerApi.writerRevise(knowledgeIds, markdown, workspace);
   },
 
   writerPreflight(workspace: string, title: string, digest?: string) {
-    return requestJson<Record<string, unknown>>("/api/writer/publish/preflight", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace, title, digest }),
-    });
+    return writerApi.writerPreflight(workspace, title, digest);
   },
 
   writerProjects() {
-    return requestJson<{ items?: WriterProjectState["project"][] }>("/api/writer/projects");
+    return writerApi.writerProjects();
   },
 
   writerProject(projectId: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}`);
+    return writerApi.writerProject(projectId);
   },
 
   createWriterProject(
@@ -1136,104 +713,51 @@ export const api = {
     writingStrategy = "",
     designStrategy = "",
   ) {
-    return requestJson<WriterProjectState>("/api/writer/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        project_type: projectType,
-        knowledge_ids: knowledgeIds,
-        library_files: libraryFiles,
-        writing_strategy: writingStrategy,
-        design_strategy: designStrategy,
-      }),
-    });
+    return writerApi.createWriterProject(name, knowledgeIds, projectType, libraryFiles, writingStrategy, designStrategy);
   },
 
   confirmWriterKnowledge(projectId: string, knowledgeIds: number[], libraryFiles: WriterLibraryFileInput[] = []) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/knowledge`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds, library_files: libraryFiles }),
-    });
+    return writerApi.confirmWriterKnowledge(projectId, knowledgeIds, libraryFiles);
   },
 
   generateWriterProjectTopics(projectId: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/topics`, {
-      method: "POST",
-    });
+    return writerApi.generateWriterProjectTopics(projectId);
   },
 
   selectWriterProjectTopic(projectId: string, topic: Record<string, unknown>) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/topic`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic }),
-    });
+    return writerApi.selectWriterProjectTopic(projectId, topic);
   },
 
   generateWriterProjectDraft(projectId: string, topic?: Record<string, unknown>) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/draft`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic }),
-    });
+    return writerApi.generateWriterProjectDraft(projectId, topic);
   },
 
   reviseWriterProject(projectId: string, instruction: string, markdown?: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/revise`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction, markdown }),
-    });
+    return writerApi.reviseWriterProject(projectId, instruction, markdown);
   },
 
   suggestWriterProjectImages(projectId: string, markdown?: string, topic?: Record<string, unknown>, contentImageCount = 1) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/image-suggestions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, topic, content_image_count: contentImageCount }),
-    });
+    return writerApi.suggestWriterProjectImages(projectId, markdown, topic, contentImageCount);
   },
 
   generateWriterProjectImages(projectId: string, coverPrompt?: string, contentImagePrompts: string[] = []) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/images`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cover_prompt: coverPrompt, content_image_prompts: contentImagePrompts }),
-    });
+    return writerApi.generateWriterProjectImages(projectId, coverPrompt, contentImagePrompts);
   },
 
   generateWriterProjectImageItem(projectId: string, kind: "cover" | "content", prompt: string, index?: number) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/images/item`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, prompt, index }),
-    });
+    return writerApi.generateWriterProjectImageItem(projectId, kind, prompt, index);
   },
 
   formatWriterProject(projectId: string, markdown?: string, designStrategy?: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/format`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, theme: "tech", design_strategy: designStrategy }),
-    });
+    return writerApi.formatWriterProject(projectId, markdown, designStrategy);
   },
 
   preflightWriterProject(projectId: string, title: string, digest?: string, coverPath?: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish/preflight`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, author: "Bobo", digest, cover_path: coverPath }),
-    });
+    return writerApi.preflightWriterProject(projectId, title, digest, coverPath);
   },
 
   publishWriterProject(projectId: string, title: string, digest?: string, coverPath?: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, author: "Bobo", digest, cover_path: coverPath }),
-    });
+    return writerApi.publishWriterProject(projectId, title, digest, coverPath);
   },
 };
 
@@ -1337,3 +861,13 @@ function toKnowledge(raw: Record<string, unknown>, material?: SourceMaterial, fa
     confidence: raw.status === "ready" || body ? "medium" : "needsReview",
   };
 }
+
+export { authApi } from "./apiAuth";
+export { appShellApi } from "./apiAppShell";
+export { collectApi } from "./apiCollect";
+export { jobsApi } from "./apiJobs";
+export { libraryApi } from "./apiLibrary";
+export { mineApi } from "./apiMine";
+export { quotaApi } from "./apiQuota";
+export { settingsApi } from "./apiSettings";
+export { writerApi } from "./apiWriter";

@@ -14,6 +14,8 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from src.auth import init_auth_schema
+
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_DATA_DIR = ROOT / "data" / "runtime"
@@ -277,6 +279,7 @@ def init_storage() -> None:
         _ensure_column(conn, "knowledge_entries", "source_type", "TEXT NOT NULL DEFAULT 'screenshots'")
         _ensure_column(conn, "knowledge_entries", "source_ids", "TEXT")
         _ensure_column(conn, "knowledge_entries", "source_hash", "TEXT")
+        init_auth_schema(conn)
         recover_markdown_entries(conn)
         conn.commit()
 
@@ -429,6 +432,13 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def scoped_content_hash(content_hash: str, owner_user_id: str | None = None) -> str:
+    owner = str(owner_user_id or "").strip()
+    if not owner:
+        return content_hash
+    return hashlib.sha256(f"{owner}:{content_hash}".encode("utf-8")).hexdigest()
+
+
 def extension_for_upload(upload: UploadFile) -> str:
     normalized_type = normalize_image_content_type(upload.content_type, upload.filename)
     guessed = mimetypes.guess_extension(normalized_type or "")
@@ -479,28 +489,34 @@ def assert_image_upload(upload: UploadFile) -> None:
         raise ValueError(f"不支持的图片类型：{upload.content_type}")
 
 
-def save_upload(upload: UploadFile) -> dict[str, Any]:
+def save_upload(upload: UploadFile, owner_user_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
     data = upload.file.read()
     if not data:
         raise ValueError("上传文件为空")
-    return save_image_bytes(data, upload.filename, upload.content_type)
+    return save_image_bytes(data, upload.filename, upload.content_type, owner_user_id=owner_user_id, workspace_id=workspace_id)
 
 
-def save_document_upload(upload: UploadFile) -> dict[str, Any]:
+def save_document_upload(upload: UploadFile, owner_user_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
     data = upload.file.read()
     if not data:
         raise ValueError("上传文件为空")
-    return save_document_bytes(data, upload.filename, upload.content_type)
+    return save_document_bytes(data, upload.filename, upload.content_type, owner_user_id=owner_user_id, workspace_id=workspace_id)
 
 
-def save_media_upload(upload: UploadFile) -> dict[str, Any]:
+def save_media_upload(upload: UploadFile, owner_user_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
     data = upload.file.read()
     if not data:
         raise ValueError("上传文件为空")
-    return save_media_bytes(data, upload.filename, upload.content_type)
+    return save_media_bytes(data, upload.filename, upload.content_type, owner_user_id=owner_user_id, workspace_id=workspace_id)
 
 
-def save_document_bytes(data: bytes, filename: str | None = None, content_type: str | None = None) -> dict[str, Any]:
+def save_document_bytes(
+    data: bytes,
+    filename: str | None = None,
+    content_type: str | None = None,
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     if not data:
         raise ValueError("上传文件为空")
     suffix = Path(filename or "").suffix.lower()
@@ -509,11 +525,12 @@ def save_document_bytes(data: bytes, filename: str | None = None, content_type: 
     if suffix not in ALLOWED_DOCUMENT_EXTENSIONS:
         raise ValueError(f"不支持的文件类型：{suffix or content_type or 'unknown'}")
 
-    file_hash = hash_bytes(data)
+    content_hash = hash_bytes(data)
+    file_hash = scoped_content_hash(content_hash, owner_user_id)
     now = datetime.now().isoformat(timespec="seconds")
     dated_dir = DOCUMENT_DIR / datetime.now().strftime("%Y-%m-%d")
     dated_dir.mkdir(parents=True, exist_ok=True)
-    file_path = dated_dir / f"{file_hash[:16]}{suffix}"
+    file_path = dated_dir / f"{content_hash[:16]}{suffix}"
 
     with connect() as conn:
         existing = conn.execute("SELECT * FROM source_files WHERE file_hash = ?", (file_hash,)).fetchone()
@@ -526,8 +543,8 @@ def save_document_bytes(data: bytes, filename: str | None = None, content_type: 
             """
             INSERT INTO source_files (
                 file_path, file_hash, original_name, content_type, file_type,
-                created_at, updated_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded')
+                created_at, updated_at, status, owner_user_id, workspace_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
             """,
             (
                 storage_relative(file_path),
@@ -537,6 +554,8 @@ def save_document_bytes(data: bytes, filename: str | None = None, content_type: 
                 suffix.removeprefix("."),
                 now,
                 now,
+                owner_user_id,
+                workspace_id,
             ),
         )
         conn.commit()
@@ -545,18 +564,25 @@ def save_document_bytes(data: bytes, filename: str | None = None, content_type: 
         return item
 
 
-def save_media_bytes(data: bytes, filename: str | None = None, content_type: str | None = None) -> dict[str, Any]:
+def save_media_bytes(
+    data: bytes,
+    filename: str | None = None,
+    content_type: str | None = None,
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     if not data:
         raise ValueError("上传文件为空")
     suffix = Path(filename or "").suffix.lower()
     if suffix not in ALLOWED_MEDIA_EXTENSIONS:
         raise ValueError(f"不支持的音视频/字幕类型：{suffix or content_type or 'unknown'}")
 
-    media_hash = hash_bytes(data)
+    content_hash = hash_bytes(data)
+    media_hash = scoped_content_hash(content_hash, owner_user_id)
     now = datetime.now().isoformat(timespec="seconds")
     dated_dir = MEDIA_DIR / datetime.now().strftime("%Y-%m-%d")
     dated_dir.mkdir(parents=True, exist_ok=True)
-    file_path = dated_dir / f"{media_hash[:16]}{suffix}"
+    file_path = dated_dir / f"{content_hash[:16]}{suffix}"
     source_kind = "subtitle_file" if suffix in SUBTITLE_EXTENSIONS else "local_file"
     transcript_kind = "uploaded_subtitle" if source_kind == "subtitle_file" else "none"
 
@@ -571,8 +597,9 @@ def save_media_bytes(data: bytes, filename: str | None = None, content_type: str
             """
             INSERT INTO media_sources (
                 source_kind, platform, file_path, media_hash, original_name, title,
-                transcript_path, transcript_kind, content_type, created_at, updated_at, status
-            ) VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')
+                transcript_path, transcript_kind, content_type, created_at, updated_at, status,
+                owner_user_id, workspace_id
+            ) VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
             """,
             (
                 source_kind,
@@ -585,6 +612,8 @@ def save_media_bytes(data: bytes, filename: str | None = None, content_type: str
                 content_type or mimetypes.guess_type(filename or "")[0] or "",
                 now,
                 now,
+                owner_user_id,
+                workspace_id,
             ),
         )
         conn.commit()
@@ -593,7 +622,13 @@ def save_media_bytes(data: bytes, filename: str | None = None, content_type: str
         return item
 
 
-def save_image_bytes(data: bytes, filename: str | None = None, content_type: str | None = None) -> dict[str, Any]:
+def save_image_bytes(
+    data: bytes,
+    filename: str | None = None,
+    content_type: str | None = None,
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     if not data:
         raise ValueError("上传文件为空")
 
@@ -601,14 +636,15 @@ def save_image_bytes(data: bytes, filename: str | None = None, content_type: str
     if content_type not in ALLOWED_IMAGE_TYPES:
         raise ValueError(f"不支持的图片类型：{content_type or 'unknown'}")
 
-    image_hash = hash_bytes(data)
+    content_hash = hash_bytes(data)
+    image_hash = scoped_content_hash(content_hash, owner_user_id)
     now = datetime.now().isoformat(timespec="seconds")
     ext = mimetypes.guess_extension(content_type) or Path(filename or "").suffix.lower() or ".png"
     if ext == ".jpe":
         ext = ".jpg"
     dated_dir = IMAGE_DIR / datetime.now().strftime("%Y-%m-%d")
     dated_dir.mkdir(parents=True, exist_ok=True)
-    image_path = dated_dir / f"{image_hash[:16]}{ext}"
+    image_path = dated_dir / f"{content_hash[:16]}{ext}"
 
     with connect() as conn:
         existing = conn.execute(
@@ -625,10 +661,10 @@ def save_image_bytes(data: bytes, filename: str | None = None, content_type: str
             cursor = conn.execute(
                 """
                 INSERT INTO screenshots (
-                    image_path, image_hash, created_at, updated_at, status
-                ) VALUES (?, ?, ?, ?, 'uploaded')
+                    image_path, image_hash, created_at, updated_at, status, owner_user_id, workspace_id
+                ) VALUES (?, ?, ?, ?, 'uploaded', ?, ?)
                 """,
-                (storage_relative(image_path), image_hash, now, now),
+                (storage_relative(image_path), image_hash, now, now, owner_user_id, workspace_id),
             )
             conn.commit()
             item = get_screenshot(cursor.lastrowid)
@@ -689,15 +725,21 @@ def get_media_sources(ids: list[int]) -> list[dict[str, Any]]:
     return [get_media_source(media_id) for media_id in ids]
 
 
-def list_media_transcripts() -> list[dict[str, Any]]:
+def list_media_transcripts(owner_user_id: str | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
+        where = "transcript_path IS NOT NULL"
+        params: list[Any] = []
+        if owner_user_id:
+            where += " AND owner_user_id = ?"
+            params.append(owner_user_id)
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM media_sources
-            WHERE transcript_path IS NOT NULL
+            WHERE {where}
             ORDER BY updated_at DESC, id DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [row_to_dict(row) for row in rows]
 
@@ -838,10 +880,15 @@ def update_screenshot(screenshot_id: int, **fields: Any) -> dict[str, Any]:
     return get_screenshot(screenshot_id)
 
 
-def list_knowledge() -> list[dict[str, Any]]:
+def list_knowledge(owner_user_id: str | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
+        where = "markdown_path IS NOT NULL"
+        params: list[Any] = []
+        if owner_user_id:
+            where += " AND owner_user_id = ?"
+            params.append(owner_user_id)
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 k.*,
                 CASE
@@ -851,9 +898,10 @@ def list_knowledge() -> list[dict[str, Any]]:
                     ELSE COALESCE(k.graph_status, 'not_ingested')
                 END AS effective_graph_status
             FROM knowledge_entries k
-            WHERE markdown_path IS NOT NULL
+            WHERE {where}
             ORDER BY created_at DESC, id DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [row_to_dict(row) for row in rows]
 
@@ -916,14 +964,17 @@ def create_or_update_knowledge_entry(
     image_hash: str,
     source_type: str = "screenshots",
     source_ids: list[int] | None = None,
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now().isoformat(timespec="seconds")
+    scoped_hash = scoped_content_hash(image_hash, owner_user_id)
     image_ids_json = json.dumps(image_ids, ensure_ascii=False)
     source_ids_json = json.dumps(source_ids if source_ids is not None else image_ids, ensure_ascii=False)
     with connect() as conn:
         existing = conn.execute(
             "SELECT * FROM knowledge_entries WHERE image_hash = ?",
-            (image_hash,),
+            (scoped_hash,),
         ).fetchone()
         if existing:
             conn.execute(
@@ -931,25 +982,27 @@ def create_or_update_knowledge_entry(
                 UPDATE knowledge_entries
                 SET image_ids = ?, updated_at = ?, status = 'processing', error_message = NULL,
                     graph_status = 'not_ingested', graph_error_message = NULL,
-                    source_type = ?, source_ids = ?, source_hash = ?
+                    source_type = ?, source_ids = ?, source_hash = ?,
+                    owner_user_id = COALESCE(?, owner_user_id),
+                    workspace_id = COALESCE(?, workspace_id)
                 WHERE image_hash = ?
                 """,
-                (image_ids_json, now, source_type, source_ids_json, image_hash, image_hash),
+                (image_ids_json, now, source_type, source_ids_json, image_hash, owner_user_id, workspace_id, scoped_hash),
             )
             conn.commit()
-            existing_item = get_knowledge_by_hash(image_hash)
+            existing_item = get_knowledge_by_hash(scoped_hash)
             if existing_item is None:
-                raise KeyError(f"Knowledge entry with hash {image_hash} not found")
+                raise KeyError(f"Knowledge entry with hash {scoped_hash} not found")
             return existing_item
 
         cursor = conn.execute(
             """
             INSERT INTO knowledge_entries (
                 image_ids, image_hash, created_at, updated_at, status, graph_status,
-                source_type, source_ids, source_hash
-            ) VALUES (?, ?, ?, ?, 'processing', 'not_ingested', ?, ?, ?)
+                source_type, source_ids, source_hash, owner_user_id, workspace_id
+            ) VALUES (?, ?, ?, ?, 'processing', 'not_ingested', ?, ?, ?, ?, ?)
             """,
-            (image_ids_json, image_hash, now, now, source_type, source_ids_json, image_hash),
+            (image_ids_json, scoped_hash, now, now, source_type, source_ids_json, image_hash, owner_user_id, workspace_id),
         )
         conn.commit()
         return get_knowledge_entry(cursor.lastrowid)
@@ -986,14 +1039,18 @@ def update_knowledge_graph_status(
     )
 
 
-def delete_not_ingested_knowledge(ids: list[int]) -> dict[str, Any]:
+def delete_not_ingested_knowledge(ids: list[int], owner_user_id: str | None = None) -> dict[str, Any]:
     deleted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     allowed_statuses = {"not_ingested", "graph_error"}
     with connect() as conn:
         for entry_id in ids:
+            owner_clause = " AND k.owner_user_id = ?" if owner_user_id else ""
+            params: list[Any] = [entry_id]
+            if owner_user_id:
+                params.append(owner_user_id)
             row = conn.execute(
-                """
+                f"""
                 SELECT
                     k.*,
                     CASE
@@ -1003,9 +1060,9 @@ def delete_not_ingested_knowledge(ids: list[int]) -> dict[str, Any]:
                         ELSE COALESCE(k.graph_status, 'not_ingested')
                     END AS effective_graph_status
                 FROM knowledge_entries k
-                WHERE k.id = ?
+                WHERE k.id = ?{owner_clause}
                 """,
-                (entry_id,),
+                params,
             ).fetchone()
             item = row_to_dict(row)
             if item is None:
@@ -1089,58 +1146,95 @@ def mining_strategy_path(project: dict[str, Any], version: int) -> Path:
     return mining_project_dir(project) / f"strategy_v{version}.md"
 
 
-def list_mining_projects() -> list[dict[str, Any]]:
+def list_mining_projects(owner_user_id: str | None = None, include_ownerless: bool = True) -> list[dict[str, Any]]:
     with connect() as conn:
+        where = "1 = 1"
+        params: list[Any] = []
+        if owner_user_id:
+            if include_ownerless:
+                where += " AND (p.owner_user_id = ? OR p.owner_user_id IS NULL OR p.owner_user_id = '')"
+            else:
+                where += " AND p.owner_user_id = ?"
+            params.append(owner_user_id)
         rows = conn.execute(
-            """
+            f"""
             SELECT p.*,
                    COUNT(s.id) AS source_count,
                    MAX(v.version) AS latest_version
             FROM mining_projects p
             LEFT JOIN mining_project_sources s ON s.project_id = p.id
             LEFT JOIN mining_strategy_versions v ON v.project_id = p.id
+            WHERE {where}
             GROUP BY p.id
             ORDER BY p.updated_at DESC, p.id DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [row_to_dict(row) for row in rows]
 
 
-def create_mining_project(name: str, strategy_type: str = "creation_strategy") -> dict[str, Any]:
+def create_mining_project(
+    name: str,
+    strategy_type: str = "creation_strategy",
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     now = datetime.now().isoformat(timespec="seconds")
     clean_name = name.strip() or "创作策略学习"
     with connect() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO mining_projects (name, strategy_type, created_at, updated_at, status)
-            VALUES (?, ?, ?, ?, 'active')
+            INSERT INTO mining_projects (
+                name, strategy_type, created_at, updated_at, status, owner_user_id, workspace_id
+            ) VALUES (?, ?, ?, ?, 'active', ?, ?)
             """,
-            (clean_name, strategy_type, now, now),
+            (clean_name, strategy_type, now, now, owner_user_id, workspace_id),
         )
         conn.commit()
-    return get_mining_project(cursor.lastrowid)
+    return get_mining_project(cursor.lastrowid, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
 
 
-def get_mining_project(project_id: int) -> dict[str, Any]:
+def get_mining_project(
+    project_id: int,
+    owner_user_id: str | None = None,
+    include_ownerless: bool = True,
+) -> dict[str, Any]:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM mining_projects WHERE id = ?", (project_id,)).fetchone()
+        where = "id = ?"
+        params: list[Any] = [project_id]
+        if owner_user_id:
+            if include_ownerless:
+                where += " AND (owner_user_id = ? OR owner_user_id IS NULL OR owner_user_id = '')"
+            else:
+                where += " AND owner_user_id = ?"
+            params.append(owner_user_id)
+        row = conn.execute(f"SELECT * FROM mining_projects WHERE {where}", params).fetchone()
     item = row_to_dict(row)
     if item is None:
         raise KeyError(f"Mining project {project_id} not found")
     return item
 
 
-def update_mining_project(project_id: int, **fields: Any) -> dict[str, Any]:
+def update_mining_project(project_id: int, owner_user_id: str | None = None, include_ownerless: bool = True, **fields: Any) -> dict[str, Any]:
     if not fields:
-        return get_mining_project(project_id)
+        return get_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=include_ownerless)
     fields["updated_at"] = datetime.now().isoformat(timespec="seconds")
     assignments = ", ".join(f"{key} = ?" for key in fields)
     values = list(fields.values())
     values.append(project_id)
+    owner_clause = ""
+    if owner_user_id:
+        if include_ownerless:
+            owner_clause = " AND (owner_user_id = ? OR owner_user_id IS NULL OR owner_user_id = '')"
+        else:
+            owner_clause = " AND owner_user_id = ?"
+        values.append(owner_user_id)
     with connect() as conn:
-        conn.execute(f"UPDATE mining_projects SET {assignments} WHERE id = ?", values)
+        cursor = conn.execute(f"UPDATE mining_projects SET {assignments} WHERE id = ?{owner_clause}", values)
+        if cursor.rowcount == 0:
+            raise KeyError(f"Mining project {project_id} not found")
         conn.commit()
-    return get_mining_project(project_id)
+    return get_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=include_ownerless)
 
 
 def upsert_mining_project_source(
@@ -1288,16 +1382,25 @@ def read_mining_artifact(project: dict[str, Any]) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def list_perspective_profiles() -> list[dict[str, Any]]:
+def list_perspective_profiles(owner_user_id: str | None = None, include_ownerless: bool = True) -> list[dict[str, Any]]:
     init_storage()
     with connect() as conn:
+        where = "status = 'active'"
+        params: list[Any] = []
+        if owner_user_id:
+            if include_ownerless:
+                where += " AND (owner_user_id = ? OR owner_user_id IS NULL OR owner_user_id = '')"
+            else:
+                where += " AND owner_user_id = ?"
+            params.append(owner_user_id)
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM perspective_profiles
-            WHERE status = 'active'
+            WHERE {where}
             ORDER BY updated_at DESC, created_at DESC
-            """
+            """,
+            params,
         ).fetchall()
     profiles: list[dict[str, Any]] = []
     for row in rows:
@@ -1317,7 +1420,7 @@ def list_perspective_profiles() -> list[dict[str, Any]]:
     return profiles
 
 
-def upsert_perspective_profile(profile: dict[str, Any]) -> dict[str, Any]:
+def upsert_perspective_profile(profile: dict[str, Any], owner_user_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
     init_storage()
     now = datetime.now().isoformat(timespec="seconds")
     profile_id = str(profile.get("id") or "").strip() or f"custom_{uuid.uuid4().hex[:10]}"
@@ -1328,6 +1431,10 @@ def upsert_perspective_profile(profile: dict[str, Any]) -> dict[str, Any]:
     normalized["id"] = profile_id
     normalized["name"] = name
     normalized["origin"] = "custom"
+    if owner_user_id:
+        normalized["owner_user_id"] = owner_user_id
+    if workspace_id:
+        normalized["workspace_id"] = workspace_id
     profile_json = json.dumps(normalized, ensure_ascii=False)
     with connect() as conn:
         existing = conn.execute("SELECT id FROM perspective_profiles WHERE id = ?", (profile_id,)).fetchone()
@@ -1335,28 +1442,39 @@ def upsert_perspective_profile(profile: dict[str, Any]) -> dict[str, Any]:
             conn.execute(
                 """
                 UPDATE perspective_profiles
-                SET name = ?, profile_json = ?, origin = 'custom', updated_at = ?, status = 'active'
+                SET name = ?, profile_json = ?, origin = 'custom', updated_at = ?, status = 'active',
+                    owner_user_id = COALESCE(?, owner_user_id),
+                    workspace_id = COALESCE(?, workspace_id)
                 WHERE id = ?
                 """,
-                (name, profile_json, now, profile_id),
+                (name, profile_json, now, owner_user_id, workspace_id, profile_id),
             )
         else:
             conn.execute(
                 """
-                INSERT INTO perspective_profiles (id, name, profile_json, origin, created_at, updated_at, status)
-                VALUES (?, ?, ?, 'custom', ?, ?, 'active')
+                INSERT INTO perspective_profiles (
+                    id, name, profile_json, origin, created_at, updated_at, status,
+                    owner_user_id, workspace_id
+                )
+                VALUES (?, ?, ?, 'custom', ?, ?, 'active', ?, ?)
                 """,
-                (profile_id, name, profile_json, now, now),
+                (profile_id, name, profile_json, now, now, owner_user_id, workspace_id),
             )
         conn.commit()
-    return next(item for item in list_perspective_profiles() if item["id"] == profile_id)
+    return next(item for item in list_perspective_profiles(owner_user_id=owner_user_id) if item["id"] == profile_id)
 
 
-def delete_perspective_profile(profile_id: str) -> dict[str, Any]:
+def delete_perspective_profile(profile_id: str, owner_user_id: str | None = None) -> dict[str, Any]:
     init_storage()
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
-        row = conn.execute("SELECT * FROM perspective_profiles WHERE id = ?", (profile_id,)).fetchone()
+        if owner_user_id:
+            row = conn.execute(
+                "SELECT * FROM perspective_profiles WHERE id = ? AND owner_user_id = ?",
+                (profile_id, owner_user_id),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM perspective_profiles WHERE id = ?", (profile_id,)).fetchone()
         if row is None:
             raise KeyError(f"Perspective profile {profile_id} not found")
         conn.execute(

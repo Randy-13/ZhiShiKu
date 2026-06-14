@@ -153,6 +153,8 @@ def create_project(
     description: str = "",
     writing_strategy: str = "",
     design_strategy: str = "",
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     clean_type = project_type if project_type in {"article", "image_text", "short_video", "long_video"} else "article"
     title = (name or "").strip() or "未命名创作项目"
@@ -173,28 +175,37 @@ def create_project(
         "updated_at": now,
         "library_files": [],
         "topic": None,
+        "owner_user_id": owner_user_id or "",
+        "workspace_id": workspace_id or "",
     }
     _write_project(project)
     return project
 
 
-def list_projects() -> list[dict[str, Any]]:
+def list_projects(owner_user_id: str | None = None, include_ownerless: bool = True) -> list[dict[str, Any]]:
     if not projects_dir().exists():
         return []
     projects = []
     for project_file in projects_dir().glob("*/project.json"):
         try:
-            projects.append(json.loads(project_file.read_text(encoding="utf-8")))
+            project = json.loads(project_file.read_text(encoding="utf-8"))
+            owner = str(project.get("owner_user_id") or "")
+            if owner_user_id and owner != owner_user_id and not (include_ownerless and not owner):
+                continue
+            projects.append(project)
         except json.JSONDecodeError:
             continue
     return sorted(projects, key=lambda item: item.get("updated_at", ""), reverse=True)
 
 
-def load_project(project_id: str) -> dict[str, Any]:
+def load_project(project_id: str, owner_user_id: str | None = None, include_ownerless: bool = True) -> dict[str, Any]:
     project_file = _project_file(project_id)
     if not project_file.exists():
         raise FileNotFoundError(f"创作项目不存在：{project_id}")
     project = json.loads(project_file.read_text(encoding="utf-8"))
+    owner = str(project.get("owner_user_id") or "")
+    if owner_user_id and owner != owner_user_id and not (include_ownerless and not owner):
+        raise FileNotFoundError(f"创作项目不存在：{project_id}")
     workspace = resolve_project_workspace(project_id)
     project["workspace"] = _relative(workspace)
     project["article_markdown"] = (workspace / "article.md").read_text(encoding="utf-8") if (workspace / "article.md").exists() else ""

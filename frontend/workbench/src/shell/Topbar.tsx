@@ -1,4 +1,4 @@
-import { Search, Upload } from "lucide-react";
+import { ListChecks, Search, Upload } from "lucide-react";
 
 export function Topbar({
   title,
@@ -10,6 +10,7 @@ export function Topbar({
   search,
   onSearchChange,
   onImport,
+  onOpenQueue,
 }: {
   title: string;
   description: string;
@@ -20,6 +21,7 @@ export function Topbar({
   search: string;
   onSearchChange: (value: string) => void;
   onImport: () => void;
+  onOpenQueue: () => void;
 }) {
   return (
     <header className="topbar">
@@ -35,10 +37,11 @@ export function Topbar({
         <Upload size={17} />
         <span>{importLabel}</span>
       </button>
-      <div className="queue-chip">
+      <button className="queue-chip" type="button" onClick={onOpenQueue}>
+        <ListChecks size={15} aria-hidden="true" />
         <span>{queueLabel}</span>
         <strong>{queueStatus}</strong>
-      </div>
+      </button>
     </header>
   );
 }

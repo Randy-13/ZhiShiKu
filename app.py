@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -27,7 +27,9 @@ import writer_tools
 from markdown_writer import render_creation_strategy_markdown, render_knowledge_markdown
 from media_transcriber import transcribe_audio_url
 from schemas import DocumentPlanResult, DocumentPlanSegment, KnowledgeResult
-from src.api_v2 import router as api_v2_router
+from src.auth import current_context, is_cloud_mode
+from src import quotas as quota_service
+from src.api_v2 import auth_router, jobs_router, router as api_v2_router
 from src.pages import router as pages_router
 from src.shared.frontend_app import FRONTEND_DIST, react_app_response
 from src.shared.navigation import replace_app_rail
@@ -48,6 +50,31 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Screenshot Knowledge Base", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=storage.ROOT / "static"), name="static")
 app.mount("/frontend", StaticFiles(directory=FRONTEND_DIST, check_dir=False), name="frontend")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    icon_path = FRONTEND_DIST / "favicon.ico"
+    if not icon_path.exists():
+        raise HTTPException(status_code=404, detail="favicon has not been built")
+    return FileResponse(icon_path)
+
+
+@app.middleware("http")
+async def require_cloud_auth_for_api_writes(request: Request, call_next):
+    if (
+        is_cloud_mode()
+        and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith("/api")
+        and not request.url.path.startswith("/api/auth")
+    ):
+        try:
+            storage.init_storage()
+            with storage.connect() as conn:
+                current_context(request, conn)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 
 class GenerateRequest(BaseModel):
@@ -157,7 +184,7 @@ class KnowledgeDeleteRequest(BaseModel):
 
 
 class MiningProjectCreateRequest(BaseModel):
-    name: str = "鍒涗綔绛栫暐瀛︿範"
+    name: str = "创作策略学习"
     strategy_type: str = "creation_strategy"
 
 
@@ -643,8 +670,10 @@ def test_image_api_setting(request: ImageApiSettingTestRequest) -> dict[str, str
 
 
 @app.post("/api/images")
-def upload_images(files: list[UploadFile] = File(...)) -> dict[str, object]:
+def upload_images(request: Request, files: list[UploadFile] = File(...)) -> dict[str, object]:
     storage.init_storage()
+    context = _enforce_upload_quotas(request, files)
+    owner_user_id, workspace_id = _context_owner_ids(context)
     items = []
     for upload in files:
         try:
@@ -654,7 +683,9 @@ def upload_images(files: list[UploadFile] = File(...)) -> dict[str, object]:
                 upload.content_type,
                 getattr(upload, "size", None),
             )
-            items.append(storage.save_upload(upload))
+            item = storage.save_upload(upload, owner_user_id=owner_user_id, workspace_id=workspace_id)
+            _mark_uploaded_item_owner("screenshots", item, context)
+            items.append(item)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -664,8 +695,10 @@ def upload_images(files: list[UploadFile] = File(...)) -> dict[str, object]:
 
 
 @app.post("/api/files")
-def upload_source_files(files: list[UploadFile] = File(...)) -> dict[str, object]:
+def upload_source_files(request: Request, files: list[UploadFile] = File(...)) -> dict[str, object]:
     storage.init_storage()
+    context = _enforce_upload_quotas(request, files)
+    owner_user_id, workspace_id = _context_owner_ids(context)
     items = []
     for upload in files:
         try:
@@ -675,7 +708,9 @@ def upload_source_files(files: list[UploadFile] = File(...)) -> dict[str, object
                 upload.content_type,
                 getattr(upload, "size", None),
             )
-            items.append(storage.save_document_upload(upload))
+            item = storage.save_document_upload(upload, owner_user_id=owner_user_id, workspace_id=workspace_id)
+            _mark_uploaded_item_owner("source_files", item, context)
+            items.append(item)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -685,8 +720,10 @@ def upload_source_files(files: list[UploadFile] = File(...)) -> dict[str, object
 
 
 @app.post("/api/media/upload")
-def upload_media_files(files: list[UploadFile] = File(...)) -> dict[str, object]:
+def upload_media_files(request: Request, files: list[UploadFile] = File(...)) -> dict[str, object]:
     storage.init_storage()
+    context = _enforce_upload_quotas(request, files)
+    owner_user_id, workspace_id = _context_owner_ids(context)
     items = []
     for upload in files:
         try:
@@ -696,7 +733,9 @@ def upload_media_files(files: list[UploadFile] = File(...)) -> dict[str, object]
                 upload.content_type,
                 getattr(upload, "size", None),
             )
-            items.append(storage.save_media_upload(upload))
+            item = storage.save_media_upload(upload, owner_user_id=owner_user_id, workspace_id=workspace_id)
+            _mark_uploaded_item_owner("media_sources", item, context)
+            items.append(item)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -711,31 +750,44 @@ def media_dependencies() -> dict[str, object]:
 
 
 @app.get("/api/media/bilibili-cookies")
-def bilibili_cookie_status() -> dict[str, object]:
+def bilibili_cookie_status(request: Request) -> dict[str, object]:
     try:
-        return media_parser.bilibili_cookie_status()
+        status_payload = media_parser.bilibili_cookie_status()
+        if _should_redact_local_settings(request):
+            return _redact_bilibili_cookie_status(status_payload)
+        return status_payload
     except Exception as exc:
         logger.exception("Bilibili cookie status check failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/media/bilibili-cookies/login")
-def open_bilibili_cookie_login(request: BilibiliCookieLoginRequest) -> dict[str, object]:
+def open_bilibili_cookie_login(payload: BilibiliCookieLoginRequest, request: Request) -> dict[str, object]:
     try:
-        return media_parser.launch_bilibili_cookie_login(request.url)
+        if _should_redact_local_settings(request):
+            raise HTTPException(status_code=403, detail="公网内测普通用户不能操作服务器 Cookie 登录")
+        return media_parser.launch_bilibili_cookie_login(payload.url)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Bilibili cookie login launch failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/media/transcripts")
-def list_media_transcripts() -> dict[str, object]:
-    return {"items": storage.list_media_transcripts()}
+def list_media_transcripts(request: Request) -> dict[str, object]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    owner_user_id, _workspace_id = _context_owner_ids(context)
+    user = context.get("user") or {}
+    scoped_owner = None if context.get("deploymentMode") != "cloud" or (isinstance(user, dict) and user.get("role") == "admin") else owner_user_id
+    return {"items": storage.list_media_transcripts(owner_user_id=scoped_owner)}
 
 
 @app.get("/api/media/{media_id}/transcript")
-def read_media_transcript(media_id: int) -> dict[str, object]:
+def read_media_transcript(media_id: int, request: Request) -> dict[str, object]:
     item = storage.get_media_source(media_id)
+    _ensure_cloud_record_access(request, item, "Transcript")
     path = storage.resolve_root_path(item.get("transcript_path"))
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Transcript file not found")
@@ -849,6 +901,160 @@ def _readable_document_from_text(title: str, raw_text: str, material_type: str) 
         logger.warning("Readable document cleanup failed, using local extracted text: %s", exc)
         fallback["note"] = f"{fallback['note']} Cleanup failed: {exc}"
         return fallback
+
+
+def _should_redact_local_settings(request: Request) -> bool:
+    if not is_cloud_mode():
+        return False
+    try:
+        storage.init_storage()
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        return context["user"]["role"] != "admin"
+    except HTTPException:
+        return True
+
+
+def _require_local_or_cloud_admin(request: Request, detail: str) -> None:
+    if _should_redact_local_settings(request):
+        raise HTTPException(status_code=403, detail=detail)
+
+
+def _upload_size(upload: UploadFile) -> int:
+    size = getattr(upload, "size", None)
+    if size is not None:
+        return int(size)
+    try:
+        current = upload.file.tell()
+        upload.file.seek(0, 2)
+        measured = upload.file.tell()
+        upload.file.seek(current)
+        return int(measured)
+    except (OSError, AttributeError):
+        return 0
+
+
+def _quota_bytes_detail(label: str, quota: dict[str, object]) -> str:
+    used = int(quota.get("used", 0) or 0)
+    limit = int(quota.get("limit", 0) or 0)
+    return f"{label}超出限制（{used}/{limit} bytes）"
+
+
+def _enforce_upload_quotas(request: Request, files: list[UploadFile]) -> dict[str, object]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        if not quota_service.is_enforced(context):
+            return context
+        user_id, _workspace_id = quota_service.user_ids(context)
+        incoming = 0
+        for upload in files:
+            size = _upload_size(upload)
+            incoming += size
+            size_quota = quota_service.check_upload_size(size)
+            if not size_quota["allowed"]:
+                raise HTTPException(status_code=413, detail=_quota_bytes_detail("单文件上传", size_quota))
+        storage_quota = quota_service.check_storage(conn, user_id=user_id, incoming_bytes=incoming)
+        if not storage_quota["allowed"]:
+            raise HTTPException(status_code=429, detail=_quota_bytes_detail("存储空间", storage_quota))
+        return context
+
+
+def _enforce_upload_byte_quotas(request: Request, sizes: list[int]) -> dict[str, object]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        if not quota_service.is_enforced(context):
+            return context
+        user_id, _workspace_id = quota_service.user_ids(context)
+        incoming = 0
+        for size in sizes:
+            incoming += max(0, int(size))
+            size_quota = quota_service.check_upload_size(size)
+            if not size_quota["allowed"]:
+                raise HTTPException(status_code=413, detail=_quota_bytes_detail("单文件上传", size_quota))
+        storage_quota = quota_service.check_storage(conn, user_id=user_id, incoming_bytes=incoming)
+        if not storage_quota["allowed"]:
+            raise HTTPException(status_code=429, detail=_quota_bytes_detail("存储空间", storage_quota))
+        return context
+
+
+def _mark_uploaded_item_owner(table: str, item: dict[str, object], context: dict[str, object]) -> None:
+    user = context.get("user") or {}
+    workspace = context.get("workspace") or {}
+    item_id = item.get("id")
+    if not item_id or not isinstance(user, dict) or not isinstance(workspace, dict):
+        return
+    with storage.connect() as conn:
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET owner_user_id = COALESCE(owner_user_id, ?),
+                workspace_id = COALESCE(workspace_id, ?)
+            WHERE id = ?
+            """,
+            (user.get("id"), workspace.get("id"), item_id),
+        )
+        conn.commit()
+    if not item.get("owner_user_id"):
+        item["owner_user_id"] = user.get("id")
+    if not item.get("workspace_id"):
+        item["workspace_id"] = workspace.get("id")
+
+
+def _context_owner_ids(context: dict[str, object]) -> tuple[str | None, str | None]:
+    user = context.get("user") or {}
+    workspace = context.get("workspace") or {}
+    owner_user_id = user.get("id") if isinstance(user, dict) else None
+    workspace_id = workspace.get("id") if isinstance(workspace, dict) else None
+    return (
+        str(owner_user_id) if owner_user_id else None,
+        str(workspace_id) if workspace_id else None,
+    )
+
+
+def _cloud_scoped_owner_id(context: dict[str, object]) -> str | None:
+    if context.get("deploymentMode") != "cloud":
+        return None
+    user = context.get("user") or {}
+    if isinstance(user, dict) and user.get("role") == "admin":
+        return None
+    owner_user_id, _workspace_id = _context_owner_ids(context)
+    return owner_user_id
+
+
+def _ensure_cloud_record_access(request: Request, item: dict[str, object], label: str) -> None:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    if context.get("deploymentMode") != "cloud":
+        return
+    user = context.get("user") or {}
+    if isinstance(user, dict) and user.get("role") == "admin":
+        return
+    owner_user_id = str(item.get("owner_user_id") or "")
+    user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
+    if not owner_user_id or owner_user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
+def _redact_workbench_settings_for_request(payload: dict[str, object], request: Request) -> dict[str, object]:
+    if not _should_redact_local_settings(request):
+        return payload
+    redacted = dict(payload)
+    redacted["storage_locations"] = {}
+    redacted["local_diagnostics_visible"] = False
+    return redacted
+
+
+def _redact_bilibili_cookie_status(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "mode": "cloud_redacted",
+        "source": "server",
+        "exists": bool(payload.get("exists")),
+        "has_sessdata": bool(payload.get("has_sessdata")),
+        "has_dedeuserid": bool(payload.get("has_dedeuserid")),
+        "has_bili_jct": bool(payload.get("has_bili_jct")),
+        "message": "B 站 Cookie 状态由管理员配置，普通用户只显示可用性。",
+    }
 
 
 def _knowledge_entries_for_screenshot(screenshot_id: int) -> list[dict[str, object]]:
@@ -1104,6 +1310,7 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
 
     raw_blocks: list[str] = []
     titles: list[str] = []
+    recovered_history_text = False
     try:
         if request.image_ids:
             screenshots = storage.get_screenshots(request.image_ids)
@@ -1116,6 +1323,7 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
                         title, text = recovered
                         titles.append(title)
                         raw_blocks.append(text)
+                        recovered_history_text = True
                         continue
                     raise FileNotFoundError(
                         f"Image file not found and no recoverable OCR/Markdown history is available: {screenshot['id']}"
@@ -1179,6 +1387,8 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
             material_types.append("file")
         if request.media_ids:
             material_types.append("media")
+        if recovered_history_text:
+            return _fallback_readable_document(title, raw_text, note="Recovered from historical Markdown; original OCR wording is preserved.")
         return _readable_document_from_text(title, raw_text, "+".join(material_types) or "raw")
     except HTTPException:
         raise
@@ -1188,27 +1398,30 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
 
 
 @app.get("/api/workbench-settings")
-def list_workbench_settings() -> dict[str, object]:
-    return workbench_settings.load_settings()
+def list_workbench_settings(request: Request) -> dict[str, object]:
+    return _redact_workbench_settings_for_request(workbench_settings.load_settings(), request)
 
 
 @app.post("/api/workbench-settings")
-def save_workbench_settings(request: WorkbenchSettingsRequest) -> dict[str, object]:
+def save_workbench_settings(request: WorkbenchSettingsRequest, http_request: Request) -> dict[str, object]:
     payload = request.model_dump(exclude_none=True)
     if "text_extraction_mode" in payload and payload["text_extraction_mode"] not in {"local_ocr", "ai_vision"}:
         raise HTTPException(status_code=400, detail="Unsupported text extraction mode")
-    return workbench_settings.save_settings(payload)
+    if _should_redact_local_settings(http_request):
+        payload.pop("storage_locations", None)
+    return _redact_workbench_settings_for_request(workbench_settings.save_settings(payload), http_request)
 
 
 @app.post("/api/media/plan-ranges")
-def plan_media_ranges(request: MediaPlanRequest) -> dict[str, object]:
-    if not request.media_ids:
+def plan_media_ranges(payload: MediaPlanRequest, request: Request) -> dict[str, object]:
+    if not payload.media_ids:
         raise HTTPException(status_code=400, detail="Please select at least one media item")
     segments = []
     results = []
-    for media_id in request.media_ids:
+    for media_id in payload.media_ids:
         try:
             item = storage.get_media_source(media_id)
+            _ensure_cloud_record_access(request, item, "Media")
             transcript, _ = media_parser.ensure_transcript(item)
             item = storage.get_media_source(media_id)
             media_segments = media_parser.plan_segments(
@@ -1240,15 +1453,19 @@ def media_segment_text(transcript: str, segment: MediaPlanSegmentRequest) -> str
 
 
 @app.post("/api/knowledge/generate-from-media-plan")
-def generate_knowledge_from_media_plan(request: MediaPlanGenerateRequest) -> dict[str, object]:
-    segments = [segment for segment in request.segments if segment.selected]
+def generate_knowledge_from_media_plan(payload: MediaPlanGenerateRequest, request: Request) -> dict[str, object]:
+    segments = [segment for segment in payload.segments if segment.selected]
     if not segments:
         raise HTTPException(status_code=400, detail="Please select at least one transcript segment")
     try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         setting = api_settings.active_setting()
         results = []
         for segment in segments:
             item = storage.get_media_source(segment.media_id)
+            _ensure_cloud_record_access(request, item, "Media")
             transcript, _ = media_parser.ensure_transcript(item)
             item = storage.get_media_source(segment.media_id)
             selected_text = media_segment_text(transcript, segment)
@@ -1257,7 +1474,8 @@ def generate_knowledge_from_media_plan(request: MediaPlanGenerateRequest) -> dic
             segment_hash = storage.hash_bytes(
                 f"{item['media_hash']}|{segment.id}|{segment.time_start}|{segment.time_end}|{segment.title}".encode("utf-8")
             )
-            existing = storage.get_knowledge_by_hash(segment_hash)
+            scoped_hash = storage.scoped_content_hash(segment_hash, owner_user_id)
+            existing = storage.get_knowledge_by_hash(scoped_hash)
             if existing and existing.get("markdown_path") and existing.get("status") == "ready":
                 results.append({"item": existing, "segment": segment.model_dump(), "skipped": True})
                 continue
@@ -1267,6 +1485,8 @@ def generate_knowledge_from_media_plan(request: MediaPlanGenerateRequest) -> dic
                 segment_hash,
                 source_type="media_plan",
                 source_ids=[int(item["id"])],
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
             )
             raw_text = "\n".join(
                 [
@@ -1290,7 +1510,7 @@ def generate_knowledge_from_media_plan(request: MediaPlanGenerateRequest) -> dic
             )
             markdown_path = storage.markdown_path_for(
                 knowledge.title or segment.title or "media-plan-knowledge",
-                segment_hash,
+                entry.get("image_hash") or segment_hash,
                 entry.get("created_at"),
             )
             markdown_path.write_text(markdown, encoding="utf-8")
@@ -1313,19 +1533,35 @@ def generate_knowledge_from_media_plan(request: MediaPlanGenerateRequest) -> dic
 
 
 @app.post("/api/images/paste")
-def upload_pasted_images(request: ImageDataBatchRequest) -> dict[str, object]:
+def upload_pasted_images(payload: ImageDataBatchRequest, request: Request) -> dict[str, object]:
     storage.init_storage()
-    items = []
-    for image in request.images:
+    decoded_images: list[tuple[ImageDataRequest, bytes, str]] = []
+    for image in payload.images:
+        header, _, data_payload = image.data_url.partition(",")
+        if not data_payload:
+            raise HTTPException(status_code=400, detail="Pasted image data is empty")
+        content_type = image.content_type
+        if header.startswith("data:") and ";" in header:
+            content_type = header.removeprefix("data:").split(";", 1)[0]
         try:
-            header, _, payload = image.data_url.partition(",")
-            if not payload:
-                raise ValueError("Pasted image data is empty")
-            content_type = image.content_type
-            if header.startswith("data:") and ";" in header:
-                content_type = header.removeprefix("data:").split(";", 1)[0]
-            data = base64.b64decode(payload)
-            items.append(storage.save_image_bytes(data, image.filename, content_type))
+            decoded_images.append((image, base64.b64decode(data_payload), content_type))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Pasted image data is not valid base64") from exc
+
+    context = _enforce_upload_byte_quotas(request, [len(data) for _, data, _ in decoded_images])
+    owner_user_id, workspace_id = _context_owner_ids(context)
+    items = []
+    for image, data, content_type in decoded_images:
+        try:
+            item = storage.save_image_bytes(
+                data,
+                image.filename,
+                content_type,
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
+            )
+            _mark_uploaded_item_owner("screenshots", item, context)
+            items.append(item)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -1335,8 +1571,9 @@ def upload_pasted_images(request: ImageDataBatchRequest) -> dict[str, object]:
 
 
 @app.get("/api/images/{image_id}/file")
-def image_file(image_id: int) -> FileResponse:
+def image_file(image_id: int, request: Request) -> FileResponse:
     item = storage.get_screenshot(image_id)
+    _ensure_cloud_record_access(request, item, "Image")
     path = storage.resolve_root_path(item.get("image_path"))
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
@@ -1344,8 +1581,9 @@ def image_file(image_id: int) -> FileResponse:
 
 
 @app.get("/api/files/{file_id}/raw")
-def source_file_raw(file_id: int) -> FileResponse:
+def source_file_raw(file_id: int, request: Request) -> FileResponse:
     item = storage.get_source_file(file_id)
+    _ensure_cloud_record_access(request, item, "Source file")
     path = storage.resolve_root_path(item.get("file_path"))
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Source file not found")
@@ -1648,21 +1886,27 @@ def plan_source_file(request: FilePlanRequest) -> dict[str, object]:
 
 
 @app.post("/api/knowledge/generate")
-def generate_knowledge(request: GenerateRequest) -> dict[str, object]:
-    if not request.image_ids:
+def generate_knowledge(payload: GenerateRequest, request: Request) -> dict[str, object]:
+    if not payload.image_ids:
         raise HTTPException(status_code=400, detail="Please select at least one screenshot")
-    if request.parser_mode not in {"local_ocr", "ai_vision"}:
+    if payload.parser_mode not in {"local_ocr", "ai_vision"}:
         raise HTTPException(status_code=400, detail="Unsupported parser mode")
 
     try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         setting = api_settings.active_setting()
-        screenshots = storage.get_screenshots(request.image_ids)
+        screenshots = storage.get_screenshots(payload.image_ids)
+        for screenshot in screenshots:
+            _ensure_cloud_record_access(request, screenshot, "Image")
         round_hash = storage.combined_hash(screenshots)
-        existing = storage.get_knowledge_by_hash(round_hash)
+        scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
+        existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
             return {"item": existing, "images": screenshots, "skipped": True}
 
-        entry = storage.create_or_update_knowledge_entry(request.image_ids, round_hash)
+        entry = storage.create_or_update_knowledge_entry(payload.image_ids, round_hash, owner_user_id=owner_user_id, workspace_id=workspace_id)
         image_paths = []
         for screenshot in screenshots:
             image_path = storage.resolve_root_path(screenshot.get("image_path"))
@@ -1670,7 +1914,7 @@ def generate_knowledge(request: GenerateRequest) -> dict[str, object]:
                 raise FileNotFoundError(f"Image file not found: {screenshot['id']}")
             image_paths.append(image_path)
 
-        if request.parser_mode == "ai_vision":
+        if payload.parser_mode == "ai_vision":
             combined_raw_text = deepseek_client.recognize_screenshots_with_ai(image_paths, setting=setting)
         else:
             combined_raw_text = ocr_client.recognize_screenshots(image_paths)
@@ -1686,7 +1930,7 @@ def generate_knowledge(request: GenerateRequest) -> dict[str, object]:
         )
         markdown_path = storage.markdown_path_for(
             knowledge.title or "screenshot-knowledge",
-            round_hash,
+            entry.get("image_hash") or round_hash,
             entry.get("created_at"),
         )
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -1707,13 +1951,13 @@ def generate_knowledge(request: GenerateRequest) -> dict[str, object]:
             "item": updated,
             "images": screenshots,
             "skipped": False,
-            "parser_mode": request.parser_mode,
+            "parser_mode": payload.parser_mode,
             "graph": {"ok": True, "status": "not_ingested", "pending_node_ids": []},
         }
     except Exception as exc:
         if "entry" in locals():
             storage.update_knowledge_entry(entry["id"], status="error", error_message=str(exc))
-        for image_id in request.image_ids:
+        for image_id in payload.image_ids:
             try:
                 storage.update_screenshot(image_id, status="error", error_message=str(exc))
             except Exception:
@@ -1740,26 +1984,30 @@ def generate_knowledge_draft_meta(request: KnowledgeDraftMetaRequest) -> dict[st
 
 
 @app.post("/api/knowledge/commit-draft")
-def commit_knowledge_draft(request: KnowledgeDraftCommitRequest) -> dict[str, object]:
-    title = request.title.strip() or "Untitled knowledge"
-    body = request.body
+def commit_knowledge_draft(payload: KnowledgeDraftCommitRequest, request: Request) -> dict[str, object]:
+    title = payload.title.strip() or "Untitled knowledge"
+    body = payload.body
     if not body.strip():
         raise HTTPException(status_code=400, detail="Draft body is required")
-    note = request.note.strip()
-    markdown = strip_repeated_note_quotes(body, note) if request.backend_id else body
-    if note and not request.backend_id:
+    note = payload.note.strip()
+    markdown = strip_repeated_note_quotes(body, note) if payload.backend_id else body
+    if note and not payload.backend_id:
         markdown = f"> {note}\n\n{body}"
 
     try:
-        if request.backend_id:
-            item = storage.get_knowledge_entry(request.backend_id)
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
+        if payload.backend_id:
+            item = storage.get_knowledge_entry(payload.backend_id)
+            _ensure_cloud_record_access(request, item, "Knowledge")
             markdown_path = storage.resolve_root_path(item.get("markdown_path"))
             if markdown_path is None:
-                markdown_path = storage.markdown_path_for(title, str(item.get("image_hash") or request.backend_id), item.get("created_at"))
+                markdown_path = storage.markdown_path_for(title, str(item.get("image_hash") or payload.backend_id), item.get("created_at"))
             markdown_path.parent.mkdir(parents=True, exist_ok=True)
             markdown_path.write_text(markdown, encoding="utf-8")
             updated = storage.update_knowledge_entry(
-                request.backend_id,
+                payload.backend_id,
                 markdown_path=storage.storage_relative(markdown_path),
                 title=title,
                 topic=note or item.get("topic") or "",
@@ -1775,7 +2023,7 @@ def commit_knowledge_draft(request: KnowledgeDraftCommitRequest) -> dict[str, ob
                 "title": title,
                 "note": note,
                 "body": body,
-                "source_ids": request.source_ids,
+                "source_ids": payload.source_ids,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1785,8 +2033,10 @@ def commit_knowledge_draft(request: KnowledgeDraftCommitRequest) -> dict[str, ob
             draft_hash,
             source_type="draft",
             source_ids=[],
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
-        markdown_path = storage.markdown_path_for(title, draft_hash, entry.get("created_at"))
+        markdown_path = storage.markdown_path_for(title, entry.get("image_hash") or draft_hash, entry.get("created_at"))
         markdown_path.write_text(markdown, encoding="utf-8")
         updated = storage.update_knowledge_entry(
             entry["id"],
@@ -1806,15 +2056,21 @@ def commit_knowledge_draft(request: KnowledgeDraftCommitRequest) -> dict[str, ob
 
 
 @app.post("/api/knowledge/generate-from-files")
-def generate_knowledge_from_files(request: FileGenerateRequest) -> dict[str, object]:
-    if not request.file_ids:
+def generate_knowledge_from_files(payload: FileGenerateRequest, request: Request) -> dict[str, object]:
+    if not payload.file_ids:
         raise HTTPException(status_code=400, detail="Please select at least one file")
 
     try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         setting = api_settings.active_setting()
-        source_files = storage.get_source_files(request.file_ids)
+        source_files = storage.get_source_files(payload.file_ids)
+        for item in source_files:
+            _ensure_cloud_record_access(request, item, "Source file")
         round_hash = storage.combined_file_hash(source_files)
-        existing = storage.get_knowledge_by_hash(round_hash)
+        scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
+        existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
             return {"item": existing, "files": source_files, "skipped": True, "graph": {"ok": True, "status": existing.get("graph_status")}}
 
@@ -1822,7 +2078,9 @@ def generate_knowledge_from_files(request: FileGenerateRequest) -> dict[str, obj
             [],
             round_hash,
             source_type="files",
-            source_ids=request.file_ids,
+            source_ids=payload.file_ids,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
         combined_raw_text = document_parser.recognize_files(source_files, storage.ROOT)
         knowledge, combined_raw_text = deepseek_client.generate_knowledge_from_text(
@@ -1836,7 +2094,7 @@ def generate_knowledge_from_files(request: FileGenerateRequest) -> dict[str, obj
         )
         markdown_path = storage.markdown_path_for(
             knowledge.title or "file-knowledge",
-            round_hash,
+            entry.get("image_hash") or round_hash,
             entry.get("created_at"),
         )
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -1862,7 +2120,7 @@ def generate_knowledge_from_files(request: FileGenerateRequest) -> dict[str, obj
     except Exception as exc:
         if "entry" in locals():
             storage.update_knowledge_entry(entry["id"], status="error", error_message=str(exc))
-        for file_id in request.file_ids:
+        for file_id in payload.file_ids:
             try:
                 storage.update_source_file(file_id, status="error", error_message=str(exc))
             except Exception:
@@ -1871,15 +2129,21 @@ def generate_knowledge_from_files(request: FileGenerateRequest) -> dict[str, obj
 
 
 @app.post("/api/knowledge/generate-from-media")
-def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, object]:
-    if not request.media_ids:
+def generate_knowledge_from_media(payload: MediaGenerateRequest, request: Request) -> dict[str, object]:
+    if not payload.media_ids:
         raise HTTPException(status_code=400, detail="Please select at least one media item")
 
     try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         setting = api_settings.active_setting()
-        media_items = storage.get_media_sources(request.media_ids)
+        media_items = storage.get_media_sources(payload.media_ids)
+        for item in media_items:
+            _ensure_cloud_record_access(request, item, "Media")
         round_hash = storage.combined_media_hash(media_items)
-        existing = storage.get_knowledge_by_hash(round_hash)
+        scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
+        existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
             return {"item": existing, "media": media_items, "skipped": True, "graph": {"ok": True, "status": existing.get("graph_status")}}
 
@@ -1887,7 +2151,9 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
             [],
             round_hash,
             source_type="media",
-            source_ids=request.media_ids,
+            source_ids=payload.media_ids,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
         transcript_blocks = []
         failed_media = []
@@ -1907,7 +2173,7 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
             storage.update_knowledge_entry(entry["id"], status="error", error_message="No media transcript is available")
             return {
                 "item": storage.get_knowledge_entry(entry["id"]),
-                "media": storage.get_media_sources(request.media_ids),
+                "media": storage.get_media_sources(payload.media_ids),
                 "skipped": False,
                 "generated": False,
                 "errors": failed_media,
@@ -1927,7 +2193,7 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
         )
         markdown_path = storage.markdown_path_for(
             knowledge.title or "media-knowledge",
-            round_hash,
+            entry.get("image_hash") or round_hash,
             entry.get("created_at"),
         )
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -1948,7 +2214,7 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
             storage.update_media_source(int(item["id"]), status="ready", error_message=None)
         return {
             "item": updated,
-            "media": storage.get_media_sources(request.media_ids),
+            "media": storage.get_media_sources(payload.media_ids),
             "skipped": False,
             "generated": True,
             "errors": failed_media,
@@ -1957,7 +2223,7 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
     except Exception as exc:
         if "entry" in locals():
             storage.update_knowledge_entry(entry["id"], status="error", error_message=str(exc))
-        for media_id in request.media_ids:
+        for media_id in payload.media_ids:
             try:
                 storage.update_media_source(media_id, status="error", error_message=str(exc))
             except Exception:
@@ -1966,30 +2232,41 @@ def generate_knowledge_from_media(request: MediaGenerateRequest) -> dict[str, ob
 
 
 @app.post("/api/knowledge/generate-from-file-plan")
-def generate_knowledge_from_file_plan(request: FilePlanGenerateRequest) -> dict[str, object]:
+def generate_knowledge_from_file_plan(payload: FilePlanGenerateRequest, request: Request) -> dict[str, object]:
+    item = storage.get_source_file(payload.file_id)
+    _ensure_cloud_record_access(request, item, "Source file")
     payloads = [
-        SegmentGeneratePayload(item=storage.get_source_file(request.file_id), segment=segment)
-        for segment in request.segments
+        SegmentGeneratePayload(item=item, segment=segment)
+        for segment in payload.segments
         if segment.selected
     ]
-    return generate_knowledge_for_segment_payloads(payloads)
+    return generate_knowledge_for_segment_payloads(payloads, request)
 
 
 @app.post("/api/knowledge/generate-from-plan-segments")
-def generate_knowledge_from_plan_segments(request: MultiFilePlanGenerateRequest) -> dict[str, object]:
-    payloads = [
-        SegmentGeneratePayload(item=storage.get_source_file(segment.file_id), segment=segment)
-        for segment in request.segments
-        if segment.selected and segment.file_id
-    ]
-    return generate_knowledge_for_segment_payloads(payloads)
+def generate_knowledge_from_plan_segments(payload: MultiFilePlanGenerateRequest, request: Request) -> dict[str, object]:
+    payloads = []
+    for segment in payload.segments:
+        if not segment.selected or not segment.file_id:
+            continue
+        item = storage.get_source_file(segment.file_id)
+        _ensure_cloud_record_access(request, item, "Source file")
+        payloads.append(SegmentGeneratePayload(item=item, segment=segment))
+    return generate_knowledge_for_segment_payloads(payloads, request)
 
 
-def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayload]) -> dict[str, object]:
+def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayload], request: Request | None = None) -> dict[str, object]:
     if not payloads:
         raise HTTPException(status_code=400, detail="Please select at least one planned topic")
 
     try:
+        context: dict[str, object] | None = None
+        owner_user_id: str | None = None
+        workspace_id: str | None = None
+        if request is not None:
+            with storage.connect() as conn:
+                context = current_context(request, conn)
+            owner_user_id, workspace_id = _context_owner_ids(context)
         setting = api_settings.active_setting()
         pages_cache: dict[int, tuple[dict[str, object], Path, list[dict]]] = {}
         results = []
@@ -2013,7 +2290,8 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
             segment_hash = storage.hash_bytes(
                 f"{item['file_hash']}|{segment.id}|{segment.page_start}|{segment.page_end}|{segment.title}".encode("utf-8")
             )
-            existing = storage.get_knowledge_by_hash(segment_hash)
+            scoped_hash = storage.scoped_content_hash(segment_hash, owner_user_id)
+            existing = storage.get_knowledge_by_hash(scoped_hash)
             if existing and existing.get("markdown_path") and existing.get("status") == "ready":
                 results.append({"item": existing, "segment": segment.model_dump(), "skipped": True})
                 continue
@@ -2023,6 +2301,8 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
                 segment_hash,
                 source_type="file_plan",
                 source_ids=[int(item["id"])],
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
             )
             raw_text = (
                 f"[File: {item.get('original_name') or path.name}]\n"
@@ -2040,7 +2320,7 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
             )
             markdown_path = storage.markdown_path_for(
                 knowledge.title or segment.title or "file-plan-knowledge",
-                segment_hash,
+                entry.get("image_hash") or segment_hash,
                 entry.get("created_at"),
             )
             markdown_path.write_text(markdown, encoding="utf-8")
@@ -2073,24 +2353,30 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
 
 
 @app.get("/api/knowledge")
-def list_knowledge() -> dict[str, object]:
-    return {"items": storage.list_knowledge()}
+def list_knowledge(request: Request) -> dict[str, object]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    return {"items": storage.list_knowledge(owner_user_id=_cloud_scoped_owner_id(context))}
 
 
 @app.post("/api/knowledge/delete-not-ingested")
-def delete_not_ingested_knowledge(request: KnowledgeDeleteRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
+def delete_not_ingested_knowledge(payload: KnowledgeDeleteRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids:
         raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佸垹闄ょ殑鐭ヨ瘑鏂囦欢")
     try:
-        result = storage.delete_not_ingested_knowledge(request.knowledge_ids)
-        return {**result, "items": storage.list_knowledge()}
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id = _cloud_scoped_owner_id(context)
+        result = storage.delete_not_ingested_knowledge(payload.knowledge_ids, owner_user_id=owner_user_id)
+        return {**result, "items": storage.list_knowledge(owner_user_id=owner_user_id)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/knowledge/{knowledge_id:int}")
-def read_knowledge(knowledge_id: int) -> dict[str, object]:
+def read_knowledge(knowledge_id: int, request: Request) -> dict[str, object]:
     item = storage.get_knowledge_entry(knowledge_id)
+    _ensure_cloud_record_access(request, item, "Knowledge")
     path = storage.resolve_root_path(item.get("markdown_path"))
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Knowledge file not found")
@@ -2098,15 +2384,16 @@ def read_knowledge(knowledge_id: int) -> dict[str, object]:
 
 
 @app.post("/api/knowledge/{knowledge_id:int}")
-def update_knowledge(knowledge_id: int, request: KnowledgeUpdateRequest) -> dict[str, object]:
-    title = request.title.strip() or "Untitled knowledge"
-    note = request.note.strip()
-    body = strip_repeated_note_quotes(request.body, note)
+def update_knowledge(knowledge_id: int, payload: KnowledgeUpdateRequest, request: Request) -> dict[str, object]:
+    title = payload.title.strip() or "Untitled knowledge"
+    note = payload.note.strip()
+    body = strip_repeated_note_quotes(payload.body, note)
     if not body.strip():
         raise HTTPException(status_code=400, detail="Knowledge body is required")
 
     try:
         item = storage.get_knowledge_entry(knowledge_id)
+        _ensure_cloud_record_access(request, item, "Knowledge")
         markdown_path = storage.resolve_root_path(item.get("markdown_path"))
         if markdown_path is None:
             markdown_path = storage.markdown_path_for(
@@ -2162,8 +2449,14 @@ def normalize_note_text(value: str) -> str:
     return re.sub(r"\s+", "", value).strip()
 
 
-def _mining_project_payload(project_id: int) -> dict[str, object]:
-    project = storage.get_mining_project(project_id)
+def _mining_owner_scope(request: Request) -> str | None:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    return _cloud_scoped_owner_id(context)
+
+
+def _mining_project_payload(project_id: int, owner_user_id: str | None = None) -> dict[str, object]:
+    project = storage.get_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
     return {
         "project": project,
         "sources": storage.list_mining_project_sources(project_id),
@@ -2172,9 +2465,11 @@ def _mining_project_payload(project_id: int) -> dict[str, object]:
     }
 
 
-def _mining_source_text(project: dict[str, object], source: MiningSourceRef) -> tuple[str, str]:
+def _mining_source_text(project: dict[str, object], source: MiningSourceRef, request: Request | None = None) -> tuple[str, str]:
     if source.source_type == "screenshot":
         item = storage.get_screenshot(source.source_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Image")
         image_path = storage.resolve_root_path(item.get("image_path"))
         if not image_path or not image_path.exists():
             raise FileNotFoundError(f"Image file not found: {source.source_id}")
@@ -2187,11 +2482,15 @@ def _mining_source_text(project: dict[str, object], source: MiningSourceRef) -> 
 
     if source.source_type == "file":
         item = storage.get_source_file(source.source_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Source file")
         title = source.title or str(item.get("original_name") or f"file-{source.source_id}")
         return title, document_parser.recognize_files([item], storage.ROOT)
 
     if source.source_type == "media":
         item = storage.get_media_source(source.source_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Media")
         transcript, _ = media_parser.ensure_transcript(item)
         refreshed = storage.get_media_source(source.source_id)
         title = source.title or str(refreshed.get("title") or refreshed.get("original_name") or f"media-{source.source_id}")
@@ -2201,32 +2500,43 @@ def _mining_source_text(project: dict[str, object], source: MiningSourceRef) -> 
 
 
 @app.get("/api/mining/projects")
-def list_mining_projects() -> dict[str, object]:
+def list_mining_projects(request: Request) -> dict[str, object]:
     try:
-        return {"items": storage.list_mining_projects()}
+        owner_user_id = _mining_owner_scope(request)
+        return {"items": storage.list_mining_projects(owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/mining/projects")
-def create_mining_project(request: MiningProjectCreateRequest) -> dict[str, object]:
+def create_mining_project(payload: MiningProjectCreateRequest, request: Request) -> dict[str, object]:
     try:
-        project = storage.create_mining_project(request.name, request.strategy_type)
-        return _mining_project_payload(int(project["id"]))
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
+        project = storage.create_mining_project(
+            payload.name,
+            payload.strategy_type,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
+        )
+        scoped_owner_id = _cloud_scoped_owner_id(context)
+        return _mining_project_payload(int(project["id"]), owner_user_id=scoped_owner_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.patch("/api/mining/projects/{project_id}")
-def update_mining_project(project_id: int, request: MiningProjectUpdateRequest) -> dict[str, object]:
+def update_mining_project(project_id: int, payload: MiningProjectUpdateRequest, request: Request) -> dict[str, object]:
     try:
+        owner_user_id = _mining_owner_scope(request)
         fields: dict[str, object] = {}
-        if request.name is not None:
-            fields["name"] = request.name.strip() or "鍒涗綔绛栫暐瀛︿範"
-        if request.status is not None:
-            fields["status"] = request.status
-        storage.update_mining_project(project_id, **fields)
-        return _mining_project_payload(project_id)
+        if payload.name is not None:
+            fields["name"] = payload.name.strip() or "创作策略学习"
+        if payload.status is not None:
+            fields["status"] = payload.status
+        storage.update_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None, **fields)
+        return _mining_project_payload(project_id, owner_user_id=owner_user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2234,9 +2544,10 @@ def update_mining_project(project_id: int, request: MiningProjectUpdateRequest) 
 
 
 @app.get("/api/mining/projects/{project_id}")
-def read_mining_project(project_id: int) -> dict[str, object]:
+def read_mining_project(project_id: int, request: Request) -> dict[str, object]:
     try:
-        return _mining_project_payload(project_id)
+        owner_user_id = _mining_owner_scope(request)
+        return _mining_project_payload(project_id, owner_user_id=owner_user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2244,15 +2555,16 @@ def read_mining_project(project_id: int) -> dict[str, object]:
 
 
 @app.post("/api/mining/projects/{project_id}/sources")
-def add_mining_project_sources(project_id: int, request: MiningSourcesRequest) -> dict[str, object]:
-    if not request.sources:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佸姞鍏ョ瓥鐣ュ涔犵殑绱犳潗")
+def add_mining_project_sources(project_id: int, payload: MiningSourcesRequest, request: Request) -> dict[str, object]:
+    if not payload.sources:
+        raise HTTPException(status_code=400, detail="请先选择要加入策略学习的素材")
     try:
-        project = storage.get_mining_project(project_id)
+        owner_user_id = _mining_owner_scope(request)
+        project = storage.get_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
         results = []
-        for source in request.sources:
+        for source in payload.sources:
             try:
-                title, text = _mining_source_text(project, source)
+                title, text = _mining_source_text(project, source, request=request)
                 text_path = storage.mining_source_text_path(project, source.source_type, source.source_id, title)
                 text_path.write_text(text, encoding="utf-8")
                 saved = storage.upsert_mining_project_source(
@@ -2266,7 +2578,7 @@ def add_mining_project_sources(project_id: int, request: MiningSourcesRequest) -
             except Exception as exc:
                 logger.exception("Mining source attach failed")
                 results.append({"source": source.model_dump(), "ok": False, "error": str(exc)})
-        return {**_mining_project_payload(project_id), "results": results}
+        return {**_mining_project_payload(project_id, owner_user_id=owner_user_id), "results": results}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2274,9 +2586,10 @@ def add_mining_project_sources(project_id: int, request: MiningSourcesRequest) -
 
 
 @app.post("/api/mining/projects/{project_id}/learn-creation-strategy")
-def learn_creation_strategy(project_id: int) -> dict[str, object]:
+def learn_creation_strategy(project_id: int, request: Request) -> dict[str, object]:
     try:
-        project = storage.get_mining_project(project_id)
+        owner_user_id = _mining_owner_scope(request)
+        project = storage.get_mining_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
         materials = storage.read_mining_source_texts(project_id)
         if not materials:
             raise HTTPException(status_code=400, detail="Please add at least one author sample")
@@ -2300,9 +2613,9 @@ def learn_creation_strategy(project_id: int) -> dict[str, object]:
             artifact_path,
             summary=result.summary,
         )
-        payload = _mining_project_payload(project_id)
-        payload["version"] = version_item
-        return payload
+        response_payload = _mining_project_payload(project_id, owner_user_id=owner_user_id)
+        response_payload["version"] = version_item
+        return response_payload
     except HTTPException:
         raise
     except KeyError as exc:
@@ -2342,8 +2655,8 @@ def _knowledge_from_entry_markdown(item: dict[str, object], content: str) -> Kno
 
 
 @app.post("/api/knowledge/ingest-to-graph")
-def ingest_knowledge_to_graph(request: KnowledgeGraphIngestRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
+def ingest_knowledge_to_graph(payload: KnowledgeGraphIngestRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids:
         raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佸叆缃戠殑鐭ヨ瘑鏂囦欢")
     try:
         setting = api_settings.active_setting()
@@ -2352,9 +2665,10 @@ def ingest_knowledge_to_graph(request: KnowledgeGraphIngestRequest) -> dict[str,
 
     results = []
     all_pending_ids: list[str] = []
-    for knowledge_id in request.knowledge_ids:
+    for knowledge_id in payload.knowledge_ids:
         try:
             item = storage.get_knowledge_entry(knowledge_id)
+            _ensure_cloud_record_access(request, item, "Knowledge")
             path = storage.resolve_root_path(item.get("markdown_path"))
             if not path or not path.exists():
                 raise FileNotFoundError(f"鐭ヨ瘑鏂囦欢涓嶅瓨鍦細{knowledge_id}")
@@ -2375,6 +2689,8 @@ def ingest_knowledge_to_graph(request: KnowledgeGraphIngestRequest) -> dict[str,
                 all_pending_ids.extend(str(node_id) for node_id in pending_ids)
             storage.update_knowledge_graph_status(knowledge_id, "pending")
             results.append({"knowledge_id": knowledge_id, "ok": True, **ingest_result})
+        except HTTPException as exc:
+            results.append({"knowledge_id": knowledge_id, "ok": False, "error": exc.detail})
         except Exception as exc:
             logger.exception("Manual graph ingestion failed for knowledge entry %s", knowledge_id)
             try:
@@ -2566,8 +2882,16 @@ def _parse_ids(ids: str | None) -> list[int]:
     return result
 
 
-def _writer_materials(knowledge_ids: list[int]) -> list[tuple[str, str]]:
-    selected = storage.read_markdown_for_ids(knowledge_ids)
+def _writer_materials(knowledge_ids: list[int], request: Request | None = None) -> list[tuple[str, str]]:
+    selected: list[tuple[dict[str, object], str]] = []
+    for knowledge_id in knowledge_ids:
+        item = storage.get_knowledge_entry(knowledge_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Knowledge")
+        path = storage.resolve_root_path(item.get("markdown_path"))
+        if not path or not path.exists():
+            raise FileNotFoundError(f"知识文件不存在：{knowledge_id}")
+        selected.append((item, path.read_text(encoding="utf-8")))
     payload = []
     for item, content in selected:
         markdown_path = storage.resolve_root_path(item.get("markdown_path"))
@@ -2576,9 +2900,104 @@ def _writer_materials(knowledge_ids: list[int]) -> list[tuple[str, str]]:
     return payload
 
 
-def _writer_library_files(knowledge_ids: list[int]) -> list[dict[str, object]]:
+def _writer_selected_markdowns(knowledge_ids: list[int], request: Request | None = None) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    for knowledge_id in knowledge_ids:
+        item = storage.get_knowledge_entry(knowledge_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Knowledge")
+        path = storage.resolve_root_path(item.get("markdown_path"))
+        if not path or not path.exists():
+            raise FileNotFoundError(f"知识文件不存在：{knowledge_id}")
+        results.append(
+            {
+                "item": item,
+                "filename": path.name,
+                "content": path.read_text(encoding="utf-8"),
+            }
+        )
+    return results
+
+
+def _writer_owner_scope(request: Request) -> str | None:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    return _cloud_scoped_owner_id(context)
+
+
+def _ensure_legacy_writer_workspace_access(request: Request, workspace: Path) -> None:
+    owner_user_id = _writer_owner_scope(request)
+    if owner_user_id is None:
+        return
+    projects_root = writer_tools.projects_dir().resolve()
+    resolved = workspace.resolve()
+    try:
+        relative = resolved.relative_to(projects_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Writer workspace not found") from exc
+    project_id = relative.parts[0] if relative.parts else ""
+    try:
+        writer_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=False)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Writer workspace not found") from exc
+
+
+def _resolve_legacy_writer_workspace(path: str, request: Request) -> Path:
+    workspace = writer_tools.resolve_workspace(path)
+    _ensure_legacy_writer_workspace_access(request, workspace)
+    return workspace
+
+
+def _resolve_legacy_writer_file(path: str, request: Request) -> Path:
+    file_path = writer_tools.resolve_writer_file(path)
+    owner_user_id = _writer_owner_scope(request)
+    if owner_user_id is None:
+        return file_path
+    projects_root = writer_tools.projects_dir().resolve()
+    try:
+        relative = file_path.resolve().relative_to(projects_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Writer file not found") from exc
+    project_id = relative.parts[0] if relative.parts else ""
+    try:
+        writer_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=False)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Writer file not found") from exc
+    return file_path
+
+
+def _writer_project_payload(project_id: str, owner_user_id: str | None = None) -> dict[str, object]:
+    project = writer_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+    workspace = writer_tools.resolve_project_workspace(project_id)
+    status = writer_tools.workspace_status(workspace)
+    publish_result = None
+    publish_path = workspace / "publish_result.json"
+    if publish_path.exists():
+        try:
+            publish_result = json.loads(publish_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            publish_result = {"raw": publish_path.read_text(encoding="utf-8", errors="replace")}
+    if publish_result:
+        project["publish_result"] = publish_result
+    step = _writer_project_step(project)
+    return {
+        "project": project,
+        "status": status,
+        "step": step,
+        "next_action": _writer_project_next_action_for_project(project, step),
+    }
+
+
+def _writer_load_project(project_id: str, owner_user_id: str | None = None) -> dict[str, object]:
+    return writer_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+
+
+def _writer_library_files(knowledge_ids: list[int], request: Request | None = None) -> list[dict[str, object]]:
     files: list[dict[str, object]] = []
-    for item, _content in storage.read_markdown_for_ids(knowledge_ids):
+    for knowledge_id in knowledge_ids:
+        item = storage.get_knowledge_entry(knowledge_id)
+        if request is not None:
+            _ensure_cloud_record_access(request, item, "Knowledge")
         markdown_path = storage.resolve_root_path(item.get("markdown_path"))
         if not markdown_path:
             continue
@@ -2593,11 +3012,20 @@ def _writer_library_files(knowledge_ids: list[int]) -> list[dict[str, object]]:
     return files
 
 
-def _writer_library_files_from_refs(refs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _writer_library_files_from_refs(refs: list[dict[str, object]], request: Request | None = None) -> list[dict[str, object]]:
     files: list[dict[str, object]] = []
     seen: set[str] = set()
+    scoped_owner = _writer_owner_scope(request) if request is not None else None
     for ref in refs:
-        markdown_path = str(ref.get("markdown_path") or ref.get("markdownPath") or "").strip()
+        if scoped_owner is not None:
+            knowledge_id = ref.get("knowledge_id") or ref.get("knowledgeId")
+            if knowledge_id is None:
+                continue
+            item = storage.get_knowledge_entry(int(knowledge_id))
+            _ensure_cloud_record_access(request, item, "Knowledge")
+            markdown_path = str(item.get("markdown_path") or "").strip()
+        else:
+            markdown_path = str(ref.get("markdown_path") or ref.get("markdownPath") or "").strip()
         if not markdown_path:
             continue
         path = storage.resolve_root_path(markdown_path)
@@ -2688,28 +3116,6 @@ def _writer_project_next_action_for_project(project: dict[str, object], step: st
     return _writer_project_next_action(step)
 
 
-def _writer_project_payload(project_id: str) -> dict[str, object]:
-    project = writer_tools.load_project(project_id)
-    workspace = writer_tools.resolve_project_workspace(project_id)
-    status = writer_tools.workspace_status(workspace)
-    publish_result = None
-    publish_path = workspace / "publish_result.json"
-    if publish_path.exists():
-        try:
-            publish_result = json.loads(publish_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            publish_result = {"raw": publish_path.read_text(encoding="utf-8", errors="replace")}
-    if publish_result:
-        project["publish_result"] = publish_result
-    step = _writer_project_step(project)
-    return {
-        "project": project,
-        "status": status,
-        "step": step,
-        "next_action": _writer_project_next_action_for_project(project, step),
-    }
-
-
 def _writer_project_workspace(project_id: str) -> Path:
     return writer_tools.resolve_project_workspace(project_id)
 
@@ -2722,30 +3128,38 @@ def _require_project_materials(project: dict[str, object]) -> list[tuple[str, st
 
 
 @app.get("/api/writer/session")
-def writer_session(ids: str | None = None) -> dict[str, object]:
+def writer_session(http_request: Request, ids: str | None = None) -> dict[str, object]:
     knowledge_ids = _parse_ids(ids)
     if not knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨鐭ヨ瘑鏂囦欢")
+        raise HTTPException(status_code=400, detail="请先选择知识文件")
     try:
-        items = writer_tools.selected_markdowns(knowledge_ids)
+        items = _writer_selected_markdowns(knowledge_ids, http_request)
         return {"items": items, "knowledge_ids": knowledge_ids}
+    except HTTPException:
+        raise
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/writer/workspaces")
-def writer_workspaces() -> dict[str, object]:
+def writer_workspaces(request: Request) -> dict[str, object]:
     try:
+        if _writer_owner_scope(request) is not None:
+            return {"items": []}
         return {"items": writer_tools.list_workspaces()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/writer/workspace")
-def writer_workspace(path: str) -> dict[str, object]:
+def writer_workspace(path: str, request: Request) -> dict[str, object]:
     try:
-        workspace = writer_tools.resolve_workspace(path)
+        workspace = _resolve_legacy_writer_workspace(path, request)
         return writer_tools.load_workspace(workspace)
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2753,30 +3167,38 @@ def writer_workspace(path: str) -> dict[str, object]:
 
 
 @app.get("/api/writer/projects")
-def writer_projects() -> dict[str, object]:
+def writer_projects(request: Request) -> dict[str, object]:
     try:
-        return {"items": writer_tools.list_projects()}
+        owner_user_id = _writer_owner_scope(request)
+        return {"items": writer_tools.list_projects(owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/projects")
-def writer_project_create(request: WriterProjectCreateRequest) -> dict[str, object]:
+def writer_project_create(payload: WriterProjectCreateRequest, request: Request) -> dict[str, object]:
     try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         default_name = ""
-        files = _writer_library_files_from_refs(request.library_files) if request.library_files else _writer_library_files(request.knowledge_ids)
+        files = _writer_library_files_from_refs(payload.library_files, request) if payload.library_files else _writer_library_files(payload.knowledge_ids, request)
         if files:
             default_name = str(files[0]["title"]) if files else ""
         project = writer_tools.create_project(
-            request.name or default_name or "Untitled writing project",
-            project_type=request.project_type,
-            description=request.description,
-            writing_strategy=request.writing_strategy,
-            design_strategy=request.design_strategy,
+            payload.name or default_name or "Untitled writing project",
+            project_type=payload.project_type,
+            description=payload.description,
+            writing_strategy=payload.writing_strategy,
+            design_strategy=payload.design_strategy,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
         if files:
             writer_tools.set_project_library_files(str(project["id"]), files)
-        return _writer_project_payload(str(project["id"]))
+        return _writer_project_payload(str(project["id"]), owner_user_id=_cloud_scoped_owner_id(context))
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2784,9 +3206,9 @@ def writer_project_create(request: WriterProjectCreateRequest) -> dict[str, obje
 
 
 @app.get("/api/writer/projects/{project_id}")
-def writer_project_read(project_id: str) -> dict[str, object]:
+def writer_project_read(project_id: str, request: Request) -> dict[str, object]:
     try:
-        return _writer_project_payload(project_id)
+        return _writer_project_payload(project_id, owner_user_id=_writer_owner_scope(request))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2794,15 +3216,19 @@ def writer_project_read(project_id: str) -> dict[str, object]:
 
 
 @app.post("/api/writer/projects/{project_id}/knowledge")
-def writer_project_confirm_knowledge(project_id: str, request: WriterProjectKnowledgeRequest) -> dict[str, object]:
-    if not request.knowledge_ids and not request.library_files:
+def writer_project_confirm_knowledge(project_id: str, payload: WriterProjectKnowledgeRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids and not payload.library_files:
         raise HTTPException(status_code=400, detail="Please select at least one knowledge file")
     try:
-        files = _writer_library_files_from_refs(request.library_files) if request.library_files else _writer_library_files(request.knowledge_ids)
+        owner_user_id = _writer_owner_scope(request)
+        _writer_load_project(project_id, owner_user_id=owner_user_id)
+        files = _writer_library_files_from_refs(payload.library_files, request) if payload.library_files else _writer_library_files(payload.knowledge_ids, request)
         if not files:
             raise HTTPException(status_code=400, detail="Selected knowledge files have no readable Markdown path")
         writer_tools.set_project_library_files(project_id, files)
-        return _writer_project_payload(project_id)
+        return _writer_project_payload(project_id, owner_user_id=owner_user_id)
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2810,15 +3236,16 @@ def writer_project_confirm_knowledge(project_id: str, request: WriterProjectKnow
 
 
 @app.post("/api/writer/projects/{project_id}/topics")
-def writer_project_generate_topics(project_id: str) -> dict[str, object]:
+def writer_project_generate_topics(project_id: str, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         materials = _require_project_materials(project)
         setting = api_settings.active_setting()
         result = deepseek_client.generate_topics(materials, setting=setting)
         suggestions = result.model_dump().get("suggestions", [])
         updated = writer_tools.update_project(project_id, topics=suggestions)
-        return {**_writer_project_payload(project_id), "topics": updated.get("topics", [])}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "topics": updated.get("topics", [])}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -2828,12 +3255,14 @@ def writer_project_generate_topics(project_id: str) -> dict[str, object]:
 
 
 @app.post("/api/writer/projects/{project_id}/topic")
-def writer_project_select_topic(project_id: str, request: WriterProjectTopicRequest) -> dict[str, object]:
-    if not request.topic:
+def writer_project_select_topic(project_id: str, payload: WriterProjectTopicRequest, request: Request) -> dict[str, object]:
+    if not payload.topic:
         raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨涓€涓€夐")
     try:
-        writer_tools.update_project(project_id, topic=request.topic)
-        return _writer_project_payload(project_id)
+        owner_user_id = _writer_owner_scope(request)
+        _writer_load_project(project_id, owner_user_id=owner_user_id)
+        writer_tools.update_project(project_id, topic=payload.topic)
+        return _writer_project_payload(project_id, owner_user_id=owner_user_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2841,11 +3270,12 @@ def writer_project_select_topic(project_id: str, request: WriterProjectTopicRequ
 
 
 @app.post("/api/writer/projects/{project_id}/draft")
-def writer_project_generate_draft(project_id: str, request: WriterProjectDraftRequest) -> dict[str, object]:
+def writer_project_generate_draft(project_id: str, payload: WriterProjectDraftRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         materials = _require_project_materials(project)
-        topic = request.topic or project.get("topic")
+        topic = payload.topic or project.get("topic")
         if not isinstance(topic, dict) or not topic:
             raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨涓€涓€夐")
         setting = api_settings.active_setting()
@@ -2867,7 +3297,7 @@ def writer_project_generate_draft(project_id: str, request: WriterProjectDraftRe
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
             article_path=storage.storage_relative(article_path),
         )
-        return {**_writer_project_payload(project_id), "article": result.model_dump()}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "article": result.model_dump()}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -2877,17 +3307,18 @@ def writer_project_generate_draft(project_id: str, request: WriterProjectDraftRe
 
 
 @app.post("/api/writer/projects/{project_id}/revise")
-def writer_project_revise(project_id: str, request: WriterProjectReviseRequest) -> dict[str, object]:
-    if not request.instruction.strip():
+def writer_project_revise(project_id: str, payload: WriterProjectReviseRequest, request: Request) -> dict[str, object]:
+    if not payload.instruction.strip():
         raise HTTPException(status_code=400, detail="Please enter revision instructions")
     try:
-        project = writer_tools.load_project(project_id)
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         materials = _require_project_materials(project)
-        markdown = request.markdown if request.markdown is not None else str(project.get("article_markdown") or "")
+        markdown = payload.markdown if payload.markdown is not None else str(project.get("article_markdown") or "")
         if not markdown.strip():
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鍒濈")
         setting = api_settings.active_setting()
-        result = deepseek_client.revise_wechat_article(markdown, request.instruction, materials, setting=setting)
+        result = deepseek_client.revise_wechat_article(markdown, payload.instruction, materials, setting=setting)
         workspace = _writer_project_workspace(project_id)
         article_path = writer_tools.write_article(workspace, result.markdown)
         version_path = writer_tools.write_article(workspace, result.markdown, f"article_revised_{datetime.now().strftime('%H%M%S')}.md")
@@ -2899,7 +3330,7 @@ def writer_project_revise(project_id: str, request: WriterProjectReviseRequest) 
             cover_prompt=getattr(result, "cover_prompt", "") or project.get("cover_prompt"),
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
         )
-        return {**_writer_project_payload(project_id), "revision": result.model_dump(), "version_path": storage.storage_relative(version_path)}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "revision": result.model_dump(), "version_path": storage.storage_relative(version_path)}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -2909,15 +3340,16 @@ def writer_project_revise(project_id: str, request: WriterProjectReviseRequest) 
 
 
 @app.post("/api/writer/projects/{project_id}/image-suggestions")
-def writer_project_image_suggestions(project_id: str, request: WriterProjectImageSuggestionsRequest) -> dict[str, object]:
+def writer_project_image_suggestions(project_id: str, payload: WriterProjectImageSuggestionsRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
-        markdown = request.markdown if request.markdown is not None else str(project.get("article_markdown") or "")
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        markdown = payload.markdown if payload.markdown is not None else str(project.get("article_markdown") or "")
         if not markdown.strip():
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鏂囩珷鍒濈")
-        topic = request.topic if request.topic is not None else project.get("topic")
+        topic = payload.topic if payload.topic is not None else project.get("topic")
         setting = api_settings.active_setting()
-        content_image_count = max(1, min(3, int(request.content_image_count or 1)))
+        content_image_count = max(1, min(3, int(payload.content_image_count or 1)))
         result = deepseek_client.suggest_writer_images(
             markdown,
             topic=topic if isinstance(topic, dict) else None,
@@ -2931,7 +3363,7 @@ def writer_project_image_suggestions(project_id: str, request: WriterProjectImag
             content_image_prompts=result.content_image_prompts,
             image_suggestion_rationale=result.rationale,
         )
-        return {**_writer_project_payload(project_id), "suggestions": result.model_dump()}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "suggestions": result.model_dump()}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -2941,11 +3373,12 @@ def writer_project_image_suggestions(project_id: str, request: WriterProjectImag
 
 
 @app.post("/api/writer/projects/{project_id}/images")
-def writer_project_generate_images(project_id: str, request: WriterProjectImagesRequest) -> dict[str, object]:
+def writer_project_generate_images(project_id: str, payload: WriterProjectImagesRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
-        cover_prompt = request.cover_prompt or project.get("cover_prompt")
-        content_prompts = request.content_image_prompts or project.get("content_image_prompts") or []
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        cover_prompt = payload.cover_prompt or project.get("cover_prompt")
+        content_prompts = payload.content_image_prompts or project.get("content_image_prompts") or []
         if not cover_prompt and not content_prompts:
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鎴栧～鍐欓厤鍥炬彁绀鸿瘝")
         workspace = _writer_project_workspace(project_id)
@@ -2955,7 +3388,7 @@ def writer_project_generate_images(project_id: str, request: WriterProjectImages
             content_prompts=[str(item) for item in content_prompts],
         )
         writer_tools.update_project(project_id, images=result)
-        return {**_writer_project_payload(project_id), "images": result}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -2965,19 +3398,21 @@ def writer_project_generate_images(project_id: str, request: WriterProjectImages
 
 
 @app.post("/api/writer/projects/{project_id}/images/item")
-def writer_project_generate_image_item(project_id: str, request: WriterProjectImageItemRequest) -> dict[str, object]:
-    if request.kind not in {"cover", "content"}:
+def writer_project_generate_image_item(project_id: str, payload: WriterProjectImageItemRequest, request: Request) -> dict[str, object]:
+    if payload.kind not in {"cover", "content"}:
         raise HTTPException(status_code=400, detail="Image kind must be cover or content")
     try:
+        owner_user_id = _writer_owner_scope(request)
+        _writer_load_project(project_id, owner_user_id=owner_user_id)
         workspace = _writer_project_workspace(project_id)
         result = writer_tools.generate_writer_image_item(
             workspace,
-            request.kind,
-            request.prompt,
-            index=request.index,
+            payload.kind,
+            payload.prompt,
+            index=payload.index,
         )
         writer_tools.update_project(project_id, images=result)
-        return {**_writer_project_payload(project_id), "images": result}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -2985,19 +3420,20 @@ def writer_project_generate_image_item(project_id: str, request: WriterProjectIm
 
 
 @app.post("/api/writer/projects/{project_id}/format")
-def writer_project_format(project_id: str, request: WriterProjectFormatRequest) -> dict[str, object]:
+def writer_project_format(project_id: str, payload: WriterProjectFormatRequest, request: Request) -> dict[str, object]:
     try:
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         workspace = _writer_project_workspace(project_id)
-        project = writer_tools.load_project(project_id)
-        design_strategy = request.design_strategy if request.design_strategy is not None else str(project.get("design_strategy") or "")
+        design_strategy = payload.design_strategy if payload.design_strategy is not None else str(project.get("design_strategy") or "")
         result = writer_tools.format_article(
             workspace,
-            markdown=request.markdown,
-            theme=request.theme,
+            markdown=payload.markdown,
+            theme=payload.theme,
             design_strategy=design_strategy,
         )
-        writer_tools.update_project(project_id, html_path=result.get("path"), html_theme=request.theme, design_strategy=design_strategy)
-        return {**_writer_project_payload(project_id), "format": result}
+        writer_tools.update_project(project_id, html_path=result.get("path"), html_theme=payload.theme, design_strategy=design_strategy)
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "format": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3005,23 +3441,27 @@ def writer_project_format(project_id: str, request: WriterProjectFormatRequest) 
 
 
 @app.post("/api/writer/projects/{project_id}/publish/preflight")
-def writer_project_publish_preflight(project_id: str, request: WriterProjectPublishRequest) -> dict[str, object]:
+def writer_project_publish_preflight(project_id: str, payload: WriterProjectPublishRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能操作公众号发布预检")
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         workspace = _writer_project_workspace(project_id)
-        title = request.title or str(project.get("title") or project.get("name") or "")
-        digest = request.digest if request.digest is not None else project.get("digest")
-        result = writer_tools.publish_preflight(workspace, title, author=request.author or "Bobo", digest=str(digest or ""), cover_path=request.cover_path)
+        title = payload.title or str(project.get("title") or project.get("name") or "")
+        digest = payload.digest if payload.digest is not None else project.get("digest")
+        result = writer_tools.publish_preflight(workspace, title, author=payload.author or "Bobo", digest=str(digest or ""), cover_path=payload.cover_path)
         safe_digest = result.get("digest", str(digest or ""))
         writer_tools.update_project(
             project_id,
             preflight=result,
             publish_title=title,
-            publish_author=request.author or "Bobo",
+            publish_author=payload.author or "Bobo",
             publish_digest=safe_digest,
-            publish_cover_path=request.cover_path,
+            publish_cover_path=payload.cover_path,
         )
-        return {**_writer_project_payload(project_id), "preflight": result}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "preflight": result}
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3029,14 +3469,16 @@ def writer_project_publish_preflight(project_id: str, request: WriterProjectPubl
 
 
 @app.post("/api/writer/projects/{project_id}/publish")
-def writer_project_publish(project_id: str, request: WriterProjectPublishRequest) -> dict[str, object]:
+def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能发布到服务器公众号")
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         workspace = _writer_project_workspace(project_id)
-        title = request.title or str(project.get("publish_title") or project.get("title") or project.get("name") or "")
-        author = request.author or str(project.get("publish_author") or "Bobo")
-        digest = request.digest if request.digest is not None else project.get("publish_digest") or project.get("digest")
-        cover_path = request.cover_path or project.get("publish_cover_path")
+        title = payload.title or str(project.get("publish_title") or project.get("title") or project.get("name") or "")
+        author = payload.author or str(project.get("publish_author") or "Bobo")
+        digest = payload.digest if payload.digest is not None else project.get("publish_digest") or project.get("digest")
+        cover_path = payload.cover_path or project.get("publish_cover_path")
         preflight = writer_tools.publish_preflight(
             workspace,
             title,
@@ -3056,7 +3498,7 @@ def writer_project_publish(project_id: str, request: WriterProjectPublishRequest
             cover_path=str(cover_path) if cover_path else None,
         )
         writer_tools.update_project(project_id, preflight=preflight, publish_result=result, status="published" if result.get("returncode") == 0 else "active")
-        return {**_writer_project_payload(project_id), "preflight": preflight, "publish": result}
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "preflight": preflight, "publish": result}
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -3066,79 +3508,89 @@ def writer_project_publish(project_id: str, request: WriterProjectPublishRequest
 
 
 @app.post("/api/writer/projects/{project_id}/advance")
-def writer_project_advance(project_id: str, request: WriterProjectAdvanceRequest) -> dict[str, object]:
+def writer_project_advance(project_id: str, payload: WriterProjectAdvanceRequest, request: Request) -> dict[str, object]:
     try:
-        project = writer_tools.load_project(project_id)
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         current_step = _writer_project_step(project)
-        step = request.step or _writer_project_next_action_for_project(project, current_step)
+        step = payload.step or _writer_project_next_action_for_project(project, current_step)
         if step == "confirm_knowledge":
             return writer_project_confirm_knowledge(
                 project_id,
-                WriterProjectKnowledgeRequest(knowledge_ids=request.knowledge_ids),
+                WriterProjectKnowledgeRequest(knowledge_ids=payload.knowledge_ids),
+                request,
             )
         if step == "generate_topics":
-            return writer_project_generate_topics(project_id)
+            return writer_project_generate_topics(project_id, request)
         if step == "select_topic":
             return writer_project_select_topic(
                 project_id,
-                WriterProjectTopicRequest(topic=request.topic or {}),
+                WriterProjectTopicRequest(topic=payload.topic or {}),
+                request,
             )
         if step == "generate_draft":
             return writer_project_generate_draft(
                 project_id,
-                WriterProjectDraftRequest(topic=request.topic),
+                WriterProjectDraftRequest(topic=payload.topic),
+                request,
             )
         if step == "revise":
             return writer_project_revise(
                 project_id,
                 WriterProjectReviseRequest(
-                    instruction=request.instruction or "",
-                    markdown=request.markdown,
+                    instruction=payload.instruction or "",
+                    markdown=payload.markdown,
                 ),
+                request,
             )
         if step == "suggest_images":
             return writer_project_image_suggestions(
                 project_id,
                 WriterProjectImageSuggestionsRequest(
-                    markdown=request.markdown,
-                    topic=request.topic,
+                    markdown=payload.markdown,
+                    topic=payload.topic,
                 ),
+                request,
             )
         if step == "generate_images":
             return writer_project_generate_images(
                 project_id,
                 WriterProjectImagesRequest(
-                    cover_prompt=request.cover_prompt,
-                    content_image_prompts=request.content_image_prompts,
+                    cover_prompt=payload.cover_prompt,
+                    content_image_prompts=payload.content_image_prompts,
                 ),
+                request,
             )
         if step == "format_article":
             return writer_project_format(
                 project_id,
-                WriterProjectFormatRequest(markdown=request.markdown),
+                WriterProjectFormatRequest(markdown=payload.markdown),
+                request,
             )
         if step == "run_preflight":
             return writer_project_publish_preflight(
                 project_id,
                 WriterProjectPublishRequest(
-                    title=request.title or "",
-                    author=request.author,
-                    digest=request.digest,
-                    cover_path=request.cover_path,
+                    title=payload.title or "",
+                    author=payload.author,
+                    digest=payload.digest,
+                    cover_path=payload.cover_path,
                 ),
+                request,
             )
         if step == "publish":
             return writer_project_publish(
                 project_id,
                 WriterProjectPublishRequest(
-                    title=request.title or "",
-                    author=request.author,
-                    digest=request.digest,
-                    cover_path=request.cover_path,
+                    title=payload.title or "",
+                    author=payload.author,
+                    digest=payload.digest,
+                    cover_path=payload.cover_path,
                 ),
+                request,
             )
         if step == "done":
-            return _writer_project_payload(project_id)
+            return _writer_project_payload(project_id, owner_user_id=owner_user_id)
         raise HTTPException(status_code=400, detail=f"Unknown writer step: {step}")
     except HTTPException:
         raise
@@ -3149,26 +3601,30 @@ def writer_project_advance(project_id: str, request: WriterProjectAdvanceRequest
 
 
 @app.post("/api/writer/topics")
-def writer_topics(request: WriterTopicRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨鐭ヨ瘑鏂囦欢")
+def writer_topics(payload: WriterTopicRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids:
+        raise HTTPException(status_code=400, detail="请先选择知识文件")
     try:
         setting = api_settings.active_setting()
-        result = deepseek_client.generate_topics(_writer_materials(request.knowledge_ids), setting=setting)
+        result = deepseek_client.generate_topics(_writer_materials(payload.knowledge_ids, request), setting=setting)
         return result.model_dump()
+    except HTTPException:
+        raise
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/article")
-def writer_article(request: WriterArticleRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨鐭ヨ瘑鏂囦欢")
+def writer_article(payload: WriterArticleRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids:
+        raise HTTPException(status_code=400, detail="请先选择知识文件")
     try:
         setting = api_settings.active_setting()
         result = deepseek_client.generate_wechat_article(
-            request.topic,
-            _writer_materials(request.knowledge_ids),
+            payload.topic,
+            _writer_materials(payload.knowledge_ids, request),
             setting=setting,
         )
         workspace = writer_tools.dated_workspace(result.title)
@@ -3178,25 +3634,29 @@ def writer_article(request: WriterArticleRequest) -> dict[str, object]:
             "workspace": storage.storage_relative(workspace),
             "article_path": storage.storage_relative(article_path),
         }
+    except HTTPException:
+        raise
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/revise")
-def writer_revise(request: WriterReviseRequest) -> dict[str, object]:
-    if not request.knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨鐭ヨ瘑鏂囦欢")
-    if not request.instruction.strip():
+def writer_revise(payload: WriterReviseRequest, request: Request) -> dict[str, object]:
+    if not payload.knowledge_ids:
+        raise HTTPException(status_code=400, detail="请先选择知识文件")
+    if not payload.instruction.strip():
         raise HTTPException(status_code=400, detail="Please enter revision instructions")
     try:
         setting = api_settings.active_setting()
         result = deepseek_client.revise_wechat_article(
-            request.markdown,
-            request.instruction,
-            _writer_materials(request.knowledge_ids),
+            payload.markdown,
+            payload.instruction,
+            _writer_materials(payload.knowledge_ids, request),
             setting=setting,
         )
-        workspace = writer_tools.resolve_workspace(request.workspace) if request.workspace else writer_tools.dated_workspace("article")
+        workspace = _resolve_legacy_writer_workspace(payload.workspace, request) if payload.workspace else writer_tools.dated_workspace("article")
         article_path = writer_tools.write_article(workspace, result.markdown)
         version_path = writer_tools.write_article(
             workspace,
@@ -3209,20 +3669,26 @@ def writer_revise(request: WriterReviseRequest) -> dict[str, object]:
             "article_path": storage.storage_relative(article_path),
             "version_path": storage.storage_relative(version_path),
         }
+    except HTTPException:
+        raise
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/images")
-def writer_images(request: WriterImagesRequest) -> dict[str, object]:
+def writer_images(payload: WriterImagesRequest, request: Request) -> dict[str, object]:
     try:
-        workspace = writer_tools.resolve_workspace(request.workspace)
+        workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         result = writer_tools.generate_writer_images(
             workspace,
-            cover_prompt=request.cover_prompt,
-            content_prompts=request.content_image_prompts,
+            cover_prompt=payload.cover_prompt,
+            content_prompts=payload.content_image_prompts,
         )
         return {"workspace": storage.storage_relative(workspace), **result}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -3242,9 +3708,11 @@ def writer_image_suggestions(request: WriterImageSuggestionsRequest) -> dict[str
 
 
 @app.get("/api/writer/file")
-def writer_file(path: str) -> FileResponse:
+def writer_file(path: str, request: Request) -> FileResponse:
     try:
-        return FileResponse(writer_tools.resolve_writer_file(path))
+        return FileResponse(_resolve_legacy_writer_file(path, request))
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3252,40 +3720,43 @@ def writer_file(path: str) -> FileResponse:
 
 
 @app.post("/api/writer/format")
-def writer_format(request: WriterFormatRequest) -> dict[str, object]:
+def writer_format(payload: WriterFormatRequest, request: Request) -> dict[str, object]:
     try:
-        workspace = writer_tools.resolve_workspace(request.workspace)
+        workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         result = writer_tools.format_article(
             workspace,
-            markdown=request.markdown,
-            theme=request.theme,
-            design_strategy=request.design_strategy or "",
+            markdown=payload.markdown,
+            theme=payload.theme,
+            design_strategy=payload.design_strategy or "",
         )
         return {"workspace": storage.storage_relative(workspace), **result}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/publish")
-def writer_publish(request: WriterPublishRequest) -> dict[str, object]:
+def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str, object]:
     try:
-        workspace = writer_tools.resolve_workspace(request.workspace)
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能发布到服务器公众号")
+        workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         preflight = writer_tools.publish_preflight(
             workspace,
-            request.title,
-            author=request.author or "Bobo",
-            digest=request.digest,
-            cover_path=request.cover_path,
+            payload.title,
+            author=payload.author or "Bobo",
+            digest=payload.digest,
+            cover_path=payload.cover_path,
         )
-        digest = preflight.get("digest", request.digest or "")
+        digest = preflight.get("digest", payload.digest or "")
         if not preflight["ok"]:
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
         result = writer_tools.publish_draft(
             workspace,
-            request.title,
-            author=request.author or "Bobo",
+            payload.title,
+            author=payload.author or "Bobo",
             digest=str(digest or ""),
-            cover_path=request.cover_path,
+            cover_path=payload.cover_path,
         )
         return {"workspace": storage.storage_relative(workspace), "preflight": preflight, **result}
     except HTTPException:
@@ -3295,38 +3766,49 @@ def writer_publish(request: WriterPublishRequest) -> dict[str, object]:
 
 
 @app.post("/api/writer/publish/preflight")
-def writer_publish_preflight(request: WriterPublishRequest) -> dict[str, object]:
+def writer_publish_preflight(payload: WriterPublishRequest, request: Request) -> dict[str, object]:
     try:
-        workspace = writer_tools.resolve_workspace(request.workspace)
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能操作公众号发布预检")
+        workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         result = writer_tools.publish_preflight(
             workspace,
-            request.title,
-            author=request.author or "Bobo",
-            digest=request.digest,
-            cover_path=request.cover_path,
+            payload.title,
+            author=payload.author or "Bobo",
+            digest=payload.digest,
+            cover_path=payload.cover_path,
         )
         return {"workspace": storage.storage_relative(workspace), **result}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/writer/publish/ip-check")
-def writer_publish_ip_check() -> dict[str, object]:
+def writer_publish_ip_check(request: Request) -> dict[str, object]:
     try:
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能检测服务器公众号 IP")
         return writer_tools.check_wechat_publish_ip()
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/writer/publish/token/refresh")
-def writer_publish_token_refresh() -> dict[str, object]:
+def writer_publish_token_refresh(request: Request) -> dict[str, object]:
     try:
+        _require_local_or_cloud_admin(request, "公网内测普通用户不能刷新服务器公众号 Token")
         return writer_tools.refresh_wechat_access_token()
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 if not getattr(app.state, "api_v2_contracts_mounted", False):
+    app.include_router(auth_router)
+    app.include_router(jobs_router)
     app.include_router(api_v2_router)
     app.include_router(pages_router)
     app.state.api_v2_contracts_mounted = True

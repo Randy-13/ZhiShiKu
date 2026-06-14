@@ -81,6 +81,15 @@ PRIMARY_SECTIONS: tuple[ShellSection, ...] = (
         purpose="Create articles, Xiaohongshu posts, short-video scripts, and long-video scripts from all libraries.",
     ),
     ShellSection(
+        id="library",
+        label="Library",
+        nav_label="知识库",
+        nav_description="管理三库文件和知识正文",
+        route="/library",
+        priority="P2",
+        purpose="Manage raw, focus, and perspective Markdown files, edit metadata, and maintain saved knowledge.",
+    ),
+    ShellSection(
         id="settings",
         label="Settings",
         nav_label="设置中心",
@@ -164,6 +173,15 @@ WORKSPACE_ENTRIES: tuple[WorkspaceEntry, ...] = (
         surface="main_workspace",
     ),
     WorkspaceEntry(
+        id="library-files",
+        label="Knowledge library",
+        route="/library",
+        shell_section="library",
+        capability_id="manage_libraries",
+        priority="P2",
+        surface="main_workspace",
+    ),
+    WorkspaceEntry(
         id="settings-center",
         label="Settings center",
         route="/settings",
@@ -217,6 +235,13 @@ WORKSPACE_PLACEMENTS: tuple[WorkspacePlacement, ...] = (
         primary_region="workspace",
         secondary_region="global_library",
         interaction_stage="quote_libraries_to_publishable_content",
+    ),
+    WorkspacePlacement(
+        capability_id="manage_libraries",
+        shell_section="library",
+        primary_region="workspace",
+        secondary_region="global_library",
+        interaction_stage="edit_library_markdown_and_metadata",
     ),
     WorkspacePlacement(
         capability_id="configure_system",
