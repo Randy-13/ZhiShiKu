@@ -275,7 +275,8 @@ function fillAsrSettingsForm(item = {}) {
 }
 
 async function loadAsrSettings() {
-  const data = await requestJson("/api/asr-settings");
+  const payload = await requestJson("/api/v2/settings/asr");
+  const data = payload?.data || {};
   state.asrSettings = data.item || {};
   fillAsrSettingsForm(state.asrSettings);
 }
@@ -314,11 +315,12 @@ async function saveAsrSettings(event) {
   event.preventDefault();
   els.saveAsrSettings.disabled = true;
   try {
-    const data = await requestJson("/api/asr-settings", {
+    const payload = await requestJson("/api/v2/settings/asr", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectAsrPayload()),
     });
+    const data = payload?.data || {};
     state.asrSettings = data.item || {};
     fillAsrSettingsForm(state.asrSettings);
     await loadDependencies();
@@ -333,11 +335,12 @@ async function saveAsrSettings(event) {
 async function testAsrSettings() {
   els.testAsrSettings.disabled = true;
   try {
-    const data = await requestJson("/api/asr-settings/test", {
+    const payload = await requestJson("/api/v2/settings/asr/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectAsrPayload()),
     });
+    const data = payload?.data || {};
     showToast(data.message || "ASR \u914d\u7f6e\u53ef\u7528");
   } catch (error) {
     showToast(error.message);

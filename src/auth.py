@@ -433,6 +433,52 @@ def create_invitation(conn: sqlite3.Connection, *, role: str = "member", max_use
     }
 
 
+def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, email, username, role, status, created_at, updated_at, last_login_at
+        FROM users
+        ORDER BY created_at DESC
+        """
+    ).fetchall()
+    return [_user_payload(row) for row in rows]
+
+
+def list_invitations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, code, role, max_uses, used_count, expires_at, created_at, status
+        FROM invitations
+        ORDER BY created_at DESC
+        """
+    ).fetchall()
+    return [_invitation_payload(row) for row in rows]
+
+
+def update_user_status(conn: sqlite3.Connection, user_id: str, status_value: str, actor_user_id: str) -> dict[str, Any]:
+    normalized = status_value.strip().lower()
+    if normalized not in {"active", "disabled"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号状态只能是 active 或 disabled")
+    if user_id == actor_user_id and normalized != "active":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能停用当前登录的管理员账号")
+    row = get_user(conn, user_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    timestamp = now_iso()
+    conn.execute(
+        "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
+        (normalized, timestamp, user_id),
+    )
+    if normalized != "active":
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (timestamp, user_id),
+        )
+    conn.commit()
+    updated = get_user(conn, user_id)
+    return _user_payload(updated)
+
+
 def bootstrap_admin(
     conn: sqlite3.Connection,
     *,
@@ -527,4 +573,30 @@ def _context_payload(user: sqlite3.Row | dict[str, Any], workspace: sqlite3.Row 
             "name": workspace["name"],
             "ownerUserId": workspace["owner_user_id"],
         },
+    }
+
+
+def _user_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "username": row["username"],
+        "role": row["role"],
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "lastLoginAt": row["last_login_at"],
+    }
+
+
+def _invitation_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "code": row["code"],
+        "role": row["role"],
+        "maxUses": row["max_uses"],
+        "usedCount": row["used_count"],
+        "expiresAt": row["expires_at"],
+        "createdAt": row["created_at"],
+        "status": row["status"],
     }

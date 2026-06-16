@@ -1318,6 +1318,72 @@ def test_v2_settings_center_reads_and_saves_web_api_and_asr_settings():
     assert asr_payload["item"]["configured"] is True
     assert "asr-secret-key" not in str(asr_payload)
 
+    image_response = client.post(
+        "/api/v2/settings/image",
+        json={
+            "name": "Image Fixture",
+            "provider": "compatible",
+            "base_url": "https://image.example.test/v1",
+            "model": "image-fixture-model",
+            "api_key": "img-secret-key",
+            "size": "1024x1024",
+            "quality": "auto",
+            "timeout": 90,
+            "make_active": True,
+        },
+    )
+    assert image_response.status_code == 200
+    image_payload = image_response.json()["data"]
+    assert image_payload["ok"] is True, image_payload
+    assert image_payload["item"]["api_key_masked"] == "img-...-key"
+    assert image_payload["active_id"] == image_payload["item"]["id"]
+    assert "img-secret-key" not in str(image_payload)
+
+
+def test_v2_asr_test_route_runs_real_dashscope_verification_and_reuses_saved_key(monkeypatch):
+    client = TestClient(create_app())
+
+    saved = client.post(
+        "/api/v2/settings/asr",
+        json={
+            "provider": "compatible",
+            "base_url": "https://asr.example.com/v1",
+            "model": "paraformer-v1",
+            "api_key": "saved-asr-secret",
+            "timeout": 45,
+        },
+    )
+    assert saved.status_code == 200
+
+    captured = {}
+
+    def fake_transcribe(url, setting):
+        captured["url"] = url
+        captured["setting"] = dict(setting)
+        return {"text": "ok"}
+
+    monkeypatch.setattr(api_v2, "transcribe_audio_url", fake_transcribe)
+
+    tested = client.post(
+        "/api/v2/settings/asr/test",
+        json={
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/api/v1",
+            "model": "paraformer-v2",
+            "api_key": "",
+            "timeout": 30,
+        },
+    )
+
+    assert tested.status_code == 200
+    payload = tested.json()["data"]
+    assert payload["ok"] is True
+    assert payload["message"] == "ASR API verified with a real transcription request."
+    assert captured["url"].endswith("hello_world_female2.wav")
+    assert captured["setting"]["api_key"] == "saved-asr-secret"
+    assert captured["setting"]["provider"] == "dashscope"
+    assert captured["setting"]["model"] == "paraformer-v2"
+
 
 def test_v2_create_article_project_uses_library_files_and_writer_flow(monkeypatch):
     monkeypatch.setattr(api_v2.api_settings, "active_setting", lambda: {"api_key": "test-key", "model": "test-model"})
@@ -2070,6 +2136,40 @@ def test_v2_collect_inspect_link_keeps_public_article_with_login_nav_accessible(
     assert "Access Status: accessible" in draft_payload["markdown"]
     assert "公共政策正文段落 59" in draft_payload["markdown"]
     assert "登录墙" not in draft_payload["markdown"]
+
+
+def test_v2_collect_webpage_text_extraction_cleans_navigation_noise(monkeypatch):
+    html = """
+    <html>
+      <head><title>Article Title</title></head>
+      <body>
+        <header>Home Login Sign up</header>
+        <main>
+          <article>
+            <h1>Article Title</h1>
+            <p>First substantive paragraph with enough content to be considered part of the main article.</p>
+            <p>Second substantive paragraph with even more content to keep the body long enough for extraction.</p>
+          </article>
+        </main>
+        <footer>Related links Previous Next</footer>
+      </body>
+    </html>
+    """
+
+    def fake_fetch_url_bytes(url: str, max_bytes: int) -> dict[str, object]:
+        return {
+            "body": html.encode("utf-8"),
+            "content_type": "text/html; charset=utf-8",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(api_v2, "_fetch_url_bytes", fake_fetch_url_bytes)
+    text = api_v2._fetch_webpage_text("https://example.com/article")
+
+    assert text["title"] == "Article Title"
+    assert "Home Login" not in text["text"]
+    assert "First substantive paragraph" in text["text"]
+    assert "Second substantive paragraph" in text["text"]
 
 
 def test_v2_collect_raw_markdown_extracts_wechat_with_browser_payload(monkeypatch):

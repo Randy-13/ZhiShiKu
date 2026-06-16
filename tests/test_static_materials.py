@@ -70,3 +70,27 @@ def test_frontend_loads_v2_contracts_progressively():
     assert 'requestJson("/api/v2/settings/overview")' in script
     assert 'data-contract-loaded", "true"' in script
     assert "function renderSettingsOverviewStatus" in script
+
+
+def test_legacy_static_page_no_longer_exposes_graph_or_retrieval_ui():
+    soup = parse_index()
+    script = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert soup.find(id="learnKnowledgeWorkspace") is None
+    assert soup.find(id="graphCanvas") is None
+    assert soup.find(id="retrievalPanel") is None
+    assert 'requestJson("/api/graph")' not in script
+    assert 'requestJson("/api/retrieval/chat"' not in script
+    assert 'requestJson("/api/knowledge/ingest-to-graph"' not in script or 'els.ingestKnowledge?.addEventListener("click", ingestSelectedKnowledgeToGraph);' not in script
+    assert 'requestJson("/api/knowledge/delete-not-ingested"' not in script or 'els.deleteNotIngestedKnowledge?.addEventListener("click", deleteSelectedNotIngestedKnowledge);' not in script
+    assert 'els.ingestKnowledge?.addEventListener("click", ingestSelectedKnowledgeToGraph);' not in script
+    assert 'els.deleteNotIngestedKnowledge?.addEventListener("click", deleteSelectedNotIngestedKnowledge);' not in script
+
+
+def test_legacy_static_page_graph_shells_are_removed():
+    script = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "async function ingestSelectedKnowledgeToGraph" not in script
+    assert "async function deleteSelectedNotIngestedKnowledge" not in script
+    assert "state.graph.path.length" not in script
+    assert "exitGraphNode()" not in script

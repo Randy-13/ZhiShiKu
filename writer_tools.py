@@ -637,6 +637,18 @@ def _replace_local_images_with_wechat_urls(html_text: str, base_dir: Path, acces
     return html_text, uploaded
 
 
+def prepare_publish_html_with_wechat_images(
+    workspace: Path,
+    html_path: Path,
+    access_token: str,
+) -> tuple[Path, str, list[dict[str, str]]]:
+    publish_html_path = prepare_html_for_publish(workspace, html_path)
+    html_text = publish_html_path.read_text(encoding="utf-8")
+    html_text, uploaded_images = _replace_local_images_with_wechat_urls(html_text, publish_html_path.parent, access_token)
+    publish_html_path.write_text(html_text, encoding="utf-8")
+    return publish_html_path, html_text, uploaded_images
+
+
 def publish_draft_builtin(
     workspace: Path,
     title: str,
@@ -651,7 +663,6 @@ def publish_draft_builtin(
         html_path = workspace / "formatted.html"
     if not html_path.exists():
         raise FileNotFoundError("formatted.html 不存在，请先执行美编排版")
-    publish_html_path = prepare_html_for_publish(workspace, html_path)
     cover = Path(cover_path) if cover_path else workspace / "cover.png"
     if not cover.is_absolute():
         cover = storage.ROOT / cover
@@ -660,9 +671,7 @@ def publish_draft_builtin(
 
     access_token = wechat_access_token()
     thumb_media_id = _wechat_upload_cover(access_token, cover)
-    html_text = publish_html_path.read_text(encoding="utf-8")
-    html_text, uploaded_images = _replace_local_images_with_wechat_urls(html_text, publish_html_path.parent, access_token)
-    publish_html_path.write_text(html_text, encoding="utf-8")
+    publish_html_path, html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token)
     payload = {
         "articles": [
             {
@@ -1327,9 +1336,18 @@ def _run_python(command: list[str], cwd: Path | None = None, timeout: float = 18
 def fallback_markdown_to_html(markdown_text: str, title: str = "") -> str:
     lines = markdown_text.splitlines()
     body: list[str] = []
-    in_list = False
+    list_mode: str | None = None
     in_code = False
     code_lines: list[str] = []
+
+    def close_list() -> None:
+        nonlocal list_mode
+        if list_mode == "ul":
+            body.append("</ul>")
+        elif list_mode == "ol":
+            body.append("</ol>")
+        list_mode = None
+
     for raw in lines:
         line = raw.rstrip()
         if line.startswith("```"):
@@ -1340,43 +1358,42 @@ def fallback_markdown_to_html(markdown_text: str, title: str = "") -> str:
                 code_lines = []
                 in_code = False
             else:
-                if in_list:
-                    body.append("</ul>")
-                    in_list = False
+                close_list()
                 in_code = True
             continue
         if in_code:
             code_lines.append(raw)
             continue
         if not line.strip():
-            if in_list:
-                body.append("</ul>")
-                in_list = False
+            close_list()
             continue
         if line.startswith("# "):
             title = title or line[2:].strip()
             continue
         if line.startswith("## "):
-            if in_list:
-                body.append("</ul>")
-                in_list = False
+            close_list()
             body.append(f"<h2>{html.escape(line[3:].strip())}</h2>")
             continue
         if line.startswith("### "):
-            if in_list:
-                body.append("</ul>")
-                in_list = False
+            close_list()
             body.append(f"<h3>{html.escape(line[4:].strip())}</h3>")
             continue
         if line.startswith(("- ", "* ")):
-            if not in_list:
+            if list_mode != "ul":
+                close_list()
                 body.append("<ul>")
-                in_list = True
+                list_mode = "ul"
             body.append(f"<li>{html.escape(line[2:].strip())}</li>")
             continue
-        if in_list:
-            body.append("</ul>")
-            in_list = False
+        ordered_match = re.match(r"^\d+(?:[.)]|、)\s*(.*)$", line)
+        if ordered_match:
+            if list_mode != "ol":
+                close_list()
+                body.append("<ol>")
+                list_mode = "ol"
+            body.append(f"<li>{html.escape(ordered_match.group(1).strip())}</li>")
+            continue
+        close_list()
         image_match = re.match(r"!\[(.*?)\]\((.*?)\)", line)
         if image_match:
             alt, src = image_match.groups()
@@ -1386,8 +1403,7 @@ def fallback_markdown_to_html(markdown_text: str, title: str = "") -> str:
             )
             continue
         body.append(f"<p>{html.escape(line)}</p>")
-    if in_list:
-        body.append("</ul>")
+    close_list()
     if in_code:
         body.append("<pre><code>" + html.escape("\n".join(code_lines)) + "</code></pre>")
     return f"""<!doctype html>
@@ -1523,10 +1539,11 @@ def publish_draft(
         html_path = workspace / "formatted.html"
     if not html_path.exists():
         raise FileNotFoundError("formatted.html 不存在，请先执行美编排版")
-    publish_html_path = prepare_html_for_publish(workspace, html_path)
     cover = Path(cover_path) if cover_path else workspace / "cover.png"
     if not cover.is_absolute():
         cover = storage.ROOT / cover
+    access_token = wechat_access_token()
+    publish_html_path, _html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token)
 
     command = [
         str(PUBLISHER_SCRIPT),
@@ -1552,6 +1569,7 @@ def publish_draft(
             "author": author or "Bobo",
             "content_path": _relative(publish_html_path),
             "source_content_path": _relative(html_path),
+            "uploaded_content_images": uploaded_images,
             "cover_path": _relative(cover) if cover.exists() else str(cover),
             "timeout": True,
             "timeout_seconds": exc.timeout,
@@ -1572,6 +1590,7 @@ def publish_draft(
         "source_content_path": _relative(html_path),
         "invalidated_token_cache": invalidated_token,
         "cover_path": _relative(cover) if cover.exists() else str(cover),
+        "uploaded_content_images": uploaded_images,
     }
     media_ids = re.findall(r"media_id[:：]\s*([A-Za-z0-9_\-]+)", completed.stdout + "\n" + completed.stderr)
     if media_ids:

@@ -3,10 +3,13 @@ import type {
   ApiSettingInput,
   ApiSettingsPayload,
   ApiTestResult,
+  AsrSettingInput,
+  AsrSettingsPayload,
   BilibiliCookieLoginResult,
   BilibiliCookieStatus,
   ImageApiSettingInput,
   ImageApiSettingsPayload,
+  MediaDependencyStatus,
   TrashStatus,
   WorkbenchSettings,
 } from "./api";
@@ -40,72 +43,96 @@ export const settingsApi = {
     });
   },
 
-  apiSettings() {
-    return requestJson<ApiSettingsPayload>("/api/api-settings");
+  mediaDependencies() {
+    return requestJson<MediaDependencyStatus>("/api/media/dependencies");
   },
 
-  saveApiSetting(setting: ApiSettingInput) {
-    return requestJson<ApiSettingsPayload>("/api/api-settings", {
+  async asrSettings(): Promise<AsrSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>("/api/v2/settings/asr"));
+  },
+
+  async saveAsrSetting(setting: AsrSettingInput): Promise<AsrSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>("/api/v2/settings/asr", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(setting),
-    });
+    }));
   },
 
-  setActiveApiSetting(id: string) {
-    return requestJson<ApiSettingsPayload>("/api/api-settings/active", {
+  async testAsrSetting(setting: AsrSettingInput): Promise<AsrSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>("/api/v2/settings/asr/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(setting),
+    }));
+  },
+
+  async apiSettings(): Promise<ApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiSettingsPayload>>("/api/v2/settings/api"));
+  },
+
+  async saveApiSetting(setting: ApiSettingInput): Promise<ApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiSettingsPayload>>("/api/v2/settings/api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(setting),
+    }));
+  },
+
+  async setActiveApiSetting(id: string): Promise<ApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiSettingsPayload>>("/api/v2/settings/api/active", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
-    });
+    }));
   },
 
-  deleteApiSetting(id: string) {
-    return requestJson<ApiSettingsPayload>(`/api/api-settings/${encodeURIComponent(id)}`, {
+  async deleteApiSetting(id: string): Promise<ApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiSettingsPayload>>(`/api/v2/settings/api/${encodeURIComponent(id)}`, {
       method: "DELETE",
-    });
+    }));
   },
 
-  testApiSetting(setting: ApiSettingInput) {
-    return requestJson<ApiTestResult>("/api/api-settings/test", {
+  async testApiSetting(setting: ApiSettingInput): Promise<ApiTestResult> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiTestResult>>("/api/v2/settings/api/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ setting }),
-    });
+    }));
   },
 
-  imageApiSettings() {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings");
+  async imageApiSettings(): Promise<ImageApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ImageApiSettingsPayload>>("/api/v2/settings/image"));
   },
 
-  saveImageApiSetting(setting: ImageApiSettingInput) {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings", {
+  async saveImageApiSetting(setting: ImageApiSettingInput): Promise<ImageApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ImageApiSettingsPayload>>("/api/v2/settings/image", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(setting),
-    });
+    }));
   },
 
-  setActiveImageApiSetting(id: string) {
-    return requestJson<ImageApiSettingsPayload>("/api/image-api-settings/active", {
+  async setActiveImageApiSetting(id: string): Promise<ImageApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ImageApiSettingsPayload>>("/api/v2/settings/image/active", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
-    });
+    }));
   },
 
-  deleteImageApiSetting(id: string) {
-    return requestJson<ImageApiSettingsPayload>(`/api/image-api-settings/${encodeURIComponent(id)}`, {
+  async deleteImageApiSetting(id: string): Promise<ImageApiSettingsPayload> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ImageApiSettingsPayload>>(`/api/v2/settings/image/${encodeURIComponent(id)}`, {
       method: "DELETE",
-    });
+    }));
   },
 
-  testImageApiSetting(setting: ImageApiSettingInput, options?: { realTest?: boolean; prompt?: string }) {
-    return requestJson<ApiTestResult>("/api/image-api-settings/test", {
+  async testImageApiSetting(setting: ImageApiSettingInput, options?: { realTest?: boolean; prompt?: string }): Promise<ApiTestResult> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<ApiTestResult>>("/api/v2/settings/image/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ setting, real_test: options?.realTest ?? false, prompt: options?.prompt }),
-    });
+    }));
   },
 
   async trashStatus(): Promise<TrashStatus> {

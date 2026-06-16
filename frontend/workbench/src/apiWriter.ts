@@ -97,6 +97,14 @@ export const writerApi = {
     });
   },
 
+  updateWriterProjectStrategies(projectId: string, writingStrategy?: string, designStrategy?: string) {
+    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/strategies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ writing_strategy: writingStrategy, design_strategy: designStrategy }),
+    });
+  },
+
   generateWriterProjectDraft(projectId: string, topic?: Record<string, unknown>) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/draft`, {
       method: "POST",
@@ -113,11 +121,11 @@ export const writerApi = {
     });
   },
 
-  suggestWriterProjectImages(projectId: string, markdown?: string, topic?: Record<string, unknown>, contentImageCount = 1) {
+  suggestWriterProjectImages(projectId: string, markdown?: string, topic?: Record<string, unknown>, contentImageCount = 1, imageStylePreset?: string) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/image-suggestions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, topic, content_image_count: contentImageCount }),
+      body: JSON.stringify({ markdown, topic, content_image_count: contentImageCount, image_style_preset: imageStylePreset }),
     });
   },
 
@@ -145,6 +153,14 @@ export const writerApi = {
     });
   },
 
+  confirmWriterProjectDesign(projectId: string, confirmed = true) {
+    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/confirm-design`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed }),
+    });
+  },
+
   preflightWriterProject(projectId: string, title: string, digest?: string, coverPath?: string) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish/preflight`, {
       method: "POST",
@@ -159,5 +175,9 @@ export const writerApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, author: "Bobo", digest, cover_path: coverPath }),
     });
+  },
+
+  writerFileUrl(path: string) {
+    return `/api/writer/file?path=${encodeURIComponent(path)}`;
   },
 };

@@ -352,10 +352,7 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    item = dict(row)
-    if "effective_graph_status" in item:
-        item["graph_status"] = item.pop("effective_graph_status")
-    return item
+    return dict(row)
 
 
 def recover_markdown_entries(conn: sqlite3.Connection) -> int:
@@ -386,9 +383,9 @@ def recover_markdown_entries(conn: sqlite3.Connection) -> int:
             """
             INSERT INTO knowledge_entries (
                 image_ids, image_hash, markdown_path, title, created_at, updated_at,
-                status, error_message, topic, tags, graph_status, graph_error_message,
+                status, error_message, topic, tags,
                 source_type, source_ids, source_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, 'ready', NULL, ?, ?, 'not_ingested', NULL, 'recovered_markdown', '[]', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'ready', NULL, ?, ?, 'recovered_markdown', '[]', ?)
             """,
             (
                 "[]",
@@ -889,14 +886,7 @@ def list_knowledge(owner_user_id: str | None = None) -> list[dict[str, Any]]:
             params.append(owner_user_id)
         rows = conn.execute(
             f"""
-            SELECT
-                k.*,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM knowledge_node_links l WHERE l.knowledge_id = k.id
-                    ) THEN 'ingested'
-                    ELSE COALESCE(k.graph_status, 'not_ingested')
-                END AS effective_graph_status
+            SELECT k.*
             FROM knowledge_entries k
             WHERE {where}
             ORDER BY created_at DESC, id DESC
@@ -910,14 +900,7 @@ def get_knowledge_entry(entry_id: int) -> dict[str, Any]:
     with connect() as conn:
         row = conn.execute(
             """
-            SELECT
-                k.*,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM knowledge_node_links l WHERE l.knowledge_id = k.id
-                    ) THEN 'ingested'
-                    ELSE COALESCE(k.graph_status, 'not_ingested')
-                END AS effective_graph_status
+            SELECT k.*
             FROM knowledge_entries k
             WHERE k.id = ?
             """,
@@ -933,14 +916,7 @@ def get_knowledge_by_hash(image_hash: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
             """
-            SELECT
-                k.*,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM knowledge_node_links l WHERE l.knowledge_id = k.id
-                    ) THEN 'ingested'
-                    ELSE COALESCE(k.graph_status, 'not_ingested')
-                END AS effective_graph_status
+            SELECT k.*
             FROM knowledge_entries k
             WHERE k.image_hash = ?
             """,
@@ -981,7 +957,6 @@ def create_or_update_knowledge_entry(
                 """
                 UPDATE knowledge_entries
                 SET image_ids = ?, updated_at = ?, status = 'processing', error_message = NULL,
-                    graph_status = 'not_ingested', graph_error_message = NULL,
                     source_type = ?, source_ids = ?, source_hash = ?,
                     owner_user_id = COALESCE(?, owner_user_id),
                     workspace_id = COALESCE(?, workspace_id)
@@ -998,9 +973,9 @@ def create_or_update_knowledge_entry(
         cursor = conn.execute(
             """
             INSERT INTO knowledge_entries (
-                image_ids, image_hash, created_at, updated_at, status, graph_status,
+                image_ids, image_hash, created_at, updated_at, status,
                 source_type, source_ids, source_hash, owner_user_id, workspace_id
-            ) VALUES (?, ?, ?, ?, 'processing', 'not_ingested', ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?)
             """,
             (image_ids_json, scoped_hash, now, now, source_type, source_ids_json, image_hash, owner_user_id, workspace_id),
         )
@@ -1023,72 +998,6 @@ def update_knowledge_entry(entry_id: int, **fields: Any) -> dict[str, Any]:
         )
         conn.commit()
     return get_knowledge_entry(entry_id)
-
-
-def update_knowledge_graph_status(
-    entry_id: int,
-    graph_status: str,
-    graph_error_message: str | None = None,
-) -> dict[str, Any]:
-    if graph_status not in {"not_ingested", "pending", "ingested", "graph_error"}:
-        raise ValueError(f"Unsupported graph status: {graph_status}")
-    return update_knowledge_entry(
-        entry_id,
-        graph_status=graph_status,
-        graph_error_message=graph_error_message,
-    )
-
-
-def delete_not_ingested_knowledge(ids: list[int], owner_user_id: str | None = None) -> dict[str, Any]:
-    deleted: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    allowed_statuses = {"not_ingested", "graph_error"}
-    with connect() as conn:
-        for entry_id in ids:
-            owner_clause = " AND k.owner_user_id = ?" if owner_user_id else ""
-            params: list[Any] = [entry_id]
-            if owner_user_id:
-                params.append(owner_user_id)
-            row = conn.execute(
-                f"""
-                SELECT
-                    k.*,
-                    CASE
-                        WHEN EXISTS (
-                            SELECT 1 FROM knowledge_node_links l WHERE l.knowledge_id = k.id
-                        ) THEN 'ingested'
-                        ELSE COALESCE(k.graph_status, 'not_ingested')
-                    END AS effective_graph_status
-                FROM knowledge_entries k
-                WHERE k.id = ?{owner_clause}
-                """,
-                params,
-            ).fetchone()
-            item = row_to_dict(row)
-            if item is None:
-                skipped.append({"id": entry_id, "reason": "not_found"})
-                continue
-            graph_status = item.get("effective_graph_status") or item.get("graph_status") or "not_ingested"
-            if graph_status not in allowed_statuses:
-                skipped.append(
-                    {
-                        "id": entry_id,
-                        "title": item.get("title"),
-                        "graph_status": graph_status,
-                        "reason": "already_or_pending_ingested",
-                    }
-                )
-                continue
-            markdown_path = resolve_root_path(item.get("markdown_path"))
-            conn.execute("DELETE FROM knowledge_entries WHERE id = ?", (entry_id,))
-            deleted.append({"id": entry_id, "title": item.get("title"), "markdown_path": item.get("markdown_path")})
-            if markdown_path and markdown_path.exists() and markdown_path.is_file():
-                try:
-                    markdown_path.unlink()
-                except OSError as exc:
-                    skipped.append({"id": entry_id, "reason": f"file_delete_failed: {exc}"})
-        conn.commit()
-    return {"deleted": deleted, "skipped": skipped}
 
 
 def resolve_root_path(relative_or_absolute: str | None) -> Path | None:

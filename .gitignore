@@ -29,6 +29,8 @@ frontend/legacy/dist/
 frontend/workbench/node_modules/
 frontend/workbench/dist/
 frontend/workbench/dist-codex-verify/
+frontend/workbench/dist-served-*/
+frontend/workbench/.served-dist
 frontend/workbench/dev.*.log
 testusecase/
 workbench-debug.png

@@ -209,6 +209,7 @@ def curl_chat_completion(
         input=body,
         text=True,
         encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=float(resolved.get("timeout") or config.LLM_TIMEOUT),
         check=False,
@@ -370,13 +371,56 @@ def interpret_from_perspective(
             )
         )
     fallback = """
-You are the mining module of Knowledge Cool Research OS. Interpret the materials from the configured perspective.
+You are the mining module of Knowledge Cool Research OS.
+
+Interpret the materials only from the configured perspective and return JSON that matches the schema exactly.
+
 Perspective name: {{perspective_name}}
 Positioning: {{positioning}}
 Core goal: {{core_goal}}
 Stance: {{stance}}
-RTFC requirement: ground every judgment in the source materials, and include evidence_refs such as S1/S2 for each finding.
-Use a fixed five-part structure: criteria, core facts, deep analysis, risks/questions, and final action-oriented conclusion.
+Role: {{role}}
+Target subject: {{target_subject}}
+Purpose: {{purpose}}
+Focus dimensions: {{focus_dimensions}}
+Analysis questions: {{analysis_questions}}
+Output style: {{output_style}}
+Evidence rule: {{evidence_rule}}
+
+Hard requirements:
+1. Follow RTFC strictly: define the rule/standard first, stay on the target, anchor every key judgment in source facts, then give perspective-specific conclusions.
+2. Use a fixed five-part output logic:
+   - criteria
+   - core_facts
+   - deep_analysis
+   - risks_and_questions
+   - conclusion_and_actions
+3. core_facts and deep_analysis must use evidence_refs such as S1/S2/S3.
+4. deep_analysis must go beyond paraphrase. It should explain causal links, hidden tensions, decision tradeoffs, scenario implications, and what the material suggests but does not fully state.
+5. You may add limited contextual inference, but only when it is clearly derived from the sources. Do not invent outside facts. When something is inference rather than explicit fact, say so plainly in the interpretation text.
+6. risks_and_questions should capture uncertainty, missing evidence, contradictory signals, and what must be verified next.
+7. conclusion_and_actions should be concrete and perspective-specific, not generic summaries.
+
+Return JSON with this shape:
+{
+  "title": "string",
+  "perspective_name": "string",
+  "tags": ["string"],
+  "summary": "short paragraph",
+  "criteria": "the perspective's judging standard",
+  "core_facts": [
+    {"dimension": "string", "interpretation": "string", "evidence_refs": ["S1"]}
+  ],
+  "deep_analysis": [
+    {"dimension": "string", "interpretation": "string", "evidence_refs": ["S1", "S2"]}
+  ],
+  "risks_and_questions": ["string"],
+  "conclusion_and_actions": ["string"],
+  "findings": [],
+  "writing_implications": [],
+  "risks_and_limits": []
+}
+
 Materials:
 {{source_text}}
 """
@@ -649,10 +693,12 @@ def suggest_writer_images(
     article_markdown: str,
     topic: dict[str, Any] | None = None,
     content_image_count: int = 1,
+    image_style_preset: str = "",
     setting: dict[str, Any] | None = None,
 ) -> WriterImageSuggestionResult:
     topic_json = json.dumps(topic or {}, ensure_ascii=False)
     content_image_count = max(1, min(3, int(content_image_count or 1)))
+    style_clause = image_style_preset.strip() or "未指定风格预设时，默认使用适合公众号阅读的简洁信息图风格。"
     prompt = f"""
 你是微信公众号文章的视觉策划。请只生成图片建议，不要生成图片。
 
@@ -663,9 +709,13 @@ def suggest_writer_images(
 4. 图片文字必须要求“简体中文、少量文字、准确可读”。
 5. 封面图要适合公众号首图，主题明确，有吸引力，不要堆满文字。
 6. 正文配图优先用于解释数据对比、结构关系、流程、关键概念或读者痛点，不要重复封面图。
+7. 必须严格吸收下面的图片风格预设，把它落实到封面图和正文图的提示词里。
 
 选题：
 {topic_json}
+
+图片风格预设：
+{style_clause}
 
 当前文章 Markdown：
 {article_markdown[:14000]}

@@ -3,9 +3,12 @@ import type { FormEvent, ReactNode } from "react";
 import { Lock, LogIn, RefreshCw, Ticket } from "lucide-react";
 import { authApi } from "../api";
 import type { AuthContext } from "../api";
+import { AuroraHero } from "./ui/hero-2";
 
 type AuthGateProps = {
-  children: ReactNode;
+  children:
+    | ReactNode
+    | ((props: { context: AuthContext; onContextChange: (nextContext: AuthContext) => void }) => ReactNode);
 };
 
 type Mode = "login" | "register";
@@ -24,7 +27,7 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const isCloud = context?.deploymentMode === "cloud" || !context;
   const canEnter = context?.authenticated && context.user;
-  const title = useMemo(() => (mode === "login" ? "登录知识酷内测" : "使用邀请码加入"), [mode]);
+  const title = useMemo(() => (mode === "login" ? "登录知识酷" : "使用邀请码加入"), [mode]);
 
   useEffect(() => {
     let active = true;
@@ -72,7 +75,7 @@ export function AuthGate({ children }: AuthGateProps) {
 
   if (isLoading) {
     return (
-      <main className="auth-screen">
+      <main className="auth-screen auth-screen--loading">
         <div className="auth-panel auth-panel--loading">
           <RefreshCw size={20} aria-hidden="true" />
           <span>正在进入知识酷...</span>
@@ -81,16 +84,32 @@ export function AuthGate({ children }: AuthGateProps) {
     );
   }
 
-  if (!isCloud || canEnter) return <>{children}</>;
+  if ((!isCloud || canEnter) && context) {
+    return (
+      <>
+        {typeof children === "function"
+          ? children({ context, onContextChange: setContext })
+          : children}
+      </>
+    );
+  }
 
   return (
     <main className="auth-screen">
+      <AuroraHero className="auth-aurora">
+        <section className="auth-intro" aria-label="知识酷介绍">
+          <p className="auth-kicker">FigureLearning Workbench</p>
+          <h2>知识酷</h2>
+          <p>把素材收集、知识沉淀、视角挖掘和公众号创作放进一个安静的本地工作台。</p>
+        </section>
+      </AuroraHero>
+
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="auth-brand">
           <div className="brand-mark">知</div>
           <div>
             <strong>知识酷</strong>
-            <span>公网内测工作台</span>
+            <span>个人知识库与创作工作台</span>
           </div>
         </div>
         <div className="auth-heading">

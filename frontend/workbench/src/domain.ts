@@ -12,7 +12,7 @@ export type RouteId = WorkspaceId | LegacyStageId;
 
 export type MaterialType = "image" | "file" | "media" | "link" | "text";
 export type MaterialStatus = "captured" | "queued" | "learning" | "ready" | "error";
-export type KnowledgeStatus = "draft" | "saved" | "ingested";
+export type KnowledgeStatus = "draft" | "saved";
 export type TaskStatus = "idle" | "running" | "done" | "error";
 export type Language = "zh" | "en";
 export type TextExtractionMode = "local_ocr" | "ai_vision";
@@ -113,12 +113,14 @@ export type WriterProject = {
   }>;
   writing_strategy?: string;
   design_strategy?: string;
+  design_confirmed?: boolean;
   topics?: Array<Record<string, unknown>>;
   topic?: Record<string, unknown> | null;
   title?: string;
   digest?: string;
   cover_prompt?: string;
   content_image_prompts?: string[];
+  image_style_preset?: string;
   image_suggestion_rationale?: string;
   article_markdown?: string;
   html?: string;

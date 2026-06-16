@@ -47,7 +47,6 @@ export function LearnWorkspace({
         <PrimaryTaskPanel
           eyebrow={t("common.primary")}
           title={t("learn.queue")}
-          body={t("learn.body")}
           action={isRunning ? t("learn.running") : t("learn.primaryFocus")}
           disabled={!selectedIds.length || isRunning}
           disabledReason={t("learn.needSelect")}
@@ -80,7 +79,7 @@ export function LearnWorkspace({
           </div>
           <div className="queue-list">
             {queue.length === 0 ? (
-              <EmptyState title={t("learn.empty")} body={t("learn.empty.body")} />
+              <EmptyState title={t("learn.empty")} />
             ) : (
               queue.map((item) => (
                 <div className={selectedMaterial?.id === item.id ? "queue-row selected" : "queue-row"} key={item.id}>
@@ -104,14 +103,35 @@ export function LearnWorkspace({
         <section className="content-panel">
           <div className="section-heading">
             <h2>{t("learn.previewFocus")}</h2>
-            <button className="secondary-button" type="button" disabled={!knowledgeDraft || isRunning} onClick={onCommitKnowledgeDraft}>
-              {t("learn.commitFocus")}
-            </button>
           </div>
           {knowledgeDraft ? (
-            <KnowledgeDraftEditor t={t} draft={knowledgeDraft} onChange={onUpdateKnowledgeDraft} />
+            <div className="learn-preview-panel">
+              <div className="learn-preview-cta">
+                <div className="learn-preview-cta-copy">
+                  <strong>{t("learn.commitFocus")}</strong>
+                  <p>{t("learn.commitFocusHint")}</p>
+                </div>
+                <button className="primary-button" type="button" disabled={isRunning} onClick={onCommitKnowledgeDraft}>
+                  {t("learn.commitFocus")}
+                </button>
+              </div>
+              {isRunning ? <p className="disabled-reason">{t("learn.commitFocusDisabled.running")}</p> : null}
+              <KnowledgeDraftEditor t={t} draft={knowledgeDraft} onChange={onUpdateKnowledgeDraft} />
+            </div>
           ) : (
-            <EmptyState title={t("learn.preview.empty")} body={t("learn.preview.empty.body")} />
+            <div className="learn-preview-panel">
+              <div className="learn-preview-cta learn-preview-cta-empty">
+                <div className="learn-preview-cta-copy">
+                  <strong>{t("learn.commitFocus")}</strong>
+                  <p>{t("learn.commitFocusEmptyHint")}</p>
+                </div>
+                <button className="primary-button" type="button" disabled>
+                  {t("learn.commitFocus")}
+                </button>
+              </div>
+              <p className="disabled-reason">{t("learn.commitFocusDisabled.noDraft")}</p>
+              <EmptyState title={t("learn.preview.empty")} />
+            </div>
           )}
         </section>
       </div>

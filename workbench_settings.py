@@ -9,7 +9,7 @@ import storage
 
 VALID_TEXT_EXTRACTION_MODES = {"local_ocr", "ai_vision"}
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "text_extraction_mode": "local_ocr",
+    "text_extraction_mode": "ai_vision",
     "storage_locations": {},
 }
 

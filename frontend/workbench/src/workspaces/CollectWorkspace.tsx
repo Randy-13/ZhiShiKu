@@ -108,7 +108,6 @@ export function CollectWorkspace({
         <PrimaryTaskPanel
           eyebrow={t("common.primary")}
           title={t("collect.input")}
-          body={t("collect.body")}
         >
           <div className="material-type-grid" role="tablist" aria-label={t("collect.input")}>
             {panes.map((pane) => (
@@ -286,7 +285,7 @@ export function CollectWorkspace({
         <section className="content-panel">
           <h2>{t("collect.queue")}</h2>
           {materials.length === 0 ? (
-            <EmptyState title={t("collect.empty")} body={t("collect.empty.body")} />
+            <EmptyState title={t("collect.empty")} />
           ) : (
             <>
               <div className="queue-toolbar">
@@ -381,7 +380,7 @@ export function CollectWorkspace({
               </label>
             </div>
           ) : (
-            <EmptyState title={t("collect.preview.empty")} body={t("collect.preview.empty.body")} />
+            <EmptyState title={t("collect.preview.empty")} />
           )}
         </section>
       </div>

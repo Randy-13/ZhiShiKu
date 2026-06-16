@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { api, libraryApi } from "./api";
-import type { LibraryKind } from "./api";
+import { api, authApi, libraryApi } from "./api";
+import type { AuthContext, LibraryKind } from "./api";
 import type {
   KnowledgeItem,
   Language,
@@ -18,6 +18,7 @@ import { SettingsWorkspace } from "./workspaces/SettingsWorkspace";
 import { KnowledgeLibraryRail } from "./components/KnowledgeLibraryRail";
 import { AuthGate } from "./components/AuthGate";
 import { JobCenter } from "./components/JobCenter";
+import { UserAdminPanel } from "./components/UserAdminPanel";
 import { useActivityLog } from "./hooks/useActivityLog";
 import { useAppShell } from "./hooks/useAppShell";
 import { useCollectFlow } from "./hooks/useCollectFlow";
@@ -30,16 +31,21 @@ import { useWorkspaceRoute } from "./hooks/useWorkspaceRoute";
 
 const libraryKinds: LibraryKind[] = ["original", "focus", "perspective"];
 
-function WorkbenchApp() {
+function WorkbenchApp({
+  authContext,
+  onAuthContextChange,
+}: {
+  authContext: AuthContext;
+  onAuthContextChange: (nextContext: AuthContext) => void;
+}) {
   const [language, setLanguage] = useState<Language>("zh");
-  const [textExtractionMode, setTextExtractionMode] = useState<TextExtractionMode>("local_ocr");
+  const [textExtractionMode, setTextExtractionMode] = useState<TextExtractionMode>("ai_vision");
   const t = useMemo(() => createTranslator(language), [language]);
   const { navItems } = useAppShell(t);
   const { activeWorkspace, selectWorkspace } = useWorkspaceRoute("collect");
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<string>();
   const { activities, addActivity } = useActivityLog();
-  const [search, setSearch] = useState("");
   const {
     libraryRailBucket,
     setLibraryRailBucket,
@@ -54,6 +60,7 @@ function WorkbenchApp() {
     addToLearningQueueDisabledReason,
   } = useLibraryRail(knowledge, language, t);
   const [isDeletingKnowledge, setIsDeletingKnowledge] = useState(false);
+  const [isUserAdminOpen, setIsUserAdminOpen] = useState(false);
   const {
     jobs,
     activeJobCount,
@@ -75,11 +82,13 @@ function WorkbenchApp() {
     importWriterKnowledge,
     generateWriterTopics,
     selectWriterTopic,
+    saveWriterStrategies,
     generateWriterDraft,
     reviseWriterProject,
     suggestWriterImages,
     generateWriterImages,
     formatWriterProject,
+    confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,
   } = useWriterFlow({ language, addActivity, selectWorkspace });
@@ -244,8 +253,8 @@ function WorkbenchApp() {
       });
   }, [addActivity, language, selectedKnowledge]);
 
-  const filteredMaterials = useMemo(() => filterBySearch(materials, search), [materials, search]);
-  const filteredLearningQueue = useMemo(() => filterBySearch(learningQueue, search), [learningQueue, search]);
+  const filteredMaterials = useMemo(() => materials, [materials]);
+  const filteredLearningQueue = useMemo(() => learningQueue, [learningQueue]);
   const saveWorkbenchSettings = useCallback(async () => {
     try {
       await api.saveWorkbenchSettings({ text_extraction_mode: textExtractionMode });
@@ -512,11 +521,13 @@ function WorkbenchApp() {
             onImportKnowledge={importWriterKnowledge}
             onGenerateTopics={generateWriterTopics}
             onSelectTopic={selectWriterTopic}
+            onSaveStrategies={saveWriterStrategies}
             onGenerateDraft={generateWriterDraft}
             onRevise={reviseWriterProject}
             onSuggestImages={suggestWriterImages}
             onGenerateImages={generateWriterImages}
             onFormat={formatWriterProject}
+            onConfirmDesign={confirmWriterDesign}
             onPreflight={preflightWriterProject}
             onPublish={publishWriterProject}
           />
@@ -549,6 +560,18 @@ function WorkbenchApp() {
 
   const activeItem = navItems.find((item) => item.id === activeWorkspace) ?? navItems[0];
   const runningCount = activeJobCount || Number(isLearning) + Number(isWriting) + activities.filter((event) => event.status === "running").length;
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      onAuthContextChange({
+        deploymentMode: authContext.deploymentMode,
+        authenticated: false,
+        user: null,
+        workspace: null,
+      });
+    }
+  }, [authContext.deploymentMode, onAuthContextChange]);
 
   return (
     <>
@@ -559,18 +582,21 @@ function WorkbenchApp() {
         activeId={activeWorkspace}
         activeTitle={workspaceLabel(t, activeWorkspace)}
         activeDescription={activeItem.description}
-        searchPlaceholder={t("topbar.search")}
-        importLabel={t("topbar.import")}
         queueLabel={t("topbar.queue")}
         queueStatus={runningCount > 0 ? `${runningCount}` : t("topbar.ready")}
-        search={search}
-        onSearchChange={setSearch}
-        onImport={() => selectWorkspace("collect")}
         onOpenQueue={openJobCenter}
+        authContext={authContext}
+        onLogout={logout}
+        onOpenUserAdmin={() => setIsUserAdminOpen(true)}
         onSelect={selectWorkspace}
       >
         {content}
       </AppShell>
+      <UserAdminPanel
+        authContext={authContext}
+        isOpen={isUserAdminOpen}
+        onClose={() => setIsUserAdminOpen(false)}
+      />
       <JobCenter
         jobs={jobs}
         isOpen={isJobCenterOpen}
@@ -587,7 +613,9 @@ function WorkbenchApp() {
 export default function App() {
   return (
     <AuthGate>
-      <WorkbenchApp />
+      {({ context, onContextChange }) => (
+        <WorkbenchApp authContext={context} onAuthContextChange={onContextChange} />
+      )}
     </AuthGate>
   );
 }
@@ -611,9 +639,4 @@ function ResponsiveKnowledgeRail({ summary, count, children }: { summary: string
   );
 }
 
-function filterBySearch<T extends { title: string; body?: string; source?: string }>(items: T[], search: string) {
-  const clean = search.trim().toLowerCase();
-  if (!clean) return items;
-  return items.filter((item) => `${item.title} ${item.body ?? ""} ${item.source ?? ""}`.toLowerCase().includes(clean));
-}
 

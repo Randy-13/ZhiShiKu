@@ -36,9 +36,14 @@ class PerspectiveInterpretationResult(BaseModel):
     perspective_name: str
     tags: list[str] = Field(default_factory=list)
     summary: str = ""
+    criteria: str = ""
+    core_facts: list[PerspectiveFinding] = Field(default_factory=list)
+    deep_analysis: list[PerspectiveFinding] = Field(default_factory=list)
+    conclusion_and_actions: list[str] = Field(default_factory=list)
     findings: list[PerspectiveFinding] = Field(default_factory=list)
     writing_implications: list[str] = Field(default_factory=list)
     risks_and_limits: list[str] = Field(default_factory=list)
+    risks_and_questions: list[str] = Field(default_factory=list)
 
 
 class KnowledgeCluster(BaseModel):

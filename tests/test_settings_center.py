@@ -3,6 +3,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
+import src.shared.frontend_app as frontend_app
 from src.main import create_app
 
 
@@ -21,6 +22,22 @@ def test_settings_page_route_is_served_by_new_app_factory():
     response = client.get("/settings")
 
     assert_react_app_shell(response)
+
+
+def test_frontend_dist_pointer_selects_latest_build(tmp_path, monkeypatch):
+    workbench_root = tmp_path / "workbench"
+    served = workbench_root / "dist-served-1"
+    served.mkdir(parents=True)
+    (served / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    (workbench_root / ".served-dist").write_text("dist-served-1\n", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_app, "WORKBENCH_ROOT", workbench_root)
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST", workbench_root / "dist")
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST_POINTER", workbench_root / ".served-dist")
+    monkeypatch.setattr(frontend_app, "LEGACY_FRONTEND_DIST", tmp_path / "legacy")
+
+    assert frontend_app.current_frontend_dist() == served
+    assert frontend_app.current_frontend_path("index.html") == served / "index.html"
 
 
 def test_mature_workspace_alias_routes_are_served_by_new_app_factory():
@@ -75,6 +92,7 @@ def test_legacy_page_routes_reuse_server_rendered_app_rail():
             "learn",
             "mine",
             "create",
+            "library",
             "settings",
         ]
 

@@ -48,6 +48,23 @@ export type AuthContext = {
   workspace: AuthWorkspace | null;
 };
 
+export type AuthAdminUser = AuthUser & {
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string | null;
+};
+
+export type AuthInvitation = {
+  id: string;
+  code: string;
+  role: string;
+  maxUses: number;
+  usedCount: number;
+  expiresAt?: string | null;
+  createdAt: string;
+  status: string;
+};
+
 export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
 export type JobEvent = {
@@ -372,6 +389,22 @@ export type BilibiliCookieLoginResult = {
   script?: string;
 };
 
+export type MediaDependencyItem = {
+  label?: string;
+  available?: boolean;
+  purpose?: string;
+  detail?: string;
+  auth?: string;
+  message?: string;
+  provider?: string;
+  base_url?: string;
+  model?: string;
+  configured?: boolean;
+  verified?: boolean;
+};
+
+export type MediaDependencyStatus = Record<string, MediaDependencyItem>;
+
 export type ApiSettingItem = {
   id: string;
   name: string;
@@ -435,6 +468,44 @@ export type ImageApiSettingInput = Omit<ApiSettingInput, "max_retries"> & {
 };
 
 export type ApiTestResult = Record<string, string | boolean | number | null | undefined>;
+
+export type AsrSettingItem = {
+  provider: string;
+  base_url: string;
+  model: string;
+  timeout?: number;
+  source?: string;
+  api_key_masked?: string;
+  configured?: boolean;
+  last_test_ok?: boolean;
+  last_test_at?: string;
+  last_test_message?: string;
+};
+
+export type AsrSettingTemplate = {
+  id: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_placeholder?: string;
+};
+
+export type AsrSettingsPayload = {
+  ok?: boolean;
+  item?: AsrSettingItem;
+  templates?: AsrSettingTemplate[];
+  message?: string;
+  error?: string;
+};
+
+export type AsrSettingInput = {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  timeout?: number;
+};
 
 type PerspectivePayload = Record<string, unknown> & {
   id?: string;
@@ -673,10 +744,6 @@ export const api = {
     return collectApi.generateKnowledge(material, parserMode);
   },
 
-  ingestKnowledge(knowledgeIds: number[]) {
-    return libraryApi.ingestKnowledge(knowledgeIds);
-  },
-
   writerSession(knowledgeIds: number[]) {
     return writerApi.writerSession(knowledgeIds);
   },
@@ -857,7 +924,7 @@ function toKnowledge(raw: Record<string, unknown>, material?: SourceMaterial, fa
     createdAt: firstString(raw.created_at, raw.createdAt),
     updatedAt: firstString(raw.updated_at, raw.updatedAt),
     sourceIds: material ? [material.id] : [],
-    status: raw.graph_status === "ingested" ? "ingested" : "saved",
+    status: "saved",
     confidence: raw.status === "ready" || body ? "medium" : "needsReview",
   };
 }

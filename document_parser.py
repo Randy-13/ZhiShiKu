@@ -10,6 +10,15 @@ import ocr_client
 TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 LONG_DOCUMENT_PAGE_THRESHOLD = 8
 LONG_DOCUMENT_CHAR_THRESHOLD = 12000
+NOISE_LINE_PATTERNS = (
+    r"^\d+\s*/\s*\d+$",
+    r"^page\s+\d+(\s+of\s+\d+)?$",
+    r"^第\s*\d+\s*页\s*(共\s*\d+\s*页)?$",
+    r"^-+\s*\d+\s*-+$",
+    r"^confidential$",
+    r"^copyright\s+.*$",
+    r"^all rights reserved\.?$",
+)
 
 
 def read_text_file(path: Path) -> str:
@@ -84,7 +93,7 @@ def read_pdf(path: Path, visual_recognizer: VisionRecognizer | None = None, pref
                 blocks.append(f"[PDF Page {page_number} {mode}]\n{text}")
     finally:
         doc.close()
-    return "\n\n---\n\n".join(block for block in blocks if block.strip()).strip()
+    return clean_extracted_document_text("\n\n---\n\n".join(block for block in blocks if block.strip()).strip())
 
 
 def read_pdf_pages(path: Path, visual_recognizer: VisionRecognizer | None = None, prefer_visual: bool = False) -> list[dict]:
@@ -108,11 +117,12 @@ def read_pdf_pages(path: Path, visual_recognizer: VisionRecognizer | None = None
                 pixmap.save(image_path)
                 text, ocr_mode = _ocr_pdf_image(image_path, visual_recognizer=visual_recognizer, prefer_visual=prefer_visual)
                 used_ocr = True
+            cleaned_text = clean_extracted_document_text(text)
             pages.append(
                 {
                     "page": index,
-                    "text": text,
-                    "char_count": len(text),
+                    "text": cleaned_text,
+                    "char_count": len(cleaned_text),
                     "used_ocr": used_ocr,
                     "ocr_mode": ocr_mode,
                 }
@@ -166,6 +176,85 @@ def chunk_text(text: str, max_chars: int = 6000) -> list[str]:
     if current:
         chunks.append("\n\n".join(current))
     return chunks
+
+
+def clean_extracted_document_text(text: str) -> str:
+    lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").splitlines()]
+    repeated_short_lines = _repeated_short_lines(lines)
+    cleaned: list[str] = []
+    previous_blank = False
+    for line in lines:
+        if not line:
+            if cleaned and not previous_blank:
+                cleaned.append("")
+            previous_blank = True
+            continue
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if _is_document_noise_line(normalized, repeated_short_lines):
+            continue
+        cleaned.append(normalized)
+        previous_blank = False
+    return _trim_document_noise_edges("\n".join(cleaned).strip())
+
+
+def _repeated_short_lines(lines: list[str]) -> set[str]:
+    counts: dict[str, int] = {}
+    for line in lines:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if 0 < len(normalized) <= 80:
+            counts[normalized.lower()] = counts.get(normalized.lower(), 0) + 1
+    return {line for line, count in counts.items() if count >= 3}
+
+
+def _is_document_noise_line(line: str, repeated_short_lines: set[str]) -> bool:
+    lower = line.lower()
+    if lower in repeated_short_lines:
+        return True
+    if _looks_like_catalog_line(lower):
+        return True
+    if _looks_like_contact_or_footer_line(lower):
+        return True
+    return any(re.match(pattern, lower, flags=re.IGNORECASE) for pattern in NOISE_LINE_PATTERNS)
+
+
+def _looks_like_catalog_line(line: str) -> bool:
+    if line in {"contents", "table of contents", "目录"}:
+        return True
+    if re.match(r"^[\divx一二三四五六七八九十a-z]+[.)、]\s+.+?\.{2,}\s*\d+$", line, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^.+?\.{3,}\s*\d+$", line):
+        return True
+    if re.match(r"^(figure|table)\s+\d+[.: -].*$", line, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _looks_like_contact_or_footer_line(line: str) -> bool:
+    if len(line) <= 120 and ("@" in line or "www." in line or "http://" in line or "https://" in line):
+        return True
+    if re.match(r"^(tel|phone|email|fax)[:：]\s*.+$", line, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _trim_document_noise_edges(text: str) -> str:
+    if not text:
+        return text
+    lines = text.splitlines()
+    while lines and _is_probably_noise_edge(lines[0]):
+        lines.pop(0)
+    while lines and _is_probably_noise_edge(lines[-1]):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _is_probably_noise_edge(line: str) -> bool:
+    normalized = re.sub(r"\s+", " ", line).strip().lower()
+    if not normalized:
+        return True
+    if len(normalized) <= 6 and re.fullmatch(r"[\d./-]+", normalized):
+        return True
+    return normalized in {"home", "login", "sign in", "contents", "table of contents", "目录"}
 
 
 def pages_text(pages: list[dict], page_start: int | None = None, page_end: int | None = None) -> str:
@@ -262,7 +351,7 @@ def extract_text(path: Path, visual_recognizer: VisionRecognizer | None = None, 
     text = text.strip()
     if not text:
         raise ValueError(f"未能从文件中提取到可用文本：{path.name}")
-    return text
+    return clean_extracted_document_text(text)
 
 
 def recognize_files(

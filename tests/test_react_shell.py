@@ -3,137 +3,118 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FRONTEND = ROOT / "frontend"
+FRONTEND = ROOT / "frontend" / "workbench"
 
 
 def test_react_frontend_project_declares_vite_shell():
     package = json.loads((FRONTEND / "package.json").read_text(encoding="utf-8"))
 
-    assert package["scripts"]["build"] == "vite build"
+    assert package["scripts"]["build"] == "node scripts/build-served.mjs"
     assert "react" in package["dependencies"]
     assert "vite" in package["dependencies"]
     assert "lucide-react" in package["dependencies"]
 
 
 def test_react_build_outputs_fastapi_static_entrypoint():
-    index_html = (FRONTEND / "dist" / "index.html").read_text(encoding="utf-8")
+    pointer_name = (FRONTEND / ".served-dist").read_text(encoding="utf-8").strip()
+    index_html = (FRONTEND / pointer_name / "index.html").read_text(encoding="utf-8")
 
     assert '<div id="root"></div>' in index_html
     assert "/frontend/assets/" in index_html
 
 
-def test_react_shell_has_only_five_primary_modules_and_global_library():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
+def test_react_shell_uses_workbench_app_with_six_workspaces_and_library_rail():
+    source = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
 
-    for module_id in ["collect", "learn", "mine", "create", "settings"]:
-        assert f'id: "{module_id}"' in source
+    for workspace_component in [
+        "CollectWorkspace",
+        "LearnWorkspace",
+        "MineWorkspace",
+        "CreateWorkspace",
+        "LibraryWorkspace",
+        "SettingsWorkspace",
+    ]:
+        assert workspace_component in source
 
-    assert 'id: "library"' not in source
-    assert "GlobalLibraryPanel" in source
-    assert "原料库" in source
-    assert "重点库" in source
-    assert "视角库" in source
-
-
-def test_react_global_library_fetches_live_library_files():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
-    panel_section = source.split("function GlobalLibraryPanel")[1].split("function FileStub")[0]
-
-    assert "/api/v2/libraries/" in panel_section
-    assert "research-os:library-updated" in source
-    assert "setInterval" in panel_section
-    assert "sampleFiles[activeLibrary]" not in panel_section
+    assert 'const { activeWorkspace, selectWorkspace } = useWorkspaceRoute("collect");' in source
+    assert 'const libraryKinds: LibraryKind[] = ["original", "focus", "perspective"];' in source
+    assert "KnowledgeLibraryRail" in source
 
 
-def test_react_global_library_cards_do_not_overflow_side_panel():
+def test_react_library_rail_uses_live_library_api_and_workspace_bucket():
+    source = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "libraryApi.listLibraryFiles(kind)" in source
+    assert "libraryApi.listKnowledge()" in source
+    assert 'case "library":' in source
+    assert "activeBucket={libraryRailBucket}" in source
+    assert "knowledge={libraryRailKnowledge}" in source
+
+
+def test_react_styles_keep_long_paths_and_cards_wrapped():
     styles = (FRONTEND / "src" / "styles.css").read_text(encoding="utf-8")
 
-    assert "overflow-x: hidden" in styles
-    assert ".file-card strong" in styles
     assert "overflow-wrap: anywhere" in styles
-    assert ".file-path" in styles
+    assert ".storage-location-row input" in styles
+    assert ".trash-file-row em" in styles
+    assert ".dependency-path" in styles
 
 
-def test_react_learn_workspace_uses_raw_library_and_focus_generation_api():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
-    learn_section = source.split("function LearnWorkspace")[1].split("function MineWorkspace")[0]
+def test_react_learn_workspace_uses_real_learning_flow():
+    app_source = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+    flow_source = (FRONTEND / "src" / "hooks" / "useLearningFlow.ts").read_text(encoding="utf-8")
 
-    assert "/api/v2/libraries/raw/files?pending_focus=true" in learn_section
-    assert "/api/v2/learn/refine-knowledge-cluster" in learn_section
-    assert "/api/v2/learn/focus-file" in learn_section
-    assert "LibrarySelectionList" in learn_section
-    assert "提炼" in learn_section
-    assert "保存" in learn_section
-    assert "research-os:library-updated" in learn_section
-    assert "learn-panel" in learn_section
+    assert "useLearningFlow" in app_source
+    assert "addSelectedOriginalsToLearningQueue" in app_source
+    assert "generateKnowledge" in app_source
+    assert "commitKnowledgeDraft" in app_source
+    assert "collectApi.saveFocusFile" in flow_source
+    assert "collectApi.refineKnowledgeCluster" in flow_source
 
 
-def test_react_mine_workspace_uses_global_library_queue_and_perspective_api():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
-    panel_section = source.split("function GlobalLibraryPanel")[1].split("function FileStub")[0]
-    mine_section = source.split("function MineWorkspace")[1].split("function CreateWorkspace")[0]
+def test_react_mine_workspace_uses_real_perspective_api_flow():
+    app_source = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+    flow_source = (FRONTEND / "src" / "hooks" / "useMineFlow.ts").read_text(encoding="utf-8")
 
-    assert "research-os:mine-add-sources" in panel_section
-    assert "加入待解读队列" in panel_section
-    assert "/api/v2/mine/perspectives" in mine_section
-    assert "/api/v2/mine/interpret" in mine_section
-    assert "/api/v2/mine/perspective-file" in mine_section
-    assert "savePerspectiveProfile" in mine_section
-    assert "deletePerspectiveProfile" in mine_section
-    assert "复制为自定义" in mine_section
-    assert "draftPerspective.focus_dimensions" in mine_section
-    assert "draftPerspective.analysis_questions" in mine_section
-    assert "原料库或重点库" in mine_section
+    assert "useMineFlow" in app_source
+    assert "savePerspectiveProfile" in app_source
+    assert "deletePerspectiveProfile" in app_source
+    assert "runPerspectiveInterpretation" in app_source
+    assert "mineApi.listPerspectiveProfiles()" in flow_source
+    assert "mineApi.interpretPerspective(" in flow_source
+    assert "mineApi.savePerspectiveFile(" in flow_source
 
 
-def test_react_settings_center_uses_real_settings_forms_and_v2_api():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
-    settings_section = source.split("function SettingsWorkspace")[1].split("function GlobalLibraryPanel")[0]
+def test_react_settings_center_uses_real_settings_and_api_forms():
+    source = (FRONTEND / "src" / "workspaces" / "SettingsWorkspace.tsx").read_text(encoding="utf-8")
 
-    assert "网页基本设置" in settings_section
-    assert "模型配置" in settings_section
-    assert "ASR 配置" in settings_section
-    assert "API 配置" in settings_section
-    assert "/api/v2/settings/web" in settings_section
-    assert "/api/v2/settings/api" in settings_section
-    assert "/api/v2/settings/asr" in settings_section
-    assert "WebSettingsForm" in settings_section
-    assert "ModelSettingsPanel" in settings_section
-    assert "ApiSettingsForm" in source
-    assert "AsrSettingsForm" in source
+    assert "settingsApi.workbenchSettings()" in source
+    assert "settingsApi.mediaDependencies()" in source
+    assert "settingsApi.apiSettings()" in source
+    assert "settingsApi.imageApiSettings()" in source
+    assert "settingsApi.asrSettings()" in source
+    assert '"chat" | "image" | "audio"' in source
+    assert "DependencyStatusModal" in source
+    assert "Audio ASR" in source
 
 
 def test_react_workspaces_keep_module_boundaries_visible():
-    source = (FRONTEND / "src" / "main.jsx").read_text(encoding="utf-8")
+    app_source = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+    create_source = (FRONTEND / "src" / "workspaces" / "CreateWorkspace.tsx").read_text(encoding="utf-8")
+    settings_source = (FRONTEND / "src" / "workspaces" / "SettingsWorkspace.tsx").read_text(encoding="utf-8")
 
-    collect_section = source.split("function CollectWorkspace")[1].split("function LearnWorkspace")[0]
-    learn_section = source.split("function LearnWorkspace")[1].split("function MineWorkspace")[0]
-    mine_section = source.split("function MineWorkspace")[1].split("function CreateWorkspace")[0]
-    create_section = source.split("function CreateWorkspace")[1].split("function SettingsWorkspace")[0]
-    settings_section = source.split("function SettingsWorkspace")[1]
+    assert "CollectWorkspace" in app_source
+    assert "LearnWorkspace" in app_source
+    assert "MineWorkspace" in app_source
+    assert "CreateWorkspace" in app_source
+    assert "LibraryWorkspace" in app_source
+    assert "SettingsWorkspace" in app_source
 
-    assert "文本" in collect_section
-    assert "截图" in collect_section
-    assert "文档" in collect_section
-    assert "音视频" in collect_section
-    assert "网页链接" in collect_section
-    assert "提炼" not in collect_section
-    assert "创作" not in collect_section
+    assert "imageStylePresets" in create_source
+    assert "designStrategyPresets" in create_source
+    assert "onConfirmDesign" in create_source
+    assert "publish_check" in create_source
 
-    assert "核心知识簇" in learn_section
-    assert "知识关系网" in learn_section
-    assert "知识拉取" in learn_section
-
-    assert "视角管理" in mine_section
-    assert "视角库" in mine_section
-    assert "解读结果" in mine_section
-
-    assert "文章项目" in create_section
-    assert "小红书图文" in create_section
-    assert "短视频脚本" in create_section
-    assert "长视频脚本" in create_section
-
-    assert "模型配置" in settings_section
-    assert "ASR" in settings_section
-    assert "网页基本设置" in settings_section
-    assert "API 配置" in settings_section
+    assert "DependencyStatusModal" in settings_source
+    assert "TrashModal" in settings_source
+    assert "ApiSettingsModal" in settings_source

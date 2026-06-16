@@ -863,7 +863,7 @@ function imageApiPayload() {
 
 async function loadImageApiSettings() {
   pushImageApiLog("info", "正在加载图片 API 配置...");
-  const data = await requestJson("/api/image-api-settings");
+  const data = unwrapV2(await requestJson("/api/v2/settings/image"));
   state.imageApi.items = data.items || [];
   state.imageApi.templates = data.templates || [];
   state.imageApi.activeId = data.active_id || null;
@@ -894,11 +894,11 @@ async function saveImageApiSetting(event) {
   event.preventDefault();
   const payload = imageApiPayload();
   pushImageApiLog("info", `${payload.id ? "正在更新" : "正在保存"}图片 API 配置「${payload.name || "未命名配置"}」...`);
-  const data = await requestJson("/api/image-api-settings", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }));
   state.imageApi.items = data.items || [];
   state.imageApi.activeId = data.active_id || data.item?.id || null;
   renderImageApiSettings();
@@ -914,11 +914,11 @@ async function activateImageApiSetting() {
   }
   const selected = state.imageApi.items.find((item) => item.id === id);
   pushImageApiLog("info", `正在切换当前图片 API 到「${selected?.name || id}」...`);
-  const data = await requestJson("/api/image-api-settings/active", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/image/active", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
-  });
+  }));
   state.imageApi.items = data.items || [];
   state.imageApi.activeId = data.active_id || id;
   renderImageApiSettings();
@@ -934,7 +934,7 @@ async function deleteImageApiSetting() {
   }
   const selected = state.imageApi.items.find((item) => item.id === id);
   pushImageApiLog("info", `正在删除图片 API 配置「${selected?.name || id}」...`);
-  const data = await requestJson(`/api/image-api-settings/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const data = unwrapV2(await requestJson(`/api/v2/settings/image/${encodeURIComponent(id)}`, { method: "DELETE" }));
   state.imageApi.items = data.items || [];
   state.imageApi.activeId = data.active_id || null;
   renderImageApiSettings();
@@ -945,11 +945,11 @@ async function deleteImageApiSetting() {
 async function testImageApiSetting() {
   const payload = imageApiPayload();
   pushImageApiLog("info", `正在测试图片 API 配置：${payload.name || payload.model || "未命名配置"}...`);
-  const data = await requestJson("/api/image-api-settings/test", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/image/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ setting: payload }),
-  });
+  }));
   if (data.ok === "true") {
     pushImageApiLog("success", `${data.message || "配置字段完整"}\nEndpoint: ${data.endpoint || ""}`);
   } else {
@@ -1038,3 +1038,6 @@ Promise.all([loadSession(), loadImageApiSettings()]).catch((error) => {
   showToast(error.message);
 });
 renderImageApiLogs();
+function unwrapV2(payload) {
+  return payload?.data ?? {};
+}

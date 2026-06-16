@@ -15,7 +15,7 @@
         </div>
         <nav class="app-nav" aria-label="工作区">
           <a class="app-nav-item active" data-shell-section="collect" href="/collect"><span>收集</span><small>读取信息并保存原料</small></a>
-          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并构建关系网</small></a>
+          <a class="app-nav-item" data-shell-section="learn" href="/learn"><span>学习</span><small>提炼重点并整理知识</small></a>
           <a class="app-nav-item" data-shell-section="mine" href="/mine"><span>挖掘</span><small>多视角解读重点知识</small></a>
           <a class="app-nav-item" data-shell-section="create" href="/create"><span>创作</span><small>引用三库生成成品</small></a>
           <a class="app-nav-item" id="openGlobalSettings" data-shell-section="settings" href="/settings"><span>设置中心</span><small id="settingsOverviewStatus">模型、ASR、图片与视角模板</small></a>
@@ -25,7 +25,7 @@
         <div class="topbar">
           <div>
             <h1>知识酷</h1>
-            <p>多源输入 -> 知识提炼 / 策略挖掘 -> Markdown -> 知识入网 -> 知识拉取</p>
+            <p>多源输入 -> 知识提炼 / 策略挖掘 -> Markdown 保存 -> 后续创作与维护</p>
           </div>
           <div class="topbar-actions">
             <label class="global-search" aria-label="全局搜索">
@@ -124,7 +124,7 @@
             <div class="stage-heading compact-stage-heading">
               <span class="stage-kicker">02 学习</span>
               <h2>审阅队列并生成知识</h2>
-              <p>本轮截图会合并为一组知识输入，生成后进入右侧知识库和后续入网流程。</p>
+              <p>本轮截图会合并为一组知识输入，生成后进入右侧知识库，可继续编辑、挖掘或创作。</p>
             </div>
           </div>
           <div id="dropzone" class="dropzone" tabindex="0">
@@ -401,8 +401,6 @@
           <div class="panel-header">
             <h2>知识文件</h2>
             <div class="knowledge-header-actions">
-              <button id="ingestKnowledge" type="button">入网</button>
-              <button id="deleteNotIngestedKnowledge" type="button" class="danger-button">删除未入网</button>
               <button id="openWriterTool" type="button">加入创作引用</button>
               <span id="knowledgeCount">0 个</span>
             </div>
@@ -428,38 +426,6 @@
         </section>
       </aside>
     </main>
-
-    <section id="learnKnowledgeWorkspace" class="viewer learn-knowledge-workspace" aria-label="学习知识关系区">
-      <article class="panel graph-panel">
-        <div class="panel-header">
-          <h2>知识关系网</h2>
-          <input id="graphSearch" class="graph-search" type="search" placeholder="搜索节点" aria-label="搜索知识关系网节点" />
-          <div class="graph-actions">
-            <button id="refreshGraph" type="button">待入网节点</button>
-            <button id="resetGraphView" type="button">整理图谱</button>
-            <button id="rebuildGraph" type="button">重建图谱</button>
-          </div>
-        </div>
-        <div id="graphCanvas" class="graph-browser" role="application" aria-label="知识关系网文件夹浏览">
-          <nav id="graphBreadcrumbs" class="graph-breadcrumbs" aria-label="知识网路径"></nav>
-          <div id="graphFolders" class="graph-folders"></div>
-        </div>
-        <aside id="graphDetail" class="graph-detail">点击节点进入下一层，Esc 返回上一层。</aside>
-      </article>
-      <article id="retrievalPanel" class="panel retrieval-panel">
-        <div class="panel-header">
-          <h2>知识拉取</h2>
-          <span id="retrievalStatus">基于本地知识网回答</span>
-        </div>
-        <div id="retrievalMessages" class="retrieval-messages">
-          <article class="retrieval-message assistant">你可以问：我收集了哪些有关于长鑫科技的信息？</article>
-        </div>
-        <form id="retrievalForm" class="retrieval-form">
-          <textarea id="retrievalQuestion" rows="3" placeholder="输入你想从知识网拉取的问题"></textarea>
-          <button id="sendRetrieval" type="submit" class="primary">发送</button>
-        </form>
-      </article>
-    </section>
 
     <div id="markdownModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="markdownModalTitle">
       <section class="modal-card markdown-modal-card">

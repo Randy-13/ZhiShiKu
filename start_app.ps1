@@ -1,3 +1,4 @@
 $ErrorActionPreference = "Stop"
-Set-Location -LiteralPath "E:\Invest\FigureLearning"
+$appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location -LiteralPath $appDir
 & ".\.venv\Scripts\python.exe" "run_server.py"

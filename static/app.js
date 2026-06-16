@@ -40,15 +40,6 @@ const state = {
     editingId: null,
     logs: [],
   },
-  graph: {
-    nodes: [],
-    edges: [],
-    pendingNodes: [],
-    currentNodeId: null,
-    path: [],
-    newNodeIds: new Set(),
-    searchTargetId: null,
-  },
   markdownContent: "",
   parserMode: "local_ocr",
   knowledgePanelResize: {
@@ -150,8 +141,6 @@ const els = {
   knowledgeDateFrom: document.querySelector("#knowledgeDateFrom"),
   knowledgeDateTo: document.querySelector("#knowledgeDateTo"),
   clearKnowledgeFilters: document.querySelector("#clearKnowledgeFilters"),
-  ingestKnowledge: document.querySelector("#ingestKnowledge"),
-  deleteNotIngestedKnowledge: document.querySelector("#deleteNotIngestedKnowledge"),
   openWriterTool: document.querySelector("#openWriterTool"),
   knowledgePanel: document.querySelector("#knowledgePanel"),
   knowledgePanelHandle: document.querySelector("#knowledgePanelHandle"),
@@ -189,19 +178,6 @@ const els = {
   markdownModal: document.querySelector("#markdownModal"),
   closeMarkdownModal: document.querySelector("#closeMarkdownModal"),
   copyMarkdown: document.querySelector("#copyMarkdown"),
-  graphCanvas: document.querySelector("#graphCanvas"),
-  graphSearch: document.querySelector("#graphSearch"),
-  graphBreadcrumbs: document.querySelector("#graphBreadcrumbs"),
-  graphFolders: document.querySelector("#graphFolders"),
-  graphDetail: document.querySelector("#graphDetail"),
-  refreshGraph: document.querySelector("#refreshGraph"),
-  resetGraphView: document.querySelector("#resetGraphView"),
-  rebuildGraph: document.querySelector("#rebuildGraph"),
-  retrievalForm: document.querySelector("#retrievalForm"),
-  retrievalQuestion: document.querySelector("#retrievalQuestion"),
-  retrievalMessages: document.querySelector("#retrievalMessages"),
-  retrievalStatus: document.querySelector("#retrievalStatus"),
-  sendRetrieval: document.querySelector("#sendRetrieval"),
   toast: document.querySelector("#toast"),
 };
 
@@ -219,17 +195,6 @@ function openWriterTool() {
     return;
   }
   window.location.href = `/create?ids=${ids.join(",")}`;
-}
-
-function graphStatusMeta(status) {
-  const normalized = status || "not_ingested";
-  const labels = {
-    not_ingested: "未入网",
-    pending: "待确认",
-    ingested: "已入网",
-    graph_error: "入网失败",
-  };
-  return { status: normalized, label: labels[normalized] || "未入网" };
 }
 
 function parserModeLabel(mode = state.parserMode) {
@@ -554,7 +519,7 @@ function fillApiFormFromSetting(setting) {
 
 async function loadApiSettings({ silent = false } = {}) {
   pushApiLog("info", "正在加载已保存的 API 配置...");
-  const data = await requestJson("/api/api-settings");
+  const data = unwrapV2(await requestJson("/api/v2/settings/api"));
   state.apiSettings.items = data.items || [];
   state.apiSettings.templates = data.templates || [];
   state.apiSettings.activeId = data.active_id || null;
@@ -601,11 +566,11 @@ async function saveApiSetting(event) {
   const payload = apiFormPayload();
   const actionLabel = payload.id ? "更新" : "保存";
   pushApiLog("info", `正在${actionLabel}配置「${payload.name || "未命名 API"}」...`);
-  const data = await requestJson("/api/api-settings", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/api", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }));
   state.apiSettings.items = data.items || [];
   state.apiSettings.activeId = data.active_id || data.item?.id || null;
   state.apiSettings.editingId = data.item?.id || null;
@@ -618,11 +583,11 @@ async function saveApiSetting(event) {
 async function testCurrentApiSetting() {
   const payload = apiFormPayload();
   pushApiLog("info", `正在按当前表单内容测试连接：${payload.name || payload.model || "未命名配置"}...`);
-  const data = await requestJson("/api/api-settings/test", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/api/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ setting: payload }),
-  });
+  }));
   if (data.ok === "true") {
     pushApiLog("success", `连接成功：${data.provider || payload.provider} / ${data.model || payload.model}`);
   } else {
@@ -639,11 +604,11 @@ async function activateSelectedApiSetting() {
   }
   const selected = state.apiSettings.items.find((item) => item.id === id);
   pushApiLog("info", `正在切换当前 API 到「${selected?.name || id}」...`);
-  const data = await requestJson("/api/api-settings/active", {
+  const data = unwrapV2(await requestJson("/api/v2/settings/api/active", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
-  });
+  }));
   state.apiSettings.items = data.items || [];
   state.apiSettings.activeId = data.active_id || id;
   state.apiSettings.editingId = id;
@@ -662,7 +627,7 @@ async function deleteSelectedApiSetting() {
   }
   const selected = state.apiSettings.items.find((item) => item.id === id);
   pushApiLog("info", `正在删除配置「${selected?.name || id}」...`);
-  const data = await requestJson(`/api/api-settings/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const data = unwrapV2(await requestJson(`/api/v2/settings/api/${encodeURIComponent(id)}`, { method: "DELETE" }));
   state.apiSettings.items = data.items || [];
   state.apiSettings.activeId = data.active_id || null;
   state.apiSettings.editingId = state.apiSettings.activeId;
@@ -1552,9 +1517,8 @@ function renderKnowledge() {
   els.knowledgeList.innerHTML = "";
   visibleKnowledge.forEach((item) => {
     const tags = parseTags(item.tags);
-    const graphStatus = graphStatusMeta(item.graph_status);
     const row = document.createElement("label");
-    row.className = `knowledge-item graph-${graphStatus.status}`;
+    row.className = "knowledge-item";
     const checked = state.selectedKnowledge.has(item.id) ? "checked" : "";
     row.innerHTML = `
       <input type="checkbox" value="${item.id}" ${checked} />
@@ -1565,23 +1529,6 @@ function renderKnowledge() {
         <div class="tag-row">${tags.map((tag) => `<span class="tag">${tag}</span>`).join("")}</div>
       </div>
     `;
-    const titleNode = row.querySelector(".meta-title");
-    if (titleNode) {
-      const titleRow = document.createElement("div");
-      titleRow.className = "knowledge-title-row";
-      const badge = document.createElement("span");
-      badge.className = `knowledge-graph-badge ${graphStatus.status}`;
-      badge.textContent = graphStatus.label;
-      titleNode.replaceWith(titleRow);
-      titleRow.appendChild(titleNode);
-      titleRow.appendChild(badge);
-    }
-    if (item.graph_error_message) {
-      const errorNode = document.createElement("div");
-      errorNode.className = "meta-sub graph-error-text";
-      errorNode.textContent = item.graph_error_message;
-      row.querySelector(".tag-row")?.before(errorNode);
-    }
     const checkbox = row.querySelector("input");
     checkbox.addEventListener("change", (event) => {
       const id = Number(event.target.value);
@@ -1617,7 +1564,6 @@ async function generateKnowledge() {
   startAnalysisTimer();
   try {
     showToast(`开始${parserModeLabel()}...`);
-    state.graph.newNodeIds = new Set();
     state.queue = state.queue.map((item) => ({ ...item, status: "processing" }));
     renderQueue();
     const data = await requestJson("/api/knowledge/generate", {
@@ -1628,14 +1574,12 @@ async function generateKnowledge() {
     state.queue = state.queue.map((item) => ({ ...item, status: "ready" }));
     renderQueue();
     await loadKnowledge();
-    state.graph.newNodeIds = new Set(data.graph?.pending_node_ids || []);
-    await loadGraph();
     stopAnalysisTimer();
     const elapsed = formatElapsed(state.analysis.elapsedMs);
     showToast(
       data.skipped
         ? `本轮截图已生成过，已复用知识文件，模式：${parserModeLabel(data.parser_mode || state.parserMode)}，耗时 ${elapsed}`
-        : `本轮知识文件生成完成，尚未入网，模式：${parserModeLabel(data.parser_mode || state.parserMode)}，耗时 ${elapsed}`
+        : `本轮知识文件生成完成，已保存到知识库，模式：${parserModeLabel(data.parser_mode || state.parserMode)}，耗时 ${elapsed}`
     );
   } catch (error) {
     stopAnalysisTimer();
@@ -1680,7 +1624,7 @@ async function generateFileKnowledge() {
     await loadKnowledge();
     stopFileAnalysisTimer();
     const elapsed = formatElapsed(state.fileAnalysis.elapsedMs);
-    showToast(data.skipped ? `本轮文件已生成过，已复用知识文件，耗时 ${elapsed}` : `本轮文件知识生成完成，尚未入网，耗时 ${elapsed}`);
+    showToast(data.skipped ? `本轮文件已生成过，已复用知识文件，耗时 ${elapsed}` : `本轮文件知识生成完成，已保存到知识库，耗时 ${elapsed}`);
   } catch (error) {
     stopFileAnalysisTimer();
     state.documentQueue = state.documentQueue.map((item) => ({ ...item, status: "error", error_message: error.message }));
@@ -1781,10 +1725,10 @@ async function generatePlannedKnowledge() {
   }
 }
 
-async function ingestSelectedKnowledgeToGraph() {
+async function deprecatedKnowledgeActionInLegacyShell() {
   const ids = [...state.selectedKnowledge];
   if (!ids.length) {
-    showToast("请先选择要入网的知识文件");
+    showToast("请先选择要处理的知识文件");
     return;
   }
   if (!activeApiSetting()) {
@@ -1794,21 +1738,9 @@ async function ingestSelectedKnowledgeToGraph() {
   }
   els.ingestKnowledge.disabled = true;
   try {
-    showToast("正在为选中知识文件生成待入网节点...");
-    const data = await requestJson("/api/knowledge/ingest-to-graph", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: ids }),
-    });
-    await loadKnowledge();
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.newNodeIds = new Set(data.pending_node_ids || []);
-    renderGraph();
-    const okCount = (data.results || []).filter((item) => item.ok).length;
-    const failCount = (data.results || []).length - okCount;
-    showToast(failCount ? `已入网 ${okCount} 个文件，失败 ${failCount} 个` : `已生成 ${data.pending_node_ids?.length || 0} 个待入网节点`);
+    showToast("正在处理选中的知识文件...");
+    showToast("当前版本已下线图谱处理入口");
+    showToast(failCount ? `已处理 ${okCount} 个文件，失败 ${failCount} 个` : `已生成 ${data.pending_node_ids?.length || 0} 个候选节点`);
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -1816,36 +1748,20 @@ async function ingestSelectedKnowledgeToGraph() {
   }
 }
 
-async function deleteSelectedNotIngestedKnowledge() {
+async function deprecatedKnowledgeDeleteInLegacyShell() {
   const ids = [...state.selectedKnowledge];
   if (!ids.length) {
-    showToast("请先选择要删除的未入网知识文件");
+    showToast("请先选择要删除的知识文件");
     return;
   }
   const selectedItems = state.knowledge.filter((item) => state.selectedKnowledge.has(item.id));
-  const blocked = selectedItems.filter((item) => !["not_ingested", "graph_error"].includes(item.graph_status));
-  if (blocked.length) {
-    showToast(`只能删除未入网或入网失败的知识文件，已跳过 ${blocked.length} 个`);
-  }
-  const deletableIds = selectedItems
-    .filter((item) => ["not_ingested", "graph_error"].includes(item.graph_status))
-    .map((item) => item.id);
-  if (!deletableIds.length) {
-    showToast("当前勾选项没有可删除的未入网知识文件");
+  if (!selectedItems.length) {
+    showToast("当前版本已下线该删除入口");
     return;
   }
   els.deleteNotIngestedKnowledge.disabled = true;
   try {
-    const data = await requestJson("/api/knowledge/delete-not-ingested", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: deletableIds }),
-    });
-    state.knowledge = data.items || [];
-    (data.deleted || []).forEach((item) => state.selectedKnowledge.delete(item.id));
-    renderKnowledge();
-    const skippedCount = (data.skipped || []).length;
-    showToast(skippedCount ? `已删除 ${data.deleted?.length || 0} 个，跳过 ${skippedCount} 个` : `已删除 ${data.deleted?.length || 0} 个未入网知识文件`);
+    showToast("当前版本已下线该删除入口");
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -1881,491 +1797,6 @@ async function copyMarkdownContent() {
     showToast("Markdown 已复制");
   } catch {
     showToast("复制失败，可以手动选中文本复制");
-  }
-}
-
-function nodeById(nodeId) {
-  return state.graph.nodes.find((node) => node.id === nodeId) || null;
-}
-
-function graphChildren(nodeId = null) {
-  if (!nodeId) {
-    const pendingRoot = state.graph.pendingNodes.length
-      ? [{
-          id: "pending-root",
-          label: "待入网",
-          node_type: "pending-root",
-          primary_category: "候选节点",
-        }]
-      : [];
-    return [...pendingRoot, ...state.graph.nodes.filter((node) => node.node_type === "category")];
-  }
-  if (nodeId === "pending-root") {
-    return state.graph.pendingNodes;
-  }
-  const current = nodeById(nodeId);
-  const childIds = [];
-  state.graph.edges.forEach((edge) => {
-    if (edge.source_id === nodeId) childIds.push(edge.target_id);
-    if (edge.target_id === nodeId) childIds.push(edge.source_id);
-  });
-  const seen = new Set();
-  const children = childIds
-    .map(nodeById)
-    .filter(Boolean)
-    .filter((node) => !(current?.node_type === "term" && node.node_type === "category"))
-    .filter((node) => !(current?.node_type === "term" && node.node_type === "group"))
-    .filter((node) => !(current?.node_type === "category" && !["term", "group"].includes(node.node_type)))
-    .filter((node) => !(current?.node_type === "group" && node.node_type !== "term"))
-    .filter((node) => {
-      if (node.id === nodeId || seen.has(node.id)) return false;
-      seen.add(node.id);
-      return true;
-    })
-    .sort((a, b) => {
-      if (a.node_type !== b.node_type) return a.node_type === "category" ? -1 : 1;
-      return a.label.localeCompare(b.label, "zh-CN");
-    });
-  if (current?.node_type === "category" && children.some((node) => node.node_type === "group")) {
-    return children.filter((node) => node.node_type === "group");
-  }
-  return children;
-}
-
-function graphKnowledgeCount(nodeId) {
-  if (nodeId === "pending-root") return state.graph.pendingNodes.length;
-  return state.graph.edges.filter((edge) => edge.source_id === nodeId || edge.target_id === nodeId).length;
-}
-
-function graphParentPath(nodeId) {
-  const node = nodeById(nodeId);
-  if (!node) return [];
-  if (node.node_type === "category") return [];
-  const groupEdge = state.graph.edges.find((edge) => {
-    const source = nodeById(edge.source_id);
-    const target = nodeById(edge.target_id);
-    return (
-      (edge.target_id === nodeId && source?.node_type === "group")
-      || (edge.source_id === nodeId && target?.node_type === "group")
-    );
-  });
-  if (groupEdge) {
-    const groupId = groupEdge.target_id === nodeId ? groupEdge.source_id : groupEdge.target_id;
-    const group = nodeById(groupId);
-    const categoryId = state.graph.nodes.find(
-      (item) => item.node_type === "category" && item.primary_category === group?.primary_category
-    )?.id;
-    return categoryId ? [categoryId, groupId] : [groupId];
-  }
-  const category = state.graph.nodes.find(
-    (item) => item.node_type === "category" && item.primary_category === node.primary_category
-  );
-  return category ? [category.id] : [];
-}
-
-function findGraphNode(query) {
-  const keyword = query.trim().toLowerCase();
-  if (!keyword) return null;
-  return state.graph.nodes.find((node) => {
-    const haystack = [
-      node.label,
-      node.primary_category,
-      node.secondary_category,
-      ...(node.keywords || []),
-    ].filter(Boolean).join(" ").toLowerCase();
-    return haystack.includes(keyword);
-  }) || null;
-}
-
-function searchGraphNode() {
-  const query = els.graphSearch.value || "";
-  const node = findGraphNode(query);
-  if (!node) {
-    state.graph.searchTargetId = null;
-    renderGraph();
-    showToast(query.trim() ? "没有找到匹配节点" : "请输入节点关键词");
-    return;
-  }
-  const parentPath = graphParentPath(node.id);
-  state.graph.searchTargetId = node.id;
-  enterGraphFolder(parentPath[parentPath.length - 1] || null, parentPath);
-  showGraphDetail(node.id);
-  showToast(`已定位：${node.label}`);
-}
-
-function renderGraphBreadcrumbs() {
-  els.graphBreadcrumbs.innerHTML = "";
-  const root = document.createElement("button");
-  root.type = "button";
-  root.textContent = "知识根目录";
-  root.addEventListener("click", () => enterGraphFolder(null, []));
-  els.graphBreadcrumbs.appendChild(root);
-  state.graph.path.forEach((nodeId, index) => {
-    const node = nodeId === "pending-root" ? { id: "pending-root", label: "待入网" } : nodeById(nodeId);
-    if (!node) return;
-    const sep = document.createElement("span");
-    sep.textContent = "/";
-    els.graphBreadcrumbs.appendChild(sep);
-    const crumb = document.createElement("button");
-    crumb.type = "button";
-    crumb.textContent = node.label;
-    crumb.addEventListener("click", () => enterGraphFolder(node.id, state.graph.path.slice(0, index + 1)));
-    els.graphBreadcrumbs.appendChild(crumb);
-  });
-}
-
-function renderGraph() {
-  renderGraphBreadcrumbs();
-  const current = state.graph.currentNodeId === "pending-root"
-    ? { id: "pending-root", label: "待入网", node_type: "pending-root" }
-    : nodeById(state.graph.currentNodeId);
-  const children = graphChildren(state.graph.currentNodeId);
-  els.graphFolders.innerHTML = "";
-  if (!children.length) {
-    els.graphFolders.innerHTML = `<div class="graph-empty">这一层暂时没有更多节点。</div>`;
-  } else {
-    children.forEach((node) => {
-      const card = document.createElement("article");
-      const isNew = state.graph.newNodeIds.has(node.id);
-      const isPending = node.node_type === "pending";
-      const isSearchTarget = state.graph.searchTargetId === node.id;
-      card.className = `graph-folder ${node.node_type === "category" ? "root" : node.node_type === "group" ? "group" : "term"} ${isNew || isPending ? "new-node" : ""} ${isSearchTarget ? "search-hit" : ""}`;
-      card.innerHTML = `
-        ${node.node_type !== "category" && node.node_type !== "pending-root" && node.node_type !== "group" ? `<button class="graph-card-delete" type="button" title="删除节点" aria-label="删除 ${escapeHtml(node.label)}">×</button>` : ""}
-        <button class="graph-folder-open" type="button" aria-label="打开 ${escapeHtml(node.label)}">
-          <span class="graph-folder-icon" aria-hidden="true">${node.node_type === "category" || node.node_type === "pending-root" ? "▣" : node.node_type === "group" ? "□" : "•"}</span>
-        </button>
-        <span class="graph-folder-main">
-          <input class="graph-card-name" value="${escapeHtml(node.label)}" readonly aria-label="节点名称" />
-          <small>${isPending ? "待确认 · " : isNew ? "本轮新增 · " : ""}${escapeHtml(node.primary_category || "未分类")} · ${graphKnowledgeCount(node.id)} 个关联</small>
-          ${isPending ? `<span class="graph-card-actions"><button type="button" data-action="approve">入网</button></span>` : ""}
-        </span>
-      `;
-      card.addEventListener("click", (event) => {
-        if (event.target.closest("button") || event.target.closest("input")) return;
-        enterGraphFolder(node.id);
-      });
-      card.querySelector(".graph-folder-open")?.addEventListener("click", () => enterGraphFolder(node.id));
-      card.querySelector(".graph-card-name")?.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          event.currentTarget.blur();
-        }
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.currentTarget.value = node.label || "";
-          event.currentTarget.blur();
-        }
-      });
-      card.querySelector(".graph-card-name")?.addEventListener("blur", () => {
-        if (!card.classList.contains("editing")) return;
-        card.classList.remove("editing");
-        card.querySelector(".graph-card-name")?.setAttribute("readonly", "");
-        if (card.querySelector(".graph-card-name")?.value.trim() !== node.label) {
-          renameGraphNodeFromCard(node, card);
-        }
-      });
-      card.addEventListener("dblclick", (event) => {
-        if (node.node_type === "category" || node.node_type === "pending-root" || node.node_type === "group") return;
-        if (event.target.closest("button")) return;
-        event.preventDefault();
-        const input = card.querySelector(".graph-card-name");
-        card.classList.add("editing");
-        input?.removeAttribute("readonly");
-        input?.focus();
-        input?.select();
-      });
-      card.querySelector(".graph-card-delete")?.addEventListener("click", () => deleteGraphNodeFromCard(node));
-      card.querySelector('[data-action="approve"]')?.addEventListener("click", () => approvePendingNode(node.id));
-      els.graphFolders.appendChild(card);
-    });
-  }
-  if (current) {
-    if (current.id === "pending-root") {
-      els.graphDetail.classList.remove("expanded");
-      els.graphDetail.textContent = "这里是新知识抽取出的候选节点。请先改名、删除无效节点，确认后点击“入网”。";
-    } else {
-      showGraphDetail(current.id);
-    }
-  } else {
-    els.graphDetail.classList.remove("expanded");
-    els.graphDetail.textContent = "点击类目或名词进入下一层，Esc 返回上一层。节点只保留可检索的专有名词和稳定概念。";
-  }
-}
-
-function enterGraphFolder(nodeId, explicitPath = null) {
-  if (!nodeId) {
-    state.graph.currentNodeId = null;
-    state.graph.path = [];
-    renderGraph();
-    return;
-  }
-  if (explicitPath) {
-    state.graph.currentNodeId = nodeId;
-    state.graph.path = explicitPath;
-  } else {
-    state.graph.currentNodeId = nodeId;
-    const existingIndex = state.graph.path.indexOf(nodeId);
-    if (existingIndex >= 0) {
-      state.graph.path = state.graph.path.slice(0, existingIndex + 1);
-    } else {
-      state.graph.path.push(nodeId);
-    }
-  }
-  renderGraph();
-}
-
-function exitGraphNode() {
-  if (!state.graph.path.length) return;
-  state.graph.path.pop();
-  state.graph.currentNodeId = state.graph.path[state.graph.path.length - 1] || null;
-  renderGraph();
-}
-
-async function loadGraph() {
-  const data = await requestJson("/api/graph");
-  state.graph.nodes = data.nodes || [];
-  state.graph.edges = data.edges || [];
-  state.graph.pendingNodes = data.pending_nodes || [];
-  renderGraph();
-}
-
-async function showGraphDetail(nodeId) {
-  const data = await requestJson(`/api/graph/node/${encodeURIComponent(nodeId)}`);
-  const node = data.node;
-  const related = data.knowledge || [];
-  const edges = data.edges || [];
-  const editable = node.node_type !== "category";
-  els.graphDetail.classList.add("expanded");
-  els.graphDetail.innerHTML = `
-    <h3>${escapeHtml(node.label)}</h3>
-    <p>${escapeHtml(node.summary || "暂无摘要")}</p>
-    <div class="tag-row">${(node.keywords || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
-    ${editable ? `
-      <div class="graph-node-editor">
-        <input id="graphNodeNameInput" type="text" value="${escapeHtml(node.label)}" aria-label="节点名称" />
-        <button id="saveGraphNodeName" type="button">改名</button>
-        <button id="deleteGraphNode" type="button" class="danger-button">删除</button>
-      </div>
-    ` : ""}
-    <dl class="graph-detail-list">
-      <dt>层级</dt><dd>${escapeHtml(node.node_type || "")}</dd>
-      <dt>归类</dt><dd>${escapeHtml([node.primary_category, node.secondary_category].filter(Boolean).join(" / "))}</dd>
-      <dt>来源文件</dt><dd>${related.length ? related.map((item) => escapeHtml(item.title || item.markdown_path || "")).join("<br>") : "暂无直接来源"}</dd>
-      <dt>关系</dt><dd>${edges.length ? edges.map((edge) => `${escapeHtml(edge.source_label || edge.source_id)} → ${escapeHtml(edge.target_label || edge.target_id)}（${escapeHtml(edge.relation_type)}）`).join("<br>") : "暂无关系"}</dd>
-    </dl>
-  `;
-  if (editable) {
-    document.querySelector("#saveGraphNodeName")?.addEventListener("click", () => renameGraphNode(node.id));
-    document.querySelector("#deleteGraphNode")?.addEventListener("click", () => deleteGraphNode(node.id, node.label));
-  }
-}
-
-async function renameGraphNode(nodeId) {
-  const input = document.querySelector("#graphNodeNameInput");
-  const label = input?.value.trim();
-  if (!label) {
-    showToast("节点名称不能为空");
-    return;
-  }
-  try {
-    const data = await requestJson(`/api/graph/node/${encodeURIComponent(nodeId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label }),
-    });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.newNodeIds.delete(nodeId);
-    if (data.id) state.graph.newNodeIds.add(data.id);
-    state.graph.currentNodeId = data.id || nodeId;
-    state.graph.path = state.graph.path.map((id) => (id === nodeId ? state.graph.currentNodeId : id));
-    renderGraph();
-    showToast("节点名称已更新");
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-async function renameGraphNodeFromCard(node, card) {
-  const input = card.querySelector(".graph-card-name");
-  const label = input?.value.trim();
-  if (!label) {
-    showToast("节点名称不能为空");
-    return;
-  }
-  const isPending = node.node_type === "pending";
-  const url = isPending
-    ? `/api/graph/pending/${encodeURIComponent(node.id)}`
-    : `/api/graph/node/${encodeURIComponent(node.id)}`;
-  try {
-    const data = await requestJson(url, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label }),
-    });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    if (!isPending) {
-      state.graph.currentNodeId = data.id || state.graph.currentNodeId;
-      state.graph.path = state.graph.path.map((id) => (id === node.id ? state.graph.currentNodeId : id));
-    }
-    renderGraph();
-    showToast(isPending ? "候选节点已更新" : "节点名称已更新");
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-async function approvePendingNode(nodeId) {
-  try {
-    const data = await requestJson(`/api/graph/pending/${encodeURIComponent(nodeId)}/approve`, { method: "POST" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.newNodeIds.delete(nodeId);
-    if (data.node_id) state.graph.newNodeIds.add(data.node_id);
-    renderGraph();
-    showToast(`节点已入网，增量整理 ${data.organized || 0} 个节点，补充 ${data.linked || 0} 条关系`);
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-async function deleteGraphNode(nodeId, label) {
-  try {
-    const data = await requestJson(`/api/graph/node/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.newNodeIds.delete(nodeId);
-    exitGraphNode();
-    showToast("节点已删除");
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-async function deleteGraphNodeFromCard(node) {
-  const url = node.node_type === "pending"
-    ? `/api/graph/pending/${encodeURIComponent(node.id)}`
-    : `/api/graph/node/${encodeURIComponent(node.id)}`;
-  try {
-    const data = await requestJson(url, { method: "DELETE" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.newNodeIds.delete(node.id);
-    if (state.graph.currentNodeId === node.id) exitGraphNode();
-    renderGraph();
-    showToast("节点已删除");
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-async function organizeGraph() {
-  els.resetGraphView.disabled = true;
-  try {
-    showToast("正在调用 API 整理图谱...");
-    const data = await requestJson("/api/graph/organize", { method: "POST" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.currentNodeId = null;
-    state.graph.path = [];
-    renderGraph();
-    showToast(`图谱已整理：${data.groups || 0} 个分组，归类 ${data.linked || 0} 个节点`);
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    els.resetGraphView.disabled = false;
-  }
-}
-
-function openPendingNodes() {
-  enterGraphFolder("pending-root", ["pending-root"]);
-}
-
-async function refreshGraph() {
-  els.refreshGraph.disabled = true;
-  try {
-    const data = await requestJson("/api/graph/refresh", { method: "POST" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.currentNodeId = null;
-    state.graph.path = [];
-    state.graph.newNodeIds = new Set([...state.graph.newNodeIds].filter((id) => state.graph.nodes.some((node) => node.id === id)));
-    renderGraph();
-    showToast(`图谱已刷新，合并 ${data.merged || 0} 个同名节点`);
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    els.refreshGraph.disabled = false;
-  }
-}
-
-async function rebuildGraph() {
-  els.rebuildGraph.disabled = true;
-  try {
-    const data = await requestJson("/api/graph/rebuild", { method: "POST" });
-    state.graph.nodes = data.nodes || [];
-    state.graph.edges = data.edges || [];
-    state.graph.pendingNodes = data.pending_nodes || [];
-    state.graph.currentNodeId = null;
-    state.graph.path = [];
-    state.graph.newNodeIds = new Set();
-    renderGraph();
-    showToast(`图谱已重建：${data.rebuilt || 0} 个知识文件入网`);
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    els.rebuildGraph.disabled = false;
-  }
-}
-
-function appendRetrievalMessage(role, html) {
-  const message = document.createElement("article");
-  message.className = `retrieval-message ${role}`;
-  message.innerHTML = html;
-  els.retrievalMessages.appendChild(message);
-  els.retrievalMessages.scrollTop = els.retrievalMessages.scrollHeight;
-}
-
-async function askKnowledge(event) {
-  event.preventDefault();
-  const question = els.retrievalQuestion.value.trim();
-  if (!question) {
-    showToast("请输入要拉取的知识问题");
-    return;
-  }
-  appendRetrievalMessage("user", escapeHtml(question));
-  els.retrievalQuestion.value = "";
-  els.sendRetrieval.disabled = true;
-  els.retrievalStatus.textContent = "检索中...";
-  try {
-    const data = await requestJson("/api/retrieval/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
-    });
-    const references = (data.reference_files || []).map(escapeHtml).join("、") || "无";
-    const followUps = (data.follow_up_suggestions || [])
-      .map((item) => `<li>${escapeHtml(item)}</li>`)
-      .join("");
-    appendRetrievalMessage(
-      "assistant",
-      `<div>${escapeHtml(data.answer || "")}</div>
-       <div class="retrieval-meta">参考：${references}</div>
-       ${followUps ? `<ul class="retrieval-followups">${followUps}</ul>` : ""}`
-    );
-    els.retrievalStatus.textContent = `命中 ${(data.matches || []).length} 个知识文件`;
-  } catch (error) {
-    appendRetrievalMessage("assistant", `拉取失败：${escapeHtml(error.message)}`);
-    els.retrievalStatus.textContent = "拉取失败";
-  } finally {
-    els.sendRetrieval.disabled = false;
   }
 }
 
@@ -2467,8 +1898,6 @@ els.miningMediaInput.addEventListener("change", (event) => {
 });
 els.attachMiningMediaUrls.addEventListener("click", () => attachMiningMediaUrls().catch((error) => showToast(error.message)));
 els.learnCreationStrategy.addEventListener("click", () => learnCreationStrategy().catch((error) => showToast(error.message)));
-els.ingestKnowledge.addEventListener("click", ingestSelectedKnowledgeToGraph);
-els.deleteNotIngestedKnowledge.addEventListener("click", deleteSelectedNotIngestedKnowledge);
 els.openWriterTool.addEventListener("click", openWriterTool);
 els.openApiSettings.addEventListener("click", openApiSettings);
 els.openGlobalSettings?.addEventListener("click", () => {
@@ -2544,28 +1973,6 @@ els.copyMarkdown.addEventListener("click", copyMarkdownContent);
 els.markdownModal.addEventListener("click", (event) => {
   if (event.target === els.markdownModal) closeMarkdownPreview();
 });
-els.refreshGraph.addEventListener("click", openPendingNodes);
-els.resetGraphView.addEventListener("click", organizeGraph);
-els.rebuildGraph.addEventListener("click", rebuildGraph);
-els.graphSearch.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    searchGraphNode();
-  }
-});
-els.graphSearch.addEventListener("search", () => {
-  if (!els.graphSearch.value) {
-    state.graph.searchTargetId = null;
-    renderGraph();
-  }
-});
-els.retrievalForm.addEventListener("submit", askKnowledge);
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.graph.path.length) {
-    event.preventDefault();
-    exitGraphNode();
-  }
-});
 els.knowledgePanelHandle.addEventListener("pointerdown", startKnowledgePanelResize);
 els.knowledgeKeyword.addEventListener("input", (event) => {
   state.filters.keyword = event.target.value;
@@ -2640,7 +2047,7 @@ window.addEventListener("resize", () => {
   applyKnowledgePanelHeight(Number.parseFloat(els.knowledgePanel.style.height));
 });
 
-Promise.all([loadV2Contracts(), loadApiSettings({ silent: true }), loadKnowledge(), loadGraph(), loadMiningProjects()]).catch((error) => showToast(error.message));
+Promise.all([loadV2Contracts(), loadApiSettings({ silent: true }), loadKnowledge(), loadMiningProjects()]).catch((error) => showToast(error.message));
 renderApiLogs();
 renderParserMode();
 switchInputTab(state.activeInput);
@@ -2653,3 +2060,6 @@ renderDocumentPlan();
 renderMiningWorkspace();
 renderFileAnalysisTime();
 restoreKnowledgePanelHeight();
+function unwrapV2(payload) {
+  return payload?.data ?? {};
+}

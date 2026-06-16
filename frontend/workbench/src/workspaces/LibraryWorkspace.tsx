@@ -66,7 +66,6 @@ export function LibraryWorkspace({
             <div>
               <span>{t("common.primary")}</span>
               <h2>{t("library.editor")}</h2>
-              <p>{t("library.body")}</p>
             </div>
           </div>
 
@@ -106,7 +105,7 @@ export function LibraryWorkspace({
               {!isDirty ? <p className="hint">{t("library.noChanges")}</p> : null}
             </div>
           ) : (
-            <EmptyState title={t("library.editor.empty")} body={t("library.needSelect")} />
+            <EmptyState title={t("library.editor.empty")} />
           )}
         </section>
       </div>

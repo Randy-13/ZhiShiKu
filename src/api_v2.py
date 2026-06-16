@@ -15,6 +15,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 from pydantic import BaseModel, HttpUrl
 
@@ -29,10 +30,28 @@ import storage
 import web_settings
 import writer_tools
 from markdown_writer import render_knowledge_markdown
+from media_transcriber import transcribe_audio_url
 from src.materials.entities import MaterialType
-from src.auth import create_invitation, current_context, login, logout, register_with_invite
+from src.auth import (
+    create_invitation,
+    current_context,
+    list_invitations,
+    list_users,
+    login,
+    logout,
+    register_with_invite,
+    update_user_status,
+)
 from src import jobs as job_service
 from src import quotas as quota_service
+from src.settings_helpers import (
+    activate_list_setting,
+    delete_list_setting,
+    resolve_api_test_setting,
+    resolve_image_api_test_setting,
+    save_list_setting,
+    test_asr_setting_payload,
+)
 from src.shared.app_shell import GLOBAL_LIBRARIES, PRIMARY_SECTIONS, WORKSPACE_ENTRIES
 from src.shared.responses import success_payload
 
@@ -221,6 +240,10 @@ class AdminInvitationRequest(BaseModel):
     days: int = 14
 
 
+class AdminUserStatusRequest(BaseModel):
+    status: str
+
+
 class JobCreateRequest(BaseModel):
     kind: str
     payload: dict[str, object] = {}
@@ -327,6 +350,37 @@ def auth_admin_create_invitation(payload: AdminInvitationRequest, request: Reque
         if context["user"]["role"] != "admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有管理员可以创建邀请码")
         return success_payload(data=create_invitation(conn, role=payload.role, max_uses=payload.max_uses, days=payload.days))
+
+
+@auth_router.get("/admin/users")
+def auth_admin_users(request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        if context["user"]["role"] != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can view users")
+        return success_payload(data={"items": list_users(conn)})
+
+
+@auth_router.post("/admin/users/{user_id}/status")
+def auth_admin_update_user_status(user_id: str, payload: AdminUserStatusRequest, request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        user = context["user"]
+        if user["role"] != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can manage users")
+        return success_payload(data={"item": update_user_status(conn, user_id, payload.status, user["id"])})
+
+
+@auth_router.get("/admin/invitations")
+def auth_admin_invitations(request: Request) -> dict[str, object]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+        if context["user"]["role"] != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can view invitations")
+        return success_payload(data={"items": list_invitations(conn)})
 
 
 @jobs_router.get("")
@@ -507,8 +561,7 @@ def settings_api() -> dict[str, object]:
 @router.post("/settings/api")
 def save_settings_api(request: ApiSettingRequest) -> dict[str, object]:
     try:
-        item = api_settings.save_setting(request.model_dump())
-        return success_payload(data={"ok": True, "item": item, **api_settings.list_payload()})
+        return success_payload(data={"ok": True, **save_list_setting(api_settings, request.model_dump())})
     except ValueError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -516,8 +569,7 @@ def save_settings_api(request: ApiSettingRequest) -> dict[str, object]:
 @router.post("/settings/api/active")
 def activate_settings_api(request: SettingActiveRequest) -> dict[str, object]:
     try:
-        item = api_settings.set_active(request.id)
-        return success_payload(data={"ok": True, "item": item, **api_settings.list_payload()})
+        return success_payload(data={"ok": True, **activate_list_setting(api_settings, request.id)})
     except (KeyError, ValueError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -525,8 +577,7 @@ def activate_settings_api(request: SettingActiveRequest) -> dict[str, object]:
 @router.delete("/settings/api/{setting_id}")
 def delete_settings_api(setting_id: str) -> dict[str, object]:
     try:
-        api_settings.delete_setting(setting_id)
-        return success_payload(data={"ok": True, **api_settings.list_payload()})
+        return success_payload(data={"ok": True, **delete_list_setting(api_settings, setting_id)})
     except KeyError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -534,8 +585,48 @@ def delete_settings_api(setting_id: str) -> dict[str, object]:
 @router.post("/settings/api/test")
 def test_settings_api(request: ApiSettingTestRequest) -> dict[str, object]:
     try:
-        setting = _resolve_api_test_setting(request)
-        return success_payload(data={"ok": True, "diagnostic": deepseek_client.diagnose(setting)})
+        setting = resolve_api_test_setting(request, not_found_message="API 配置不存在")
+        diagnostic = deepseek_client.diagnose(setting)
+        return success_payload(data={**diagnostic, "ok": diagnostic.get("ok", "true")})
+    except Exception as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.get("/settings/image")
+def settings_image() -> dict[str, object]:
+    return success_payload(data=image_api_settings.list_payload())
+
+
+@router.post("/settings/image")
+def save_settings_image(request: ApiSettingRequest) -> dict[str, object]:
+    try:
+        return success_payload(data={"ok": True, **save_list_setting(image_api_settings, request.model_dump())})
+    except ValueError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/settings/image/active")
+def activate_settings_image(request: SettingActiveRequest) -> dict[str, object]:
+    try:
+        return success_payload(data={"ok": True, **activate_list_setting(image_api_settings, request.id)})
+    except (KeyError, ValueError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.delete("/settings/image/{setting_id}")
+def delete_settings_image(setting_id: str) -> dict[str, object]:
+    try:
+        return success_payload(data={"ok": True, **delete_list_setting(image_api_settings, setting_id)})
+    except KeyError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/settings/image/test")
+def test_settings_image(request: ApiSettingTestRequest) -> dict[str, object]:
+    try:
+        setting = resolve_image_api_test_setting(request, not_found_message="图片 API 配置不存在")
+        diagnostic = image_api_settings.diagnose(setting)
+        return success_payload(data={**diagnostic, "ok": diagnostic.get("ok", "true")})
     except Exception as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -548,8 +639,7 @@ def settings_asr() -> dict[str, object]:
 @router.post("/settings/asr")
 def save_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
     try:
-        item = asr_settings.save_setting(request.model_dump())
-        return success_payload(data={"ok": True, "item": item, **asr_settings.list_payload()})
+        return success_payload(data={"ok": True, **save_list_setting(asr_settings, request.model_dump())})
     except ValueError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -557,14 +647,11 @@ def save_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
 @router.post("/settings/asr/test")
 def test_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
     try:
-        payload = request.model_dump()
-        if not payload.get("api_key"):
-            payload["api_key"] = asr_settings.load_setting().get("api_key")
-        saved = asr_settings.save_setting(payload)
-        setting = asr_settings.active_setting()
-        message = f"{setting.get('provider')} / {setting.get('model')} 配置字段完整。"
-        asr_settings.mark_test_result(True, message)
-        return success_payload(data={"ok": True, "item": saved, "message": message})
+        return success_payload(
+            data={
+                **test_asr_setting_payload(request.model_dump(), transcribe_audio_url_fn=transcribe_audio_url),
+            }
+        )
     except (ValueError, RuntimeError) as exc:
         asr_settings.mark_test_result(False, str(exc))
         return success_payload(data={"ok": False, "error": str(exc)})
@@ -894,11 +981,7 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest, 
             return success_payload(data={"ok": True, "item": existing, "skipped": True})
 
         _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-        setting = api_settings.active_setting()
-        knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
-            combined_raw_text,
-            setting=setting,
-        )
+        knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(combined_raw_text)
         _ = learned_raw_text
         if request.title.strip():
             knowledge.title = request.title.strip()
@@ -951,8 +1034,6 @@ def learn_save_focus_file(request: LearnSaveFocusRequest, http_request: Request)
             tags=json.dumps(_tags_from_meta(meta), ensure_ascii=False),
             status="ready",
             error_message=None,
-            graph_status="not_ingested",
-            graph_error_message=None,
             owner_user_id=owner_meta.get("owner_user_id") or None,
             workspace_id=owner_meta.get("workspace_id") or None,
         )
@@ -1006,12 +1087,7 @@ def mine_interpret(request: MineInterpretRequest, http_request: Request) -> dict
         context = _request_context(http_request)
         sources = [_read_mine_source(item, context=context) for item in request.sources]
         _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-        setting = api_settings.active_setting()
-        result = deepseek_client.interpret_from_perspective(
-            sources,
-            request.perspective.model_dump(),
-            setting=setting,
-        )
+        result = deepseek_client.interpret_from_perspective(sources, request.perspective.model_dump())
         markdown = _render_perspective_markdown(result, request.perspective, sources)
         return success_payload(
             data={
@@ -1123,8 +1199,10 @@ def create_writer_topics(project_id: str, request: CreateWriterTopicRequest, htt
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
     _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-    setting = api_settings.active_setting()
-    result = deepseek_client.generate_topics(_writer_markdown_files(sources), setting=setting)
+    result = deepseek_client.generate_topics(
+        _writer_markdown_files(sources),
+        setting=deepseek_client.current_setting(),
+    )
     return success_payload(data={"ok": True, **result.model_dump()})
 
 
@@ -1138,11 +1216,10 @@ def create_writer_article(project_id: str, request: CreateWriterArticleRequest, 
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
     _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-    setting = api_settings.active_setting()
     result = deepseek_client.generate_wechat_article(
         request.topic,
         _writer_markdown_files(sources),
-        setting=setting,
+        setting=deepseek_client.current_setting(),
     )
     workspace = writer_tools.resolve_project_workspace(project_id)
     article_path = writer_tools.write_article(workspace, result.markdown)
@@ -1168,12 +1245,11 @@ def create_writer_revise(project_id: str, request: CreateWriterReviseRequest, ht
     if not sources:
         return success_payload(data={"ok": False, "error": "请先从全局库加入库文件"})
     _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-    setting = api_settings.active_setting()
     result = deepseek_client.revise_wechat_article(
         request.markdown,
         request.instruction,
         _writer_markdown_files(sources),
-        setting=setting,
+        setting=deepseek_client.current_setting(),
     )
     workspace = writer_tools.resolve_project_workspace(project_id)
     article_path = writer_tools.write_article(workspace, result.markdown)
@@ -1293,31 +1369,6 @@ def _list_settings_section(section_id: str, label: str, payload: dict[str, objec
         "activeName": active.get("name") if active else "",
         "itemCount": len(items),
     }
-
-
-def _resolve_api_test_setting(request: ApiSettingTestRequest) -> dict[str, object]:
-    if request.setting:
-        payload = request.setting.model_dump()
-        if payload.get("id") and not payload.get("api_key"):
-            existing = api_settings.get_setting(payload["id"])
-            if existing:
-                payload["api_key"] = existing.get("api_key")
-        return {
-            "id": payload.get("id") or "temporary",
-            "name": payload.get("name") or "临时 API",
-            "provider": payload.get("provider") or "compatible",
-            "base_url": (payload.get("base_url") or "").strip().rstrip("/"),
-            "model": (payload.get("model") or "").strip(),
-            "api_key": (payload.get("api_key") or "").strip(),
-            "timeout": payload.get("timeout") or 60,
-            "max_retries": payload.get("max_retries") or 0,
-        }
-    if request.id:
-        setting = api_settings.get_setting(request.id)
-        if setting is None:
-            raise KeyError("API 配置不存在")
-        return setting
-    return api_settings.active_setting()
 
 
 def _single_setting_section(section_id: str, label: str, payload: dict[str, object]) -> dict[str, object]:
@@ -1586,11 +1637,7 @@ def _execute_learn_refine_job(payload: dict[str, object], context: dict[str, obj
     request, sources, combined_raw_text, source_hash, existing = _learn_refine_job_inputs(payload, context)
     if existing and existing.get("markdown_path") and existing.get("status") == "ready":
         return {"ok": True, "item": existing, "skipped": True}
-    setting = api_settings.active_setting()
-    knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
-        combined_raw_text,
-        setting=setting,
-    )
+    knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(combined_raw_text)
     _ = learned_raw_text
     if request.title.strip():
         knowledge.title = request.title.strip()
@@ -1621,12 +1668,7 @@ def _mine_interpret_job_inputs(
 
 def _execute_mine_interpret_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
     request, sources = _mine_interpret_job_inputs(payload, context)
-    setting = api_settings.active_setting()
-    result = deepseek_client.interpret_from_perspective(
-        sources,
-        request.perspective.model_dump(),
-        setting=setting,
-    )
+    result = deepseek_client.interpret_from_perspective(sources, request.perspective.model_dump())
     markdown = _render_perspective_markdown(result, request.perspective, sources)
     return {
         "ok": True,
@@ -1771,8 +1813,10 @@ def _execute_writer_topics_job(payload: dict[str, object], context: dict[str, ob
     sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return {"ok": False, "error": "请先从全局库加入库文件"}
-    setting = api_settings.active_setting()
-    result = deepseek_client.generate_topics(_writer_markdown_files(sources), setting=setting)
+    result = deepseek_client.generate_topics(
+        _writer_markdown_files(sources),
+        setting=deepseek_client.current_setting(),
+    )
     return {"ok": True, "project_id": project_id, "project": project, **result.model_dump()}
 
 
@@ -1785,11 +1829,10 @@ def _execute_writer_article_job(payload: dict[str, object], context: dict[str, o
     sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return {"ok": False, "error": "请先从全局库加入库文件"}
-    setting = api_settings.active_setting()
     result = deepseek_client.generate_wechat_article(
         request.topic,
         _writer_markdown_files(sources),
-        setting=setting,
+        setting=deepseek_client.current_setting(),
     )
     workspace = writer_tools.resolve_project_workspace(project_id)
     article_path = writer_tools.write_article(workspace, result.markdown)
@@ -1813,12 +1856,11 @@ def _execute_writer_revise_job(payload: dict[str, object], context: dict[str, ob
     sources = _project_writer_sources(project, request.library_files, context=context)
     if not sources:
         return {"ok": False, "error": "请先从全局库加入库文件"}
-    setting = api_settings.active_setting()
     result = deepseek_client.revise_wechat_article(
         request.markdown,
         request.instruction,
         _writer_markdown_files(sources),
-        setting=setting,
+        setting=deepseek_client.current_setting(),
     )
     workspace = writer_tools.resolve_project_workspace(project_id)
     article_path = writer_tools.write_article(workspace, result.markdown)
@@ -1874,7 +1916,17 @@ def _library_file_visible(path: Path, context: dict[str, object]) -> bool:
     text = path.read_text(encoding="utf-8", errors="ignore")
     meta = _markdown_meta(text)
     owner = meta.get("owner_user_id") or meta.get("Owner User ID")
-    return bool(owner and owner == user.get("id"))
+    if owner and owner == user.get("id"):
+        return True
+    relative_path = storage.storage_relative(path)
+    if not relative_path:
+        return False
+    with storage.connect() as conn:
+        row = conn.execute(
+            "SELECT owner_user_id FROM knowledge_entries WHERE markdown_path = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (relative_path,),
+        ).fetchone()
+    return bool(row and row["owner_user_id"] and row["owner_user_id"] == user.get("id"))
 
 
 def _assert_library_file_visible(path: Path, context: dict[str, object]) -> None:
@@ -2465,6 +2517,10 @@ def _writer_markdown_files(sources: list[dict[str, str]]) -> list[tuple[str, str
 def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, sources: list[dict[str, str]]) -> str:
     now = datetime.now().isoformat(timespec="seconds")
     tags = "、".join(result.tags or [perspective.name])
+    core_facts = result.core_facts or result.findings or []
+    deep_analysis = result.deep_analysis or []
+    risks = result.risks_and_questions or result.risks_and_limits or []
+    conclusions = result.conclusion_and_actions or result.writing_implications or []
     sections = [
         f"# {result.title}",
         "",
@@ -2485,20 +2541,31 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
             "",
             result.summary.strip() or "暂无摘要。",
             "",
-            "## 视角解读",
+            "## 视角立场与标准",
+            "",
+            result.criteria.strip() or "请补充该视角下的判断标准与取舍原则。",
+            "",
+            "## 原文信息提炼",
             "",
         ]
     )
-    if result.findings:
-        for finding in result.findings:
+    if core_facts:
+        for finding in core_facts:
             refs = "、".join(finding.evidence_refs) if finding.evidence_refs else "请补充引用"
             sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), "", f"- 引用：{refs}", ""])
     else:
-        sections.extend(["暂无可保存的视角解读。", ""])
-    sections.extend(["## 创作启发", ""])
-    sections.extend(f"- {item}" for item in result.writing_implications) if result.writing_implications else sections.append("- 暂无。")
-    sections.extend(["", "## 风险与边界", ""])
-    sections.extend(f"- {item}" for item in result.risks_and_limits) if result.risks_and_limits else sections.append("- 暂无。")
+        sections.extend(["暂无可保存的原文提炼。", ""])
+    sections.extend(["## 专属分析", ""])
+    if deep_analysis:
+        for finding in deep_analysis:
+            refs = "、".join(finding.evidence_refs) if finding.evidence_refs else "请补充引用"
+            sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), "", f"- 引用：{refs}", ""])
+    else:
+        sections.append("暂无专属分析。")
+    sections.extend(["", "## 风险疑问", ""])
+    sections.extend(f"- {item}" for item in risks) if risks else sections.append("- 暂无。")
+    sections.extend(["", "## 结论建议", ""])
+    sections.extend(f"- {item}" for item in conclusions) if conclusions else sections.append("- 暂无。")
     sections.append("")
     return "\n".join(sections)
 
@@ -2667,11 +2734,7 @@ def _polish_raw_material(material_type: str, body: str, fallback_title: str, pre
 
     response["enabled"] = True
     try:
-        polished = deepseek_client.polish_raw_material(
-            body,
-            material_type=material_type,
-            setting=api_settings.active_setting(),
-        )
+        polished = deepseek_client.polish_raw_material(body, material_type=material_type)
     except Exception as exc:
         response["status"] = "failed"
         response["error"] = deepseek_client.explain_error(exc)
@@ -2774,7 +2837,10 @@ def _extract_web_link_queue(items: list[CollectQueueItem]) -> tuple[str, list[st
 
 
 def _document_visual_recognizer(image_paths: list[Path]) -> str:
-    return deepseek_client.recognize_screenshots_with_ai(image_paths, setting=api_settings.active_setting())
+    return deepseek_client.recognize_screenshots_with_ai(
+        image_paths,
+        setting=deepseek_client.current_setting(),
+    )
 
 
 def _extract_document_queue(items: list[CollectQueueItem], parser_mode: str | None = None) -> tuple[str, list[str], list[str]]:
@@ -3637,11 +3703,20 @@ def _html_title(html_text: str) -> str:
 
 def _html_to_text(html_text: str) -> str:
     html_text = _main_content_hint(html_text)
+    try:
+        soup = BeautifulSoup(html_text, "lxml")
+        text = _extract_best_html_text(soup)
+        if text:
+            cleaned = _clean_html_article_text(text)
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
     cleaned = re.sub(r"<(script|style|noscript|nav|footer|aside)[^>]*>.*?</\1>", " ", html_text, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</(p|div|section|article|li|h[1-6]|br|blockquote|figcaption)>", "\n", cleaned, flags=re.IGNORECASE)
     cleaned = _strip_tags(cleaned)
     lines = [_collapse_space(line) for line in cleaned.splitlines()]
-    return "\n".join(line for line in lines if line)
+    return _clean_html_article_text("\n".join(line for line in lines if line))
 
 
 def _main_content_hint(html_text: str) -> str:
@@ -3655,6 +3730,79 @@ def _main_content_hint(html_text: str) -> str:
         if match:
             return match.group(match.lastindex or 1)
     return html_text
+
+
+def _extract_best_html_text(soup: BeautifulSoup) -> str:
+    for selector in ("article", "main", "[role='main']", "[itemprop='articleBody']"):
+        node = soup.select_one(selector)
+        if node:
+            text = _node_text_score(node)
+            cleaned = _clean_html_article_text(text)
+            if len(cleaned) >= 200:
+                return cleaned
+
+    best_text = ""
+    best_score = 0
+    for node in soup.find_all(["article", "main", "section", "div"]):
+        text = _node_text_score(node)
+        cleaned = _clean_html_article_text(text)
+        if len(cleaned) < 200:
+            continue
+        score = _html_text_score(node, cleaned)
+        if score > best_score:
+            best_text = cleaned
+            best_score = score
+    return best_text
+
+
+def _node_text_score(node) -> str:
+    node = BeautifulSoup(str(node), "lxml")
+    for tag in node.find_all(["script", "style", "noscript", "nav", "footer", "aside", "form", "header", "menu"]):
+        tag.decompose()
+    parts = []
+    for element in node.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "figcaption"]):
+        text = _collapse_space(element.get_text(" ", strip=True))
+        if text:
+            parts.append(text)
+    if not parts:
+        text = _collapse_space(node.get_text(" ", strip=True))
+        return text
+    return "\n".join(parts)
+
+
+def _html_text_score(node, text: str) -> int:
+    paragraph_count = len([line for line in text.splitlines() if len(line.strip()) >= 20])
+    link_text = _collapse_space(" ".join(link.get_text(" ", strip=True) for link in node.find_all("a")))
+    link_ratio = len(link_text) / max(len(text), 1)
+    penalty = int(link_ratio * 500)
+    bonus = paragraph_count * 40
+    long_paragraph_bonus = len([line for line in text.splitlines() if len(line.strip()) >= 60]) * 30
+    class_hint = " ".join(node.get("class", [])) if isinstance(node.get("class"), list) else str(node.get("class") or "")
+    if re.search(r"(article|content|post|entry|body|main)", class_hint, flags=re.IGNORECASE):
+        bonus += 120
+    if re.search(r"(nav|menu|toolbar|footer|sidebar|aside|breadcrumb|recommend)", class_hint, flags=re.IGNORECASE):
+        penalty += 180
+    if node.name in {"article", "main"}:
+        bonus += 180
+    return len(text) + bonus + long_paragraph_bonus - penalty
+
+
+def _clean_html_article_text(text: str) -> str:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    filtered = []
+    for raw_line in lines:
+        line = _collapse_space(raw_line)
+        if not line:
+            filtered.append("")
+            continue
+        lower = line.lower()
+        if re.fullmatch(r"(home|login|sign in|sign up|next|previous|相关阅读|相关推荐|返回顶部)", lower):
+            continue
+        if len(line) <= 8 and re.fullmatch(r"[0-9/.-]+", line):
+            continue
+        filtered.append(line)
+    text = "\n".join(filtered)
+    return document_parser.clean_extracted_document_text(text)
 
 
 def _extract_meta(html_text: str, names: list[str]) -> str:

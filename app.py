@@ -17,7 +17,6 @@ import api_settings
 import asr_settings
 import deepseek_client
 import document_parser
-import graph_core
 import image_api_settings
 import media_parser
 import ocr_client
@@ -31,7 +30,15 @@ from src.auth import current_context, is_cloud_mode
 from src import quotas as quota_service
 from src.api_v2 import auth_router, jobs_router, router as api_v2_router
 from src.pages import router as pages_router
-from src.shared.frontend_app import FRONTEND_DIST, react_app_response
+from src.settings_helpers import (
+    activate_list_setting,
+    delete_list_setting,
+    resolve_api_test_setting,
+    resolve_image_api_test_setting,
+    save_list_setting,
+    test_asr_setting_payload,
+)
+from src.shared.frontend_app import current_frontend_path, frontend_file_response, react_app_response
 from src.shared.navigation import replace_app_rail
 
 
@@ -40,21 +47,35 @@ logger = logging.getLogger("figurelearning")
 APP_ROOT = Path(__file__).resolve().parent
 
 
+def _public_knowledge_item(item: dict[str, object]) -> dict[str, object]:
+    public_item = dict(item)
+    public_item.pop("graph_status", None)
+    public_item.pop("graph_error_message", None)
+    return public_item
+
+
+def _public_knowledge_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [_public_knowledge_item(item) for item in items]
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     workbench_settings.load_settings()
-    graph_core.init_graph()
     yield
 
 
 app = FastAPI(title="Screenshot Knowledge Base", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=storage.ROOT / "static"), name="static")
-app.mount("/frontend", StaticFiles(directory=FRONTEND_DIST, check_dir=False), name="frontend")
+
+
+@app.get("/frontend/{asset_path:path}", include_in_schema=False)
+def frontend_asset(asset_path: str) -> FileResponse:
+    return frontend_file_response(asset_path)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon() -> FileResponse:
-    icon_path = FRONTEND_DIST / "favicon.ico"
+    icon_path = current_frontend_path("favicon.ico")
     if not icon_path.exists():
         raise HTTPException(status_code=404, detail="favicon has not been built")
     return FileResponse(icon_path)
@@ -175,10 +196,6 @@ class TopicRequest(BaseModel):
     knowledge_ids: list[int]
 
 
-class KnowledgeGraphIngestRequest(BaseModel):
-    knowledge_ids: list[int]
-
-
 class KnowledgeDeleteRequest(BaseModel):
     knowledge_ids: list[int]
 
@@ -206,10 +223,6 @@ class MiningSourcesRequest(BaseModel):
 
 class RetrievalChatRequest(BaseModel):
     question: str
-
-
-class GraphNodeRenameRequest(BaseModel):
-    label: str
 
 
 class ImageDataRequest(BaseModel):
@@ -330,6 +343,17 @@ class WriterFormatRequest(BaseModel):
     design_strategy: str | None = None
 
 
+def _test_asr_setting_payload_or_400(payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return test_asr_setting_payload(payload, transcribe_audio_url_fn=transcribe_audio_url)
+    except ValueError as exc:
+        asr_settings.mark_test_result(False, str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        asr_settings.mark_test_result(False, str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class WriterPublishRequest(BaseModel):
     workspace: str
     title: str
@@ -361,6 +385,11 @@ class WriterProjectDraftRequest(BaseModel):
     topic: dict[str, object] | None = None
 
 
+class WriterProjectStrategiesRequest(BaseModel):
+    writing_strategy: str | None = None
+    design_strategy: str | None = None
+
+
 class WriterProjectReviseRequest(BaseModel):
     instruction: str
     markdown: str | None = None
@@ -370,6 +399,7 @@ class WriterProjectImageSuggestionsRequest(BaseModel):
     markdown: str | None = None
     topic: dict[str, object] | None = None
     content_image_count: int = 1
+    image_style_preset: str | None = None
 
 
 class WriterProjectImagesRequest(BaseModel):
@@ -387,6 +417,10 @@ class WriterProjectFormatRequest(BaseModel):
     markdown: str | None = None
     theme: str = "tech"
     design_strategy: str | None = None
+
+
+class WriterProjectDesignConfirmRequest(BaseModel):
+    confirmed: bool = True
 
 
 class WriterProjectPublishRequest(BaseModel):
@@ -486,8 +520,7 @@ def list_api_settings() -> dict[str, object]:
 @app.post("/api/api-settings")
 def save_api_setting(request: ApiSettingSaveRequest) -> dict[str, object]:
     try:
-        item = api_settings.save_setting(request.model_dump())
-        return {"item": item, **api_settings.list_payload()}
+        return save_list_setting(api_settings, request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -495,8 +528,7 @@ def save_api_setting(request: ApiSettingSaveRequest) -> dict[str, object]:
 @app.post("/api/api-settings/active")
 def set_active_api_setting(request: ApiSettingActiveRequest) -> dict[str, object]:
     try:
-        item = api_settings.set_active(request.id)
-        return {"item": item, **api_settings.list_payload()}
+        return activate_list_setting(api_settings, request.id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -506,8 +538,7 @@ def set_active_api_setting(request: ApiSettingActiveRequest) -> dict[str, object
 @app.delete("/api/api-settings/{setting_id}")
 def delete_api_setting(setting_id: str) -> dict[str, object]:
     try:
-        api_settings.delete_setting(setting_id)
-        return api_settings.list_payload()
+        return delete_list_setting(api_settings, setting_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -515,30 +546,7 @@ def delete_api_setting(setting_id: str) -> dict[str, object]:
 @app.post("/api/api-settings/test")
 def test_api_setting(request: ApiSettingTestRequest) -> dict[str, str]:
     try:
-        setting = None
-        if request.setting:
-            payload = request.setting.model_dump()
-            if payload.get("id") and not payload.get("api_key"):
-                existing = api_settings.get_setting(payload["id"])
-                if existing:
-                    payload["api_key"] = existing.get("api_key")
-            setting = {
-                "id": payload.get("id") or "temporary",
-                "name": payload.get("name") or "涓存椂 API",
-                "provider": payload.get("provider") or "compatible",
-                "base_url": (payload.get("base_url") or "").strip().rstrip("/"),
-                "model": (payload.get("model") or "").strip(),
-                "api_key": (payload.get("api_key") or "").strip(),
-                "timeout": payload.get("timeout") or 60,
-                "max_retries": payload.get("max_retries") or 0,
-            }
-        elif request.id:
-            setting = api_settings.get_setting(request.id)
-            if setting is None:
-                raise KeyError("API setting not found")
-        if setting is None:
-            setting = api_settings.active_setting()
-        return deepseek_client.diagnose(setting)
+        return deepseek_client.diagnose(resolve_api_test_setting(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -553,35 +561,14 @@ def list_asr_settings() -> dict[str, object]:
 @app.post("/api/asr-settings")
 def save_asr_setting(request: AsrSettingSaveRequest) -> dict[str, object]:
     try:
-        item = asr_settings.save_setting(request.model_dump())
-        return {"item": item, **asr_settings.list_payload()}
+        return save_list_setting(asr_settings, request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/asr-settings/test")
 def test_asr_setting(request: AsrSettingSaveRequest) -> dict[str, object]:
-    try:
-        payload = request.model_dump()
-        if not payload.get("api_key"):
-            payload["api_key"] = asr_settings.load_setting().get("api_key")
-        saved = asr_settings.save_setting(payload)
-        setting = asr_settings.active_setting()
-        if setting.get("provider") == "dashscope":
-            sample_url = "https://dashscope.oss-cn-beijing.aliyuncs.com/samples/audio/paraformer/hello_world_female2.wav"
-            transcribe_audio_url(sample_url, setting)
-        asr_settings.mark_test_result(True, "ASR API verified with a real transcription request.")
-        return {
-            "ok": True,
-            "item": saved,
-            "message": "ASR API verified with a real transcription request.",
-        }
-    except ValueError as exc:
-        asr_settings.mark_test_result(False, str(exc))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        asr_settings.mark_test_result(False, str(exc))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _test_asr_setting_payload_or_400(request.model_dump())
 
 
 @app.get("/api/image-api-settings")
@@ -592,8 +579,7 @@ def list_image_api_settings() -> dict[str, object]:
 @app.post("/api/image-api-settings")
 def save_image_api_setting(request: ImageApiSettingSaveRequest) -> dict[str, object]:
     try:
-        item = image_api_settings.save_setting(request.model_dump())
-        return {"item": item, **image_api_settings.list_payload()}
+        return save_list_setting(image_api_settings, request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -601,8 +587,7 @@ def save_image_api_setting(request: ImageApiSettingSaveRequest) -> dict[str, obj
 @app.post("/api/image-api-settings/active")
 def set_active_image_api_setting(request: ImageApiSettingActiveRequest) -> dict[str, object]:
     try:
-        item = image_api_settings.set_active(request.id)
-        return {"item": item, **image_api_settings.list_payload()}
+        return activate_list_setting(image_api_settings, request.id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -612,8 +597,7 @@ def set_active_image_api_setting(request: ImageApiSettingActiveRequest) -> dict[
 @app.delete("/api/image-api-settings/{setting_id}")
 def delete_image_api_setting(setting_id: str) -> dict[str, object]:
     try:
-        image_api_settings.delete_setting(setting_id)
-        return image_api_settings.list_payload()
+        return delete_list_setting(image_api_settings, setting_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -621,29 +605,7 @@ def delete_image_api_setting(setting_id: str) -> dict[str, object]:
 @app.post("/api/image-api-settings/test")
 def test_image_api_setting(request: ImageApiSettingTestRequest) -> dict[str, str]:
     try:
-        setting = None
-        if request.setting:
-            payload = request.setting.model_dump()
-            if payload.get("id") and not payload.get("api_key"):
-                existing = image_api_settings.get_setting(payload["id"])
-                if existing:
-                    payload["api_key"] = existing.get("api_key")
-            setting = {
-                "id": payload.get("id") or "temporary",
-                "name": payload.get("name") or "涓存椂鍥剧墖 API",
-                "provider": payload.get("provider") or "compatible",
-                "base_url": (payload.get("base_url") or "").strip().rstrip("/"),
-                "model": (payload.get("model") or "").strip(),
-                "api_key": (payload.get("api_key") or "").strip(),
-                "size": (payload.get("size") or "1024x1024").strip(),
-                "quality": (payload.get("quality") or "auto").strip(),
-                "response_format": (payload.get("response_format") or "").strip(),
-                "timeout": payload.get("timeout") or 120,
-            }
-        elif request.id:
-            setting = image_api_settings.get_setting(request.id)
-            if setting is None:
-                raise KeyError("Image API setting not found")
+        setting = resolve_image_api_test_setting(request)
         diagnosis = image_api_settings.diagnose(setting)
         if not request.real_test:
             return diagnosis
@@ -885,15 +847,36 @@ def _fallback_readable_document(title: str, raw_text: str, note: str = "") -> di
     }
 
 
+def _readable_document_keeps_source_content(markdown: str, raw_text: str) -> bool:
+    cleaned_markdown = _strip_extraction_wrappers(markdown)
+    cleaned_source = _strip_extraction_wrappers(raw_text)
+    source_paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned_source) if part.strip()]
+    if not source_paragraphs:
+        return True
+    matched = 0
+    for paragraph in source_paragraphs:
+        normalized = re.sub(r"\s+", "", paragraph)
+        if len(normalized) < 6:
+            continue
+        if normalized[:80] in re.sub(r"\s+", "", cleaned_markdown):
+            matched += 1
+    return matched > 0
+
+
 def _readable_document_from_text(title: str, raw_text: str, material_type: str) -> dict[str, object]:
     fallback = _fallback_readable_document(title, raw_text)
     try:
-        setting = api_settings.active_setting()
-        cleaned = deepseek_client.clean_readable_document(raw_text, material_type=material_type, setting=setting)
+        cleaned = deepseek_client.clean_readable_document(raw_text, material_type=material_type)
+        cleaned_markdown = cleaned.markdown.strip() or fallback["markdown"]
+        if not _readable_document_keeps_source_content(cleaned_markdown, raw_text):
+            fallback["note"] = (
+                "LLM cleanup omitted source content, so the locally extracted readable text was kept instead."
+            )
+            return fallback
         return {
             "title": cleaned.title.strip() or fallback["title"],
             "note": cleaned.note.strip() or "Cleaned into a readable source document with LLM.",
-            "markdown": cleaned.markdown.strip() or fallback["markdown"],
+            "markdown": cleaned_markdown,
             "raw_text": raw_text,
             "cleaned_by": "llm",
         }
@@ -1304,7 +1287,7 @@ def _slice_between_markers(text: str, start_patterns: list[str], end_patterns: l
 def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
     if not (request.image_ids or request.file_ids or request.media_ids):
         raise HTTPException(status_code=400, detail="Please select at least one source material")
-    parser_mode = request.parser_mode or workbench_settings.load_settings().get("text_extraction_mode") or "local_ocr"
+    parser_mode = request.parser_mode or workbench_settings.load_settings().get("text_extraction_mode") or "ai_vision"
     if parser_mode not in {"local_ocr", "ai_vision"}:
         raise HTTPException(status_code=400, detail="Unsupported parser mode")
 
@@ -1332,13 +1315,23 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
                 titles.append(str(screenshot.get("title") or Path(str(screenshot.get("image_path") or "")).name or f"screenshot-{screenshot['id']}"))
             if image_paths:
                 if parser_mode == "ai_vision":
-                    raw_blocks.append(deepseek_client.recognize_screenshots_with_ai(image_paths, setting=api_settings.active_setting()))
+                    raw_blocks.append(
+                        deepseek_client.recognize_screenshots_with_ai(
+                            image_paths,
+                            setting=deepseek_client.current_setting(),
+                        )
+                    )
                 else:
                     try:
                         raw_blocks.append(ocr_client.recognize_screenshots(image_paths))
                     except Exception as exc:
                         logger.warning("Local OCR failed, trying AI vision extraction: %s", exc)
-                        raw_blocks.append(deepseek_client.recognize_screenshots_with_ai(image_paths, setting=api_settings.active_setting()))
+                        raw_blocks.append(
+                            deepseek_client.recognize_screenshots_with_ai(
+                                image_paths,
+                                setting=deepseek_client.current_setting(),
+                            )
+                        )
 
         if request.file_ids:
             files = storage.get_source_files(request.file_ids)
@@ -1350,7 +1343,7 @@ def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
                     storage.ROOT,
                     visual_recognizer=lambda image_paths: deepseek_client.recognize_screenshots_with_ai(
                         image_paths,
-                        setting=api_settings.active_setting(),
+                        setting=deepseek_client.current_setting(),
                     ),
                     prefer_visual=prefer_visual,
                     storage_root=storage.STORAGE_ROOT,
@@ -1461,7 +1454,6 @@ def generate_knowledge_from_media_plan(payload: MediaPlanGenerateRequest, reques
         with storage.connect() as conn:
             context = current_context(request, conn)
         owner_user_id, workspace_id = _context_owner_ids(context)
-        setting = api_settings.active_setting()
         results = []
         for segment in segments:
             item = storage.get_media_source(segment.media_id)
@@ -1501,7 +1493,7 @@ def generate_knowledge_from_media_plan(payload: MediaPlanGenerateRequest, reques
                     selected_text,
                 ]
             ).strip()
-            knowledge, raw_text = deepseek_client.generate_knowledge_from_text(raw_text, setting=setting)
+            knowledge, raw_text = deepseek_client.generate_knowledge_from_text(raw_text)
             markdown = render_knowledge_markdown(
                 knowledge,
                 raw_text=raw_text,
@@ -1522,8 +1514,6 @@ def generate_knowledge_from_media_plan(payload: MediaPlanGenerateRequest, reques
                 tags=json.dumps(knowledge.tags, ensure_ascii=False),
                 status="ready",
                 error_message=None,
-                graph_status="not_ingested",
-                graph_error_message=None,
             )
             storage.update_media_source(int(item["id"]), status="ready", error_message=None)
             results.append({"item": updated, "segment": segment.model_dump(), "skipped": False})
@@ -1777,7 +1767,6 @@ def plan_source_file_ranges(request: MultiFilePlanRequest) -> dict[str, object]:
     if not request.files:
         raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨鏂囦欢")
     try:
-        setting = api_settings.active_setting()
         plans = []
         combined_segments = []
         for file_request in request.files:
@@ -1798,7 +1787,7 @@ def plan_source_file_ranges(request: MultiFilePlanRequest) -> dict[str, object]:
                     page_count=page_count,
                     total_chars=total_chars,
                     page_overview=overview,
-                    setting=setting,
+                    setting=deepseek_client.current_setting(),
                 )
                 plan.file_id = item["id"]
                 plan.file_name = item.get("original_name") or path.name
@@ -1849,7 +1838,6 @@ def plan_source_file_ranges(request: MultiFilePlanRequest) -> dict[str, object]:
 @app.post("/api/files/plan")
 def plan_source_file(request: FilePlanRequest) -> dict[str, object]:
     try:
-        setting = api_settings.active_setting()
         item = storage.get_source_file(request.file_id)
         path = storage.resolve_root_path(item.get("file_path"))
         if not path or not path.exists():
@@ -1865,7 +1853,7 @@ def plan_source_file(request: FilePlanRequest) -> dict[str, object]:
                 page_count=len(pages),
                 total_chars=total_chars,
                 page_overview=overview,
-                setting=setting,
+                setting=deepseek_client.current_setting(),
             )
             plan.file_id = item["id"]
             plan.file_name = item.get("original_name") or path.name
@@ -1896,7 +1884,6 @@ def generate_knowledge(payload: GenerateRequest, request: Request) -> dict[str, 
         with storage.connect() as conn:
             context = current_context(request, conn)
         owner_user_id, workspace_id = _context_owner_ids(context)
-        setting = api_settings.active_setting()
         screenshots = storage.get_screenshots(payload.image_ids)
         for screenshot in screenshots:
             _ensure_cloud_record_access(request, screenshot, "Image")
@@ -1904,7 +1891,7 @@ def generate_knowledge(payload: GenerateRequest, request: Request) -> dict[str, 
         scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
         existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
-            return {"item": existing, "images": screenshots, "skipped": True}
+            return {"item": _public_knowledge_item(existing), "images": screenshots, "skipped": True}
 
         entry = storage.create_or_update_knowledge_entry(payload.image_ids, round_hash, owner_user_id=owner_user_id, workspace_id=workspace_id)
         image_paths = []
@@ -1913,14 +1900,16 @@ def generate_knowledge(payload: GenerateRequest, request: Request) -> dict[str, 
             if not image_path or not image_path.exists():
                 raise FileNotFoundError(f"Image file not found: {screenshot['id']}")
             image_paths.append(image_path)
-
         if payload.parser_mode == "ai_vision":
-            combined_raw_text = deepseek_client.recognize_screenshots_with_ai(image_paths, setting=setting)
+            combined_raw_text = deepseek_client.recognize_screenshots_with_ai(
+                image_paths,
+                setting=deepseek_client.current_setting(),
+            )
         else:
             combined_raw_text = ocr_client.recognize_screenshots(image_paths)
         knowledge, combined_raw_text = deepseek_client.generate_knowledge_from_text(
             combined_raw_text,
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         markdown = render_knowledge_markdown(
             knowledge,
@@ -1942,17 +1931,14 @@ def generate_knowledge(payload: GenerateRequest, request: Request) -> dict[str, 
             tags=json.dumps(knowledge.tags, ensure_ascii=False),
             status="ready",
             error_message=None,
-            graph_status="not_ingested",
-            graph_error_message=None,
         )
         for screenshot in screenshots:
             storage.update_screenshot(screenshot["id"], status="ready", error_message=None)
         return {
-            "item": updated,
+            "item": _public_knowledge_item(updated),
             "images": screenshots,
             "skipped": False,
             "parser_mode": payload.parser_mode,
-            "graph": {"ok": True, "status": "not_ingested", "pending_node_ids": []},
         }
     except Exception as exc:
         if "entry" in locals():
@@ -1970,12 +1956,10 @@ def generate_knowledge_draft_meta(request: KnowledgeDraftMetaRequest) -> dict[st
     if not request.body.strip():
         raise HTTPException(status_code=400, detail="Draft body is required")
     try:
-        setting = api_settings.active_setting()
         meta = deepseek_client.generate_knowledge_draft_meta(
             request.materials,
             request.body,
             language=request.language,
-            setting=setting,
         )
         return meta.model_dump()
     except Exception as exc:
@@ -2013,10 +1997,8 @@ def commit_knowledge_draft(payload: KnowledgeDraftCommitRequest, request: Reques
                 topic=note or item.get("topic") or "",
                 status="ready",
                 error_message=None,
-                graph_status="not_ingested",
-                graph_error_message=None,
             )
-            return {"item": updated, "content": markdown}
+            return {"item": _public_knowledge_item(updated), "content": markdown}
 
         draft_hash = storage.hash_bytes(json.dumps(
             {
@@ -2046,10 +2028,8 @@ def commit_knowledge_draft(payload: KnowledgeDraftCommitRequest, request: Reques
             tags=json.dumps([], ensure_ascii=False),
             status="ready",
             error_message=None,
-            graph_status="not_ingested",
-            graph_error_message=None,
         )
-        return {"item": updated, "content": markdown}
+        return {"item": _public_knowledge_item(updated), "content": markdown}
     except Exception as exc:
         logger.exception("Knowledge draft commit failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -2064,7 +2044,6 @@ def generate_knowledge_from_files(payload: FileGenerateRequest, request: Request
         with storage.connect() as conn:
             context = current_context(request, conn)
         owner_user_id, workspace_id = _context_owner_ids(context)
-        setting = api_settings.active_setting()
         source_files = storage.get_source_files(payload.file_ids)
         for item in source_files:
             _ensure_cloud_record_access(request, item, "Source file")
@@ -2072,7 +2051,7 @@ def generate_knowledge_from_files(payload: FileGenerateRequest, request: Request
         scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
         existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
-            return {"item": existing, "files": source_files, "skipped": True, "graph": {"ok": True, "status": existing.get("graph_status")}}
+            return {"item": _public_knowledge_item(existing), "files": source_files, "skipped": True}
 
         entry = storage.create_or_update_knowledge_entry(
             [],
@@ -2085,7 +2064,7 @@ def generate_knowledge_from_files(payload: FileGenerateRequest, request: Request
         combined_raw_text = document_parser.recognize_files(source_files, storage.ROOT)
         knowledge, combined_raw_text = deepseek_client.generate_knowledge_from_text(
             combined_raw_text,
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         markdown = render_knowledge_markdown(
             knowledge,
@@ -2106,16 +2085,13 @@ def generate_knowledge_from_files(payload: FileGenerateRequest, request: Request
             tags=json.dumps(knowledge.tags, ensure_ascii=False),
             status="ready",
             error_message=None,
-            graph_status="not_ingested",
-            graph_error_message=None,
         )
         for item in source_files:
             storage.update_source_file(item["id"], status="ready", error_message=None)
         return {
-            "item": updated,
+            "item": _public_knowledge_item(updated),
             "files": source_files,
             "skipped": False,
-            "graph": {"ok": True, "status": "not_ingested", "pending_node_ids": []},
         }
     except Exception as exc:
         if "entry" in locals():
@@ -2137,7 +2113,6 @@ def generate_knowledge_from_media(payload: MediaGenerateRequest, request: Reques
         with storage.connect() as conn:
             context = current_context(request, conn)
         owner_user_id, workspace_id = _context_owner_ids(context)
-        setting = api_settings.active_setting()
         media_items = storage.get_media_sources(payload.media_ids)
         for item in media_items:
             _ensure_cloud_record_access(request, item, "Media")
@@ -2145,7 +2120,7 @@ def generate_knowledge_from_media(payload: MediaGenerateRequest, request: Reques
         scoped_hash = storage.scoped_content_hash(round_hash, owner_user_id)
         existing = storage.get_knowledge_by_hash(scoped_hash)
         if existing and existing.get("markdown_path") and existing.get("status") == "ready":
-            return {"item": existing, "media": media_items, "skipped": True, "graph": {"ok": True, "status": existing.get("graph_status")}}
+            return {"item": _public_knowledge_item(existing), "media": media_items, "skipped": True}
 
         entry = storage.create_or_update_knowledge_entry(
             [],
@@ -2172,18 +2147,17 @@ def generate_knowledge_from_media(payload: MediaGenerateRequest, request: Reques
         if not transcript_blocks:
             storage.update_knowledge_entry(entry["id"], status="error", error_message="No media transcript is available")
             return {
-                "item": storage.get_knowledge_entry(entry["id"]),
+                "item": _public_knowledge_item(storage.get_knowledge_entry(entry["id"])),
                 "media": storage.get_media_sources(payload.media_ids),
                 "skipped": False,
                 "generated": False,
                 "errors": failed_media,
-                "graph": {"ok": False, "status": "error", "pending_node_ids": []},
             }
 
         combined_raw_text = "\n\n---\n\n".join(transcript_blocks)
         knowledge, combined_raw_text = deepseek_client.generate_knowledge_from_text(
             combined_raw_text,
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         markdown = render_knowledge_markdown(
             knowledge,
@@ -2205,20 +2179,17 @@ def generate_knowledge_from_media(payload: MediaGenerateRequest, request: Reques
             tags=json.dumps(knowledge.tags, ensure_ascii=False),
             status="ready",
             error_message=None,
-            graph_status="not_ingested",
-            graph_error_message=None,
         )
         for item in media_items:
             if any(int(failed["item"].get("id")) == int(item["id"]) for failed in failed_media):
                 continue
             storage.update_media_source(int(item["id"]), status="ready", error_message=None)
         return {
-            "item": updated,
+            "item": _public_knowledge_item(updated),
             "media": storage.get_media_sources(payload.media_ids),
             "skipped": False,
             "generated": True,
             "errors": failed_media,
-            "graph": {"ok": True, "status": "not_ingested", "pending_node_ids": []},
         }
     except Exception as exc:
         if "entry" in locals():
@@ -2267,7 +2238,6 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
             with storage.connect() as conn:
                 context = current_context(request, conn)
             owner_user_id, workspace_id = _context_owner_ids(context)
-        setting = api_settings.active_setting()
         pages_cache: dict[int, tuple[dict[str, object], Path, list[dict]]] = {}
         results = []
         for payload in payloads:
@@ -2311,7 +2281,7 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
                 f"[Pages: {segment.page_ranges or f'{segment.page_start or 1}-{segment.page_end or len(pages)}'}]\n\n"
                 f"{segment_text}"
             )
-            knowledge, raw_text = deepseek_client.generate_knowledge_from_text(raw_text, setting=setting)
+            knowledge, raw_text = deepseek_client.generate_knowledge_from_text(raw_text)
             markdown = render_knowledge_markdown(
                 knowledge,
                 raw_text=raw_text,
@@ -2332,8 +2302,6 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
                 tags=json.dumps(knowledge.tags, ensure_ascii=False),
                 status="ready",
                 error_message=None,
-                graph_status="not_ingested",
-                graph_error_message=None,
             )
             results.append({"item": updated, "segment": segment.model_dump(), "skipped": False})
         ready_files = []
@@ -2356,21 +2324,7 @@ def generate_knowledge_for_segment_payloads(payloads: list[SegmentGeneratePayloa
 def list_knowledge(request: Request) -> dict[str, object]:
     with storage.connect() as conn:
         context = current_context(request, conn)
-    return {"items": storage.list_knowledge(owner_user_id=_cloud_scoped_owner_id(context))}
-
-
-@app.post("/api/knowledge/delete-not-ingested")
-def delete_not_ingested_knowledge(payload: KnowledgeDeleteRequest, request: Request) -> dict[str, object]:
-    if not payload.knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佸垹闄ょ殑鐭ヨ瘑鏂囦欢")
-    try:
-        with storage.connect() as conn:
-            context = current_context(request, conn)
-        owner_user_id = _cloud_scoped_owner_id(context)
-        result = storage.delete_not_ingested_knowledge(payload.knowledge_ids, owner_user_id=owner_user_id)
-        return {**result, "items": storage.list_knowledge(owner_user_id=owner_user_id)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"items": _public_knowledge_items(storage.list_knowledge(owner_user_id=_cloud_scoped_owner_id(context)))}
 
 
 @app.get("/api/knowledge/{knowledge_id:int}")
@@ -2380,7 +2334,7 @@ def read_knowledge(knowledge_id: int, request: Request) -> dict[str, object]:
     path = storage.resolve_root_path(item.get("markdown_path"))
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Knowledge file not found")
-    return {"item": item, "content": path.read_text(encoding="utf-8")}
+    return {"item": _public_knowledge_item(item), "content": path.read_text(encoding="utf-8")}
 
 
 @app.post("/api/knowledge/{knowledge_id:int}")
@@ -2411,7 +2365,7 @@ def update_knowledge(knowledge_id: int, payload: KnowledgeUpdateRequest, request
             status="ready",
             error_message=None,
         )
-        return {"item": updated, "content": body}
+        return {"item": _public_knowledge_item(updated), "content": body}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Knowledge entry not found") from exc
     except HTTPException:
@@ -2474,7 +2428,10 @@ def _mining_source_text(project: dict[str, object], source: MiningSourceRef, req
         if not image_path or not image_path.exists():
             raise FileNotFoundError(f"Image file not found: {source.source_id}")
         if source.parser_mode == "ai_vision":
-            text = deepseek_client.recognize_screenshots_with_ai([image_path], setting=api_settings.active_setting())
+            text = deepseek_client.recognize_screenshots_with_ai(
+                [image_path],
+                setting=deepseek_client.current_setting(),
+            )
         else:
             text = ocr_client.recognize_screenshots([image_path])
         title = source.title or str(item.get("title") or item.get("image_path") or f"screenshot-{source.source_id}")
@@ -2600,7 +2557,7 @@ def learn_creation_strategy(project_id: int, request: Request) -> dict[str, obje
         result = deepseek_client.learn_creation_strategy(
             named_materials,
             previous_strategy=storage.read_mining_artifact(project),
-            setting=api_settings.active_setting(),
+            setting=deepseek_client.current_setting(),
         )
         version = storage.next_mining_strategy_version(project_id)
         previous_strategy = storage.read_mining_artifact(project)
@@ -2624,231 +2581,6 @@ def learn_creation_strategy(project_id: int, request: Request) -> dict[str, obje
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-def _section_from_markdown(content: str, header: str) -> str:
-    pattern = rf"##\s+{re.escape(header)}\s*\n(.*?)(?=\n##\s+|\Z)"
-    match = re.search(pattern, content, flags=re.S)
-    return match.group(1).strip() if match else ""
-
-
-def _knowledge_from_entry_markdown(item: dict[str, object], content: str) -> KnowledgeResult:
-    title_match = re.search(r"^#\s+(.+)$", content, flags=re.M)
-    title = title_match.group(1).strip() if title_match else str(item.get("title") or "Untitled knowledge")
-    tags: list[str] = []
-    try:
-        parsed = json.loads(str(item.get("tags") or "[]"))
-        if isinstance(parsed, list):
-            tags = [str(tag) for tag in parsed if tag]
-    except json.JSONDecodeError:
-        tags = []
-    raw_text = _section_from_markdown(content, "Raw recognized text")
-    clusters = _section_from_markdown(content, "Core knowledge")
-    focus = _section_from_markdown(content, "Focus question")
-    insights = _section_from_markdown(content, "Insights")
-    return KnowledgeResult(
-        title=title,
-        topic=str(item.get("topic") or ""),
-        tags=tags,
-        focus_question=focus or raw_text[:600] or title,
-        clusters=[],
-        investment_insights="\n\n".join(part for part in [insights, clusters, raw_text[:3000]] if part),
-    )
-
-
-@app.post("/api/knowledge/ingest-to-graph")
-def ingest_knowledge_to_graph(payload: KnowledgeGraphIngestRequest, request: Request) -> dict[str, object]:
-    if not payload.knowledge_ids:
-        raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佸叆缃戠殑鐭ヨ瘑鏂囦欢")
-    try:
-        setting = api_settings.active_setting()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    results = []
-    all_pending_ids: list[str] = []
-    for knowledge_id in payload.knowledge_ids:
-        try:
-            item = storage.get_knowledge_entry(knowledge_id)
-            _ensure_cloud_record_access(request, item, "Knowledge")
-            path = storage.resolve_root_path(item.get("markdown_path"))
-            if not path or not path.exists():
-                raise FileNotFoundError(f"鐭ヨ瘑鏂囦欢涓嶅瓨鍦細{knowledge_id}")
-            content = path.read_text(encoding="utf-8")
-            knowledge = _knowledge_from_entry_markdown(item, content)
-            try:
-                graph_payload = graph_core.graph_payload()
-                extraction = deepseek_client.extract_knowledge_network(
-                    knowledge,
-                    existing_nodes=graph_payload.get("nodes", []),
-                    setting=setting,
-                )
-            except Exception:
-                extraction = graph_core.fallback_network_extraction(knowledge)
-            ingest_result = graph_core.ingest_knowledge_network(item, knowledge, extraction, as_pending=True)
-            pending_ids = ingest_result.get("pending_node_ids", [])
-            if isinstance(pending_ids, list):
-                all_pending_ids.extend(str(node_id) for node_id in pending_ids)
-            storage.update_knowledge_graph_status(knowledge_id, "pending")
-            results.append({"knowledge_id": knowledge_id, "ok": True, **ingest_result})
-        except HTTPException as exc:
-            results.append({"knowledge_id": knowledge_id, "ok": False, "error": exc.detail})
-        except Exception as exc:
-            logger.exception("Manual graph ingestion failed for knowledge entry %s", knowledge_id)
-            try:
-                storage.update_knowledge_graph_status(knowledge_id, "graph_error", str(exc))
-            except Exception:
-                pass
-            results.append({"knowledge_id": knowledge_id, "ok": False, "error": str(exc)})
-
-    return {
-        "ok": any(item.get("ok") for item in results),
-        "results": results,
-        "pending_node_ids": all_pending_ids,
-        **graph_core.graph_payload(),
-    }
-
-
-@app.get("/api/graph")
-def read_graph() -> dict[str, object]:
-    return graph_core.graph_payload()
-
-
-@app.get("/api/graph/node/{node_id:path}")
-def read_graph_node(node_id: str) -> dict[str, object]:
-    try:
-        return graph_core.node_detail(node_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.patch("/api/graph/node/{node_id:path}")
-def rename_graph_node(node_id: str, request: GraphNodeRenameRequest) -> dict[str, object]:
-    try:
-        result = graph_core.rename_node(node_id, request.label)
-        return {"ok": True, **result, **graph_core.graph_payload()}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/graph/node/{node_id:path}")
-def delete_graph_node(node_id: str) -> dict[str, object]:
-    try:
-        result = graph_core.delete_node(node_id)
-        return {"ok": True, **result, **graph_core.graph_payload()}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.patch("/api/graph/pending/{node_id:path}")
-def update_pending_graph_node(node_id: str, request: GraphNodeRenameRequest) -> dict[str, object]:
-    try:
-        result = graph_core.update_pending_node(node_id, request.label)
-        return {"ok": True, **result, **graph_core.graph_payload()}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/graph/pending/{node_id:path}/approve")
-def approve_pending_graph_node(node_id: str) -> dict[str, object]:
-    try:
-        result = graph_core.approve_pending_node(node_id)
-        return {"ok": True, **result, **graph_core.graph_payload()}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/graph/pending/{node_id:path}")
-def delete_pending_graph_node(node_id: str) -> dict[str, object]:
-    try:
-        result = graph_core.delete_pending_node(node_id)
-        return {"ok": True, **result, **graph_core.graph_payload()}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/graph/refresh")
-def refresh_graph() -> dict[str, object]:
-    try:
-        return {"ok": True, **graph_core.merge_duplicate_nodes(), **graph_core.graph_payload()}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/graph/organize")
-def organize_graph() -> dict[str, object]:
-    try:
-        payload = graph_core.graph_payload()
-        setting = api_settings.active_setting()
-        organization = deepseek_client.organize_graph_nodes(payload.get("nodes", []), setting=setting)
-        return {
-            "ok": True,
-            **graph_core.apply_graph_organization(organization),
-            **graph_core.graph_payload(),
-        }
-    except Exception as exc:
-        logger.exception("Graph organization failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/graph/rebuild")
-def rebuild_graph() -> dict[str, object]:
-    try:
-        return {"ok": True, **graph_core.rebuild_from_existing(), **graph_core.graph_payload()}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/retrieval/chat")
-def retrieval_chat(request: RetrievalChatRequest) -> dict[str, object]:
-    question = request.question.strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Please enter a retrieval question")
-    matches = graph_core.search_knowledge(question)
-    if not matches:
-        return {
-            "answer": "No matching knowledge was found. Try another keyword or import related source material first.",
-            "matched_categories": [],
-            "reference_files": [],
-            "follow_up_suggestions": [],
-            "matches": [],
-        }
-    try:
-        setting = api_settings.active_setting()
-        result = deepseek_client.answer_retrieval_question(
-            question,
-            graph_core.retrieval_context(matches),
-            setting=setting,
-        )
-        payload = result.model_dump()
-    except Exception as exc:
-        logger.exception("Retrieval answer generation failed")
-        categories = sorted({item["item"].get("topic") or "Uncategorized" for item in matches})
-        files = [Path(item["item"].get("markdown_path") or f"knowledge-{item['item']['id']}.md").name for item in matches]
-        payload = {
-            "answer": "Related knowledge was found, but API summarization failed. Local matches are listed first.",
-            "matched_categories": categories,
-            "reference_files": files,
-            "follow_up_suggestions": ["Narrow the keyword and ask again", "Open the matched knowledge file to inspect source text"],
-            "error": str(exc),
-        }
-    payload["matches"] = [
-        {
-            "id": item["item"]["id"],
-            "title": item["item"].get("title"),
-            "topic": item["item"].get("topic"),
-            "markdown_path": item["item"].get("markdown_path"),
-            "score": item["score"],
-        }
-        for item in matches
-    ]
-    return payload
 
 
 @app.post("/api/topics/generate")
@@ -2857,14 +2589,13 @@ def generate_topics(request: TopicRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="Please select at least one knowledge file")
 
     try:
-        api_settings.active_setting()
         selected = storage.read_markdown_for_ids(request.knowledge_ids)
         payload = []
         for item, content in selected:
             markdown_path = storage.resolve_root_path(item.get("markdown_path"))
             name = Path(markdown_path).name if markdown_path else f"knowledge-{item['id']}.md"
             payload.append((name, content))
-        result = deepseek_client.generate_topics(payload)
+        result = deepseek_client.generate_topics(payload, setting=deepseek_client.current_setting())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -3111,6 +2842,8 @@ def _writer_project_next_action(step: str) -> str:
 def _writer_project_next_action_for_project(project: dict[str, object], step: str) -> str:
     if step == "draft" and project.get("image_suggestion_rationale"):
         return "generate_images"
+    if step == "designed" and not project.get("design_confirmed"):
+        return "confirm_design"
     if step == "publish_check" and not (project.get("preflight") or {}).get("ok"):
         return "run_preflight"
     return _writer_project_next_action(step)
@@ -3241,8 +2974,7 @@ def writer_project_generate_topics(project_id: str, request: Request) -> dict[st
         owner_user_id = _writer_owner_scope(request)
         project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         materials = _require_project_materials(project)
-        setting = api_settings.active_setting()
-        result = deepseek_client.generate_topics(materials, setting=setting)
+        result = deepseek_client.generate_topics(materials, setting=deepseek_client.current_setting())
         suggestions = result.model_dump().get("suggestions", [])
         updated = writer_tools.update_project(project_id, topics=suggestions)
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "topics": updated.get("topics", [])}
@@ -3269,6 +3001,23 @@ def writer_project_select_topic(project_id: str, payload: WriterProjectTopicRequ
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/writer/projects/{project_id}/strategies")
+def writer_project_update_strategies(project_id: str, payload: WriterProjectStrategiesRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        writer_tools.update_project(
+            project_id,
+            writing_strategy=(payload.writing_strategy if payload.writing_strategy is not None else str(project.get("writing_strategy") or "")).strip(),
+            design_strategy=(payload.design_strategy if payload.design_strategy is not None else str(project.get("design_strategy") or "")).strip(),
+        )
+        return _writer_project_payload(project_id, owner_user_id=owner_user_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/writer/projects/{project_id}/draft")
 def writer_project_generate_draft(project_id: str, payload: WriterProjectDraftRequest, request: Request) -> dict[str, object]:
     try:
@@ -3278,12 +3027,11 @@ def writer_project_generate_draft(project_id: str, payload: WriterProjectDraftRe
         topic = payload.topic or project.get("topic")
         if not isinstance(topic, dict) or not topic:
             raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨涓€涓€夐")
-        setting = api_settings.active_setting()
         result = deepseek_client.generate_wechat_article(
             topic,
             materials,
             writing_strategy=str(project.get("writing_strategy") or ""),
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         workspace = _writer_project_workspace(project_id)
         article_path = writer_tools.write_article(workspace, result.markdown)
@@ -3317,8 +3065,12 @@ def writer_project_revise(project_id: str, payload: WriterProjectReviseRequest, 
         markdown = payload.markdown if payload.markdown is not None else str(project.get("article_markdown") or "")
         if not markdown.strip():
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鍒濈")
-        setting = api_settings.active_setting()
-        result = deepseek_client.revise_wechat_article(markdown, payload.instruction, materials, setting=setting)
+        result = deepseek_client.revise_wechat_article(
+            markdown,
+            payload.instruction,
+            materials,
+            setting=deepseek_client.current_setting(),
+        )
         workspace = _writer_project_workspace(project_id)
         article_path = writer_tools.write_article(workspace, result.markdown)
         version_path = writer_tools.write_article(workspace, result.markdown, f"article_revised_{datetime.now().strftime('%H%M%S')}.md")
@@ -3348,19 +3100,21 @@ def writer_project_image_suggestions(project_id: str, payload: WriterProjectImag
         if not markdown.strip():
             raise HTTPException(status_code=400, detail="璇峰厛鐢熸垚鏂囩珷鍒濈")
         topic = payload.topic if payload.topic is not None else project.get("topic")
-        setting = api_settings.active_setting()
         content_image_count = max(1, min(3, int(payload.content_image_count or 1)))
+        image_style_preset = (payload.image_style_preset or project.get("image_style_preset") or "").strip()
         result = deepseek_client.suggest_writer_images(
             markdown,
             topic=topic if isinstance(topic, dict) else None,
             content_image_count=content_image_count,
-            setting=setting,
+            image_style_preset=image_style_preset,
+            setting=deepseek_client.current_setting(),
         )
         result.content_image_prompts = (result.content_image_prompts or [])[:content_image_count]
         writer_tools.update_project(
             project_id,
             cover_prompt=result.cover_prompt,
             content_image_prompts=result.content_image_prompts,
+            image_style_preset=image_style_preset,
             image_suggestion_rationale=result.rationale,
         )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "suggestions": result.model_dump()}
@@ -3432,8 +3186,34 @@ def writer_project_format(project_id: str, payload: WriterProjectFormatRequest, 
             theme=payload.theme,
             design_strategy=design_strategy,
         )
-        writer_tools.update_project(project_id, html_path=result.get("path"), html_theme=payload.theme, design_strategy=design_strategy)
+        writer_tools.update_project(
+            project_id,
+            html_path=result.get("path"),
+            html_theme=payload.theme,
+            design_strategy=design_strategy,
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "format": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/writer/projects/{project_id}/confirm-design")
+def writer_project_confirm_design(project_id: str, payload: WriterProjectDesignConfirmRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        if not project.get("html_path"):
+            raise HTTPException(status_code=400, detail="请先生成美编 HTML")
+        writer_tools.update_project(project_id, design_confirmed=bool(payload.confirmed))
+        return _writer_project_payload(project_id, owner_user_id=owner_user_id)
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3446,6 +3226,10 @@ def writer_project_publish_preflight(project_id: str, payload: WriterProjectPubl
         _require_local_or_cloud_admin(request, "公网内测普通用户不能操作公众号发布预检")
         owner_user_id = _writer_owner_scope(request)
         project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        if not project.get("html_path"):
+            raise HTTPException(status_code=400, detail="请先生成美编 HTML")
+        if not project.get("design_confirmed"):
+            raise HTTPException(status_code=400, detail="请先确认美编预览，再进入发布预检")
         workspace = _writer_project_workspace(project_id)
         title = payload.title or str(project.get("title") or project.get("name") or "")
         digest = payload.digest if payload.digest is not None else project.get("digest")
@@ -3474,6 +3258,10 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
         _require_local_or_cloud_admin(request, "公网内测普通用户不能发布到服务器公众号")
         owner_user_id = _writer_owner_scope(request)
         project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        if not project.get("html_path"):
+            raise HTTPException(status_code=400, detail="请先生成美编 HTML")
+        if not project.get("design_confirmed"):
+            raise HTTPException(status_code=400, detail="请先确认美编预览，再进入发布流程")
         workspace = _writer_project_workspace(project_id)
         title = payload.title or str(project.get("publish_title") or project.get("title") or project.get("name") or "")
         author = payload.author or str(project.get("publish_author") or "Bobo")
@@ -3605,8 +3393,10 @@ def writer_topics(payload: WriterTopicRequest, request: Request) -> dict[str, ob
     if not payload.knowledge_ids:
         raise HTTPException(status_code=400, detail="请先选择知识文件")
     try:
-        setting = api_settings.active_setting()
-        result = deepseek_client.generate_topics(_writer_materials(payload.knowledge_ids, request), setting=setting)
+        result = deepseek_client.generate_topics(
+            _writer_materials(payload.knowledge_ids, request),
+            setting=deepseek_client.current_setting(),
+        )
         return result.model_dump()
     except HTTPException:
         raise
@@ -3621,11 +3411,10 @@ def writer_article(payload: WriterArticleRequest, request: Request) -> dict[str,
     if not payload.knowledge_ids:
         raise HTTPException(status_code=400, detail="请先选择知识文件")
     try:
-        setting = api_settings.active_setting()
         result = deepseek_client.generate_wechat_article(
             payload.topic,
             _writer_materials(payload.knowledge_ids, request),
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         workspace = writer_tools.dated_workspace(result.title)
         article_path = writer_tools.write_article(workspace, result.markdown)
@@ -3649,12 +3438,11 @@ def writer_revise(payload: WriterReviseRequest, request: Request) -> dict[str, o
     if not payload.instruction.strip():
         raise HTTPException(status_code=400, detail="Please enter revision instructions")
     try:
-        setting = api_settings.active_setting()
         result = deepseek_client.revise_wechat_article(
             payload.markdown,
             payload.instruction,
             _writer_materials(payload.knowledge_ids, request),
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         workspace = _resolve_legacy_writer_workspace(payload.workspace, request) if payload.workspace else writer_tools.dated_workspace("article")
         article_path = writer_tools.write_article(workspace, result.markdown)
@@ -3696,11 +3484,10 @@ def writer_images(payload: WriterImagesRequest, request: Request) -> dict[str, o
 @app.post("/api/writer/image-suggestions")
 def writer_image_suggestions(request: WriterImageSuggestionsRequest) -> dict[str, object]:
     try:
-        setting = api_settings.active_setting()
         result = deepseek_client.suggest_writer_images(
             request.markdown,
             topic=request.topic,
-            setting=setting,
+            setting=deepseek_client.current_setting(),
         )
         return result.model_dump()
     except Exception as exc:

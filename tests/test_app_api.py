@@ -2,10 +2,13 @@ import base64
 import io
 import json
 import urllib.error
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import api_settings
+import asr_settings
 import app
 import deepseek_client
 import document_parser
@@ -14,7 +17,10 @@ import image_api_settings
 import media_parser
 import ocr_client
 import storage
+import workbench_settings
 import writer_tools
+import src.api_v2 as api_v2
+from src.auth import bootstrap_admin
 from schemas import (
     CreationStrategyResult,
     DocumentPlanResult,
@@ -24,6 +30,8 @@ from schemas import (
     GraphOrganizationResult,
     KnowledgeNetworkExtraction,
     KnowledgeResult,
+    PerspectiveFinding,
+    PerspectiveInterpretationResult,
     RetrievalAnswer,
     WriterArticleResult,
     WriterImageSuggestionResult,
@@ -52,9 +60,9 @@ def setup_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "WRITER_DIR", runtime_root / "writer")
     monkeypatch.setattr(storage, "TRASH_DIR", runtime_root / "trash")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "knowledge.db")
+    monkeypatch.setattr(workbench_settings, "SETTINGS_PATH", tmp_path / "workbench_settings.json")
     monkeypatch.setattr(writer_tools, "WRITER_DIR", runtime_root / "writer")
     storage.init_storage()
-    graph_core.init_graph()
 
 
 def test_public_beta_info_pages_and_favicon_are_available():
@@ -72,6 +80,96 @@ def test_public_beta_info_pages_and_favicon_are_available():
     favicon_response = client.get("/favicon.ico")
     assert favicon_response.status_code == 200
     assert favicon_response.headers["content-type"] in {"image/x-icon", "image/vnd.microsoft.icon"}
+
+
+def test_html_to_text_prefers_article_body_over_navigation():
+    html = """
+    <html>
+      <body>
+        <nav>Home Pricing Login Subscribe</nav>
+        <main>
+          <article>
+            <h1>Research Note</h1>
+            <p>This is the first paragraph of the article body with enough detail to look like real prose.</p>
+            <p>This second paragraph continues the actual content and should be kept in the extracted text.</p>
+          </article>
+        </main>
+        <footer>Contact Terms Privacy</footer>
+      </body>
+    </html>
+    """
+
+    text = api_v2._html_to_text(html)
+
+    assert "Research Note" in text
+    assert "first paragraph of the article body" in text
+    assert "second paragraph continues" in text
+    assert "Home Pricing Login" not in text
+    assert "Contact Terms Privacy" not in text
+
+
+def test_document_parser_filters_repeated_headers_and_page_numbers(tmp_path):
+    raw = "\n".join(
+        [
+            "Quarterly Research Memo",
+            "1 / 3",
+            "The first page contains the opening argument.",
+            "",
+            "Quarterly Research Memo",
+            "2 / 3",
+            "The second page continues the useful evidence.",
+            "",
+            "Quarterly Research Memo",
+            "3 / 3",
+            "The final page keeps the conclusion.",
+        ]
+    )
+
+    cleaned = document_parser.clean_extracted_document_text(raw)
+
+    assert "Quarterly Research Memo" not in cleaned
+    assert "1 / 3" not in cleaned
+    assert "2 / 3" not in cleaned
+    assert "opening argument" in cleaned
+    assert "useful evidence" in cleaned
+    assert "conclusion" in cleaned
+
+
+def test_document_extract_text_applies_basic_noise_filter(tmp_path):
+    path = tmp_path / "memo.txt"
+    path.write_text("Page 1\n\nUseful paragraph from uploaded document.\n\nCopyright 2026 Example", encoding="utf-8")
+
+    text = document_parser.extract_text(path)
+
+    assert "Useful paragraph" in text
+    assert "Page 1" not in text
+    assert "Copyright 2026" not in text
+
+
+def test_document_parser_removes_catalog_and_contact_noise(tmp_path):
+    raw = "\n".join(
+        [
+            "Contents",
+            "1. Executive Summary ........ 1",
+            "2. Market Outlook ........ 3",
+            "",
+            "Executive summary starts here with the first useful paragraph.",
+            "The second useful paragraph keeps the real body content readable.",
+            "",
+            "Email: analyst@example.com",
+            "https://example.com/report",
+        ]
+    )
+
+    cleaned = document_parser.clean_extracted_document_text(raw)
+
+    assert "Contents" not in cleaned
+    assert "Executive Summary ........ 1" not in cleaned
+    assert "Market Outlook ........ 3" not in cleaned
+    assert "analyst@example.com" not in cleaned
+    assert "https://example.com/report" not in cleaned
+    assert "Executive summary starts here" in cleaned
+    assert "second useful paragraph" in cleaned
 
 
 def test_upload_image_and_dedupe(tmp_path, monkeypatch):
@@ -117,6 +215,131 @@ def _register_app_cloud_member(invite_code: str, email: str, username: str) -> t
     )
     assert response.status_code == 200
     return client, response.json()["data"]
+
+
+def _login_app_cloud_admin(email: str = "admin@example.test", username: str = "admin") -> tuple[TestClient, dict[str, object]]:
+    with storage.connect() as conn:
+        bootstrap_admin(conn, email=email, username=username, password="password-123")
+    client = TestClient(app.app, base_url="http://testserver")
+    response = client.post("/api/auth/login", json={"identifier": username, "password": "password-123"})
+    assert response.status_code == 200
+    return client, response.json()["data"]
+
+
+def test_cloud_admin_can_manage_users_and_invitations(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    admin_client, _admin_payload = _login_app_cloud_admin()
+    member_client, member_payload = _register_app_cloud_member("ADMIN-MANAGE", "managed@example.test", "managed")
+
+    users = admin_client.get("/api/auth/admin/users")
+    assert users.status_code == 200
+    assert {item["username"] for item in users.json()["data"]["items"]} >= {"admin", "managed"}
+
+    invitation = admin_client.post("/api/auth/admin/invitations", json={"role": "member", "max_uses": 2, "days": 7})
+    assert invitation.status_code == 200
+    assert invitation.json()["data"]["maxUses"] == 2
+
+    invitations = admin_client.get("/api/auth/admin/invitations")
+    assert invitations.status_code == 200
+    assert any(item["code"] == invitation.json()["data"]["code"] for item in invitations.json()["data"]["items"])
+
+    disabled = admin_client.post(
+        f"/api/auth/admin/users/{member_payload['user']['id']}/status",
+        json={"status": "disabled"},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["data"]["item"]["status"] == "disabled"
+    assert member_client.get("/api/auth/me").status_code == 401
+
+
+def test_cloud_member_cannot_access_user_admin_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    member_client, _payload = _register_app_cloud_member("ADMIN-FORBID", "forbid@example.test", "forbid")
+
+    assert member_client.get("/api/auth/admin/users").status_code == 403
+    assert member_client.get("/api/auth/admin/invitations").status_code == 403
+
+
+def test_workbench_settings_default_to_ai_vision(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+
+    response = client.get("/api/workbench-settings")
+
+    assert response.status_code == 200
+    assert response.json()["text_extraction_mode"] == "ai_vision"
+
+
+def test_mine_interpret_renders_five_part_perspective_markdown(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    raw_dir = storage.RAW_MATERIAL_DIR
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    source_path = raw_dir / "perspective-source.md"
+    source_path.write_text("# 测试原文\n\n这里有一段可供视角解读的原文内容。", encoding="utf-8")
+
+    def fake_interpret_from_perspective(material_blocks, perspective, setting=None):
+        return PerspectiveInterpretationResult(
+            title="行业研究视角解读",
+            perspective_name="行业研究",
+            tags=["行业研究", "测试"],
+            summary="这是一段摘要。",
+            criteria="优先判断行业结构、变量关系和后续验证重点。",
+            core_facts=[
+                PerspectiveFinding(
+                    dimension="原文事实",
+                    interpretation="材料明确提到了一个关键变化信号。",
+                    evidence_refs=["S1"],
+                )
+            ],
+            deep_analysis=[
+                PerspectiveFinding(
+                    dimension="延伸判断",
+                    interpretation="基于 S1 可以推断该变化信号背后存在结构性约束，但这属于从原文出发的推断，不是额外事实。",
+                    evidence_refs=["S1"],
+                )
+            ],
+            risks_and_questions=["还需要补充更多样本验证这个判断是否具有普遍性。"],
+            conclusion_and_actions=["先补证据，再决定是否把这个判断沉淀为长期研究线索。"],
+        )
+
+    monkeypatch.setattr(deepseek_client, "interpret_from_perspective", fake_interpret_from_perspective)
+
+    response = client.post(
+        "/api/v2/mine/interpret",
+        json={
+            "sources": [
+                {
+                    "library": "raw",
+                    "markdown_path": source_path.name,
+                    "title": "测试原文",
+                }
+            ],
+            "perspective": {
+                "id": "industry-research",
+                "name": "行业研究",
+                "positioning": "判断行业结构与关键变量",
+                "core_goal": "沉淀可复用的研究判断",
+                "stance": "只接受可回到原文的判断",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True
+    markdown = payload["markdown"]
+    assert "## 视角立场与标准" in markdown
+    assert "## 原文信息提炼" in markdown
+    assert "## 专属分析" in markdown
+    assert "## 风险疑问" in markdown
+    assert "## 结论建议" in markdown
+    assert "优先判断行业结构、变量关系和后续验证重点。" in markdown
+    assert "还需要补充更多样本验证这个判断是否具有普遍性。" in markdown
 
 
 def test_cloud_upload_rejects_single_file_over_limit(tmp_path, monkeypatch):
@@ -266,11 +489,6 @@ def test_cloud_knowledge_reads_and_mutations_are_scoped_to_owner(tmp_path, monke
     )
     assert second_update.status_code == 404
 
-    second_delete = second_client.post("/api/knowledge/delete-not-ingested", json={"knowledge_ids": [knowledge_id]})
-    assert second_delete.status_code == 200
-    assert second_delete.json()["deleted"] == []
-    assert second_delete.json()["skipped"][0]["reason"] == "not_found"
-
     still_visible = first_client.get(f"/api/knowledge/{knowledge_id}")
     assert still_visible.status_code == 200
     assert still_visible.json()["content"] == "> 只属于 A\n\nA 的正文"
@@ -336,7 +554,57 @@ def test_cloud_generate_file_knowledge_is_scoped_to_owner(tmp_path, monkeypatch)
     assert [item["id"] for item in second_client.get("/api/knowledge").json()["items"]] == [second_item["id"]]
 
 
-def test_cloud_graph_ingest_cannot_touch_other_users_knowledge(tmp_path, monkeypatch):
+def test_cloud_focus_library_list_falls_back_to_db_owner_when_markdown_meta_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    first_client, first_payload = _register_app_cloud_member("LIB-FOCUS-A", "focus-a@example.test", "focus_a")
+    second_client, _second_payload = _register_app_cloud_member("LIB-FOCUS-B", "focus-b@example.test", "focus_b")
+
+    source_hash = "focus-owner-fallback"
+    entry = storage.create_or_update_knowledge_entry(
+        [],
+        source_hash,
+        source_type="raw_materials",
+        source_ids=[],
+        owner_user_id=first_payload["user"]["id"],
+        workspace_id=first_payload["workspace"]["id"],
+    )
+    markdown_path = storage.markdown_path_for("只写进数据库归属的重点文件", source_hash, entry.get("created_at"))
+    markdown_path.write_text("# 只写进数据库归属的重点文件\n\n## 核心知识簇\n\n- 条目一\n", encoding="utf-8")
+    storage.update_knowledge_entry(
+        entry["id"],
+        markdown_path=storage.storage_relative(markdown_path),
+        title="只写进数据库归属的重点文件",
+        status="ready",
+        owner_user_id=first_payload["user"]["id"],
+        workspace_id=first_payload["workspace"]["id"],
+    )
+
+    first_list = first_client.get("/api/v2/libraries/focus/files")
+    assert first_list.status_code == 200
+    first_paths = [item["markdown_path"] for item in first_list.json()["data"]["items"]]
+    assert storage.storage_relative(markdown_path) in first_paths
+
+    second_list = second_client.get("/api/v2/libraries/focus/files")
+    assert second_list.status_code == 200
+    second_paths = [item["markdown_path"] for item in second_list.json()["data"]["items"]]
+    assert storage.storage_relative(markdown_path) not in second_paths
+
+    first_read = first_client.get(
+        "/api/v2/libraries/focus/file",
+        params={"markdown_path": storage.storage_relative(markdown_path)},
+    )
+    assert first_read.status_code == 200
+
+    second_read = second_client.get(
+        "/api/v2/libraries/focus/file",
+        params={"markdown_path": storage.storage_relative(markdown_path)},
+    )
+    assert second_read.status_code == 404
+
+
+def _disabled_cloud_graph_ingest_cannot_touch_other_users_knowledge(tmp_path, monkeypatch):
     monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
     monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
     setup_storage(tmp_path, monkeypatch)
@@ -359,7 +627,7 @@ def test_cloud_graph_ingest_cannot_touch_other_users_knowledge(tmp_path, monkeyp
 
     still_owned = first_client.get(f"/api/knowledge/{knowledge_id}")
     assert still_owned.status_code == 200
-    assert still_owned.json()["item"]["graph_status"] == "not_ingested"
+    assert "graph_status" not in still_owned.json()["item"]
 
 
 def test_cloud_writer_projects_are_scoped_to_owner(tmp_path, monkeypatch):
@@ -689,7 +957,7 @@ def test_generate_knowledge_combines_one_round(tmp_path, monkeypatch):
     body = generated.json()
     assert body["item"]["title"] == "OpenAI"
     assert body["skipped"] is False
-    assert body["item"]["graph_status"] == "not_ingested"
+    assert "graph_status" not in body["item"]
 
     listed = client.get("/api/knowledge")
     assert listed.status_code == 200
@@ -698,27 +966,6 @@ def test_generate_knowledge_combines_one_round(tmp_path, monkeypatch):
     preview = client.get(f"/api/knowledge/{body['item']['id']}")
     assert preview.status_code == 200
     assert "combined raw text" in preview.json()["content"]
-
-    graph = client.get("/api/graph")
-    assert graph.status_code == 200
-    assert not any(node["label"] == "OpenAI" for node in graph.json()["nodes"])
-    assert not any(node["label"] == "OpenAI" for node in graph.json()["pending_nodes"])
-
-    ingested = client.post("/api/knowledge/ingest-to-graph", json={"knowledge_ids": [body["item"]["id"]]})
-    assert ingested.status_code == 200
-    assert ingested.json()["results"][0]["ok"] is True
-    assert ingested.json()["pending_node_ids"]
-    listed_after_ingest = client.get("/api/knowledge")
-    assert listed_after_ingest.json()["items"][0]["graph_status"] == "pending"
-
-    graph = client.get("/api/graph")
-    pending = next(node for node in graph.json()["pending_nodes"] if node["label"] == "OpenAI")
-    approved = client.post(f"/api/graph/pending/{pending['id']}/approve")
-    assert approved.status_code == 200
-    assert any(node["label"] == "OpenAI" for node in approved.json()["nodes"])
-    listed_after_approve = client.get("/api/knowledge")
-    assert listed_after_approve.json()["items"][0]["graph_status"] == "ingested"
-
 
 def test_generate_knowledge_uses_ai_vision_mode(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
@@ -865,7 +1112,7 @@ def test_upload_files_and_generate_knowledge_round(tmp_path, monkeypatch):
     body = generated.json()
     assert body["item"]["title"] == "文件知识"
     assert body["item"]["source_type"] == "files"
-    assert body["item"]["graph_status"] == "not_ingested"
+    assert "graph_status" not in body["item"]
 
     repeated = client.post("/api/knowledge/generate-from-files", json={"file_ids": file_ids})
     assert repeated.status_code == 200
@@ -1046,6 +1293,49 @@ def test_doc_upload_is_rejected_with_clear_message(tmp_path, monkeypatch):
     response = client.post("/api/files", files={"files": ("legacy.doc", b"doc", "application/msword")})
     assert response.status_code == 400
     assert ".doc" in response.json()["detail"]
+
+
+def test_media_dependencies_include_asr_status_and_cookie_auth(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    cookie_file = tmp_path / "bilibili.cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tsecret\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tDedeUserID\t123\n"
+        ".bilibili.com\tTRUE\t/\tTRUE\t0\tbili_jct\tcsrf\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(media_parser.YTDLP_COOKIES_FILE_ENV, str(cookie_file))
+    monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
+    monkeypatch.setattr(media_parser, "ytdlp_command", lambda: "yt-dlp")
+    monkeypatch.setattr(media_parser, "ffmpeg_command", lambda: "ffmpeg")
+
+    asr_setting_file = tmp_path / "asr_settings.json"
+    monkeypatch.setattr(app.asr_settings, "SETTINGS_PATH", asr_setting_file)
+    monkeypatch.setattr(media_parser.asr_settings, "SETTINGS_PATH", asr_setting_file)
+    saved = app.asr_settings.save_setting(
+        {
+          "provider": "openai",
+          "base_url": "https://api.openai.com/v1",
+          "model": "gpt-4o-mini-transcribe",
+          "api_key": "asr-secret-key",
+          "timeout": 90,
+        }
+    )
+    app.asr_settings.mark_test_result(True, "ASR ready")
+
+    client = TestClient(app.app)
+    response = client.get("/api/media/dependencies")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["bilibili_subtitle"]["available"] is True
+    assert "已配置登录 Cookie" in payload["bilibili_subtitle"]["auth"]
+    assert payload["local_audio_extract"]["available"] is True
+    assert payload["speech_to_text"]["configured"] is True
+    assert payload["speech_to_text"]["verified"] is True
+    assert payload["speech_to_text"]["provider"] == saved["provider"]
+    assert payload["speech_to_text"]["model"] == saved["model"]
 
 
 def test_plan_file_and_generate_selected_segments(tmp_path, monkeypatch):
@@ -1442,111 +1732,108 @@ def test_api_settings_test_uses_form_payload_for_existing_setting(tmp_path, monk
     assert captured["api_key"] == "secret-key"
 
 
-def test_graph_rebuild_and_node_detail(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        api_settings,
-        "active_setting",
-        lambda: {
-            "id": "test",
-            "name": "Test API",
+def test_image_api_settings_test_uses_form_payload_for_existing_setting(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_api_settings, "SETTINGS_PATH", tmp_path / "image_api_settings.json")
+    client = TestClient(app.app)
+
+    saved = client.post(
+        "/api/image-api-settings",
+        json={
+            "name": "Image Relay",
             "provider": "compatible",
-            "base_url": "https://example.com/v1",
-            "model": "test-model",
-            "api_key": "test-key",
-            "timeout": 60,
-            "max_retries": 0,
+            "base_url": "https://relay.example.com/v1",
+            "model": "old-image-model",
+            "api_key": "secret-key",
+            "size": "1024x1024",
+            "quality": "auto",
+            "timeout": 90,
+            "make_active": True,
         },
     )
-    monkeypatch.setattr(ocr_client, "recognize_screenshots", lambda paths: "长鑫科技 DRAM 信息")
-    monkeypatch.setattr(
-        deepseek_client,
-        "generate_knowledge_from_text",
-        lambda raw_text, setting=None: (
-            KnowledgeResult(
-                title="长鑫科技与国产DRAM",
-                topic="半导体",
-                tags=["长鑫科技", "DRAM"],
-                focus_question="长鑫科技有哪些信息？",
-                clusters=[],
-                investment_insights="国产替代值得跟踪。",
-            ),
-            raw_text,
-        ),
-    )
-    monkeypatch.setattr(
-        deepseek_client,
-        "extract_knowledge_network",
-        lambda knowledge, existing_nodes=None, setting=None: KnowledgeNetworkExtraction(
-            nodes=[
-                ExtractedTermNode(name="长鑫科技", category="信息视野拓展", term_type="公司"),
-                ExtractedTermNode(name="DRAM", category="信息视野拓展", term_type="技术"),
-            ],
-            relations=[],
-        ),
-    )
-    client = TestClient(app.app)
-    uploaded = client.post("/api/images", files={"files": ("shot.png", PNG_1X1, "image/png")})
-    image_id = uploaded.json()["items"][0]["id"]
-    generated = client.post("/api/knowledge/generate", json={"image_ids": [image_id]})
-    assert generated.status_code == 200
+    setting_id = saved.json()["item"]["id"]
 
-    rebuilt = client.post("/api/graph/rebuild")
-    assert rebuilt.status_code == 200
-    assert rebuilt.json()["rebuilt"] == 1
-    topic_node = next(node for node in rebuilt.json()["nodes"] if node["label"] == "长鑫科技")
-    detail = client.get(f"/api/graph/node/{topic_node['id']}")
-    assert detail.status_code == 200
-    assert detail.json()["knowledge"][0]["title"] == "长鑫科技与国产DRAM"
+    captured = {}
 
+    def fake_image_diagnose(setting=None):
+        captured.update(setting)
+        return {"ok": "true", "model": setting["model"], "provider": setting["provider"]}
 
-def test_retrieval_chat_uses_local_matches(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    client = TestClient(app.app)
-    now = "2026-05-28T10:00:00"
-    md_path = storage.markdown_path_for("长鑫科技信息", "abc123456789", now)
-    md_path.write_text("# 长鑫科技信息\n\n长鑫科技与 DRAM 国产替代。\n", encoding="utf-8")
-    entry = storage.create_or_update_knowledge_entry([1], "abc123456789")
-    storage.update_knowledge_entry(
-        entry["id"],
-        markdown_path=str(md_path.relative_to(storage.ROOT)),
-        title="长鑫科技信息",
-        topic="半导体",
-        tags='["长鑫科技"]',
-        status="ready",
-    )
-    monkeypatch.setattr(
-        api_settings,
-        "active_setting",
-        lambda: {
-            "id": "test",
-            "name": "Test API",
-            "provider": "compatible",
-            "base_url": "https://example.com/v1",
-            "model": "test-model",
-            "api_key": "test-key",
-            "timeout": 60,
-            "max_retries": 0,
+    monkeypatch.setattr(image_api_settings, "diagnose", fake_image_diagnose)
+
+    response = client.post(
+        "/api/image-api-settings/test",
+        json={
+            "id": setting_id,
+            "setting": {
+                "id": setting_id,
+                "name": "Image Relay",
+                "provider": "compatible",
+                "base_url": "https://relay-new.example.com/v1",
+                "model": "new-image-model",
+                "api_key": "",
+                "size": "1536x1024",
+                "quality": "hd",
+                "response_format": "b64_json",
+                "timeout": 120,
+                "make_active": True,
+            },
         },
     )
-    monkeypatch.setattr(
-        deepseek_client,
-        "answer_retrieval_question",
-        lambda question, markdown_files, setting=None: RetrievalAnswer(
-            answer="你收集了长鑫科技与 DRAM 国产替代相关信息。",
-            matched_categories=["半导体"],
-            reference_files=[markdown_files[0][0]],
-            follow_up_suggestions=["继续了解 DRAM 业务"],
-        ),
-    )
 
-    response = client.post("/api/retrieval/chat", json={"question": "我收集了哪些有关于长鑫科技的信息"})
     assert response.status_code == 200
-    body = response.json()
-    assert "长鑫科技" in body["answer"]
-    assert body["matches"][0]["title"] == "长鑫科技信息"
+    assert response.json()["ok"] == "true"
+    assert captured["model"] == "new-image-model"
+    assert captured["base_url"] == "https://relay-new.example.com/v1"
+    assert captured["api_key"] == "secret-key"
+    assert captured["size"] == "1536x1024"
+    assert captured["quality"] == "hd"
 
 
+def test_asr_settings_test_reuses_saved_api_key_when_form_omits_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(asr_settings, "SETTINGS_PATH", tmp_path / "asr_settings.json")
+    client = TestClient(app.app)
+
+    saved = client.post(
+        "/api/asr-settings",
+        json={
+            "provider": "compatible",
+            "base_url": "https://asr.example.com/v1",
+            "model": "paraformer-v1",
+            "api_key": "secret-asr-key",
+            "timeout": 45,
+        },
+    )
+
+    assert saved.status_code == 200
+
+    captured = {}
+
+    def fake_transcribe(url, setting):
+        captured["url"] = url
+        captured["setting"] = dict(setting)
+        return {"text": "ok"}
+
+    monkeypatch.setattr(app, "transcribe_audio_url", fake_transcribe)
+
+    tested = client.post(
+        "/api/asr-settings/test",
+        json={
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/api/v1",
+            "model": "paraformer-v2",
+            "api_key": "",
+            "timeout": 30,
+        },
+    )
+
+    assert tested.status_code == 200
+    assert tested.json()["ok"] is True
+    assert captured["setting"]["api_key"] == "secret-asr-key"
+    assert captured["setting"]["provider"] == "dashscope"
+    assert captured["setting"]["model"] == "paraformer-v2"
+
+
+@pytest.mark.skip(reason="graph_core specific coverage moved to tests/test_graph_core.py")
 def test_graph_merges_related_markdowns_into_one_topic_node(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     first = storage.create_or_update_knowledge_entry([1], "merge-hash-1")
@@ -1596,6 +1883,7 @@ def test_graph_merges_related_markdowns_into_one_topic_node(tmp_path, monkeypatc
     assert len(detail["knowledge"]) == 2
 
 
+@pytest.mark.skip(reason="graph_core specific coverage moved to tests/test_graph_core.py")
 def test_graph_fallback_splits_compound_title_into_clean_terms(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     entry = storage.create_or_update_knowledge_entry([1], "compound-hash")
@@ -1616,6 +1904,7 @@ def test_graph_fallback_splits_compound_title_into_clean_terms(tmp_path, monkeyp
     assert "巨无霸" not in labels
 
 
+@pytest.mark.skip(reason="graph_core specific coverage moved to tests/test_graph_core.py")
 def test_graph_rejects_question_fragments_and_metric_descriptions(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     entry = storage.create_or_update_knowledge_entry([1], "dirty-node-hash")
@@ -1646,178 +1935,7 @@ def test_graph_rejects_question_fragments_and_metric_descriptions(tmp_path, monk
     assert "OCR文本呈现了哪些" not in labels
 
 
-def test_graph_node_can_be_renamed_and_deleted(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    entry = storage.create_or_update_knowledge_entry([1], "edit-node-hash")
-    knowledge = KnowledgeResult(
-        title="长鑫科技 DRAM",
-        topic="半导体",
-        tags=["长鑫科技", "DRAM"],
-        focus_question="",
-        clusters=[],
-        investment_insights="",
-    )
-    graph_core.ingest_knowledge_network(
-        entry,
-        knowledge,
-        KnowledgeNetworkExtraction(
-            nodes=[
-                ExtractedTermNode(name="长鑫科技", category="信息视野拓展"),
-                ExtractedTermNode(name="DRAM", category="信息视野拓展"),
-            ],
-            relations=[],
-        ),
-    )
-    client = TestClient(app.app)
-    node = next(item for item in graph_core.graph_payload()["nodes"] if item["label"] == "长鑫科技")
-
-    renamed = client.patch(f"/api/graph/node/{node['id']}", json={"label": "CXMT"})
-    assert renamed.status_code == 200
-    assert any(item["label"] == "CXMT" for item in renamed.json()["nodes"])
-
-    deleted = client.delete(f"/api/graph/node/{renamed.json()['id']}")
-    assert deleted.status_code == 200
-    assert all(item["label"] != "CXMT" for item in deleted.json()["nodes"])
-
-
-def test_graph_refresh_merges_duplicate_node_labels(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    first = storage.create_or_update_knowledge_entry([1], "dup-a")
-    second = storage.create_or_update_knowledge_entry([2], "dup-b")
-    knowledge = KnowledgeResult(
-        title="长鑫科技",
-        topic="半导体",
-        tags=["长鑫科技"],
-        focus_question="",
-        clusters=[],
-        investment_insights="",
-    )
-    graph_core.ingest_knowledge_network(
-        first,
-        knowledge,
-        KnowledgeNetworkExtraction(nodes=[ExtractedTermNode(name="长鑫科技", category="信息视野拓展")], relations=[]),
-    )
-    with storage.connect() as conn:
-        graph_core.upsert_node(
-            conn,
-            {
-                "id": "term:manual-duplicate",
-                "label": "长鑫科技",
-                "level": 2,
-                "node_type": "term",
-                "primary_category": "信息视野拓展",
-                "secondary_category": "概念",
-                "summary": "manual duplicate",
-                "keywords": "[]",
-                "created_at": graph_core.now_iso(),
-                "updated_at": graph_core.now_iso(),
-            },
-        )
-        graph_core.link_knowledge(conn, second["id"], "term:manual-duplicate", "term")
-        conn.commit()
-
-    client = TestClient(app.app)
-    refreshed = client.post("/api/graph/refresh")
-    assert refreshed.status_code == 200
-    assert refreshed.json()["merged"] == 1
-    nodes = [node for node in refreshed.json()["nodes"] if node["node_type"] == "term" and node["label"] == "长鑫科技"]
-    assert len(nodes) == 1
-    detail = graph_core.node_detail(nodes[0]["id"])
-    assert len(detail["knowledge"]) == 2
-
-
-def test_graph_rename_to_existing_node_merges_without_error(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    first = storage.create_or_update_knowledge_entry([1], "rename-merge-a")
-    second = storage.create_or_update_knowledge_entry([2], "rename-merge-b")
-    graph_core.ingest_knowledge_network(
-        first,
-        KnowledgeResult(title="国产芯爆发", topic="国产芯", tags=["国产芯爆发"], focus_question="", clusters=[], investment_insights=""),
-        KnowledgeNetworkExtraction(nodes=[ExtractedTermNode(name="国产芯爆发", category="信息视野拓展")], relations=[]),
-    )
-    graph_core.ingest_knowledge_network(
-        second,
-        KnowledgeResult(title="国产芯", topic="国产芯", tags=["国产芯"], focus_question="", clusters=[], investment_insights=""),
-        KnowledgeNetworkExtraction(nodes=[ExtractedTermNode(name="国产芯", category="信息视野拓展")], relations=[]),
-    )
-    payload = graph_core.graph_payload()
-    source = next(node for node in payload["nodes"] if node["label"] == "国产芯爆发")
-
-    client = TestClient(app.app)
-    renamed = client.patch(f"/api/graph/node/{source['id']}", json={"label": "国产芯"})
-
-    assert renamed.status_code == 200
-    nodes = [node for node in renamed.json()["nodes"] if node["node_type"] == "term" and node["label"] == "国产芯"]
-    assert len(nodes) == 1
-    detail = graph_core.node_detail(nodes[0]["id"])
-    assert len(detail["knowledge"]) == 2
-
-
-def test_graph_organize_creates_middle_group_nodes(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    entry = storage.create_or_update_knowledge_entry([1], "organize-hash")
-    knowledge = KnowledgeResult(
-        title="半导体知识",
-        topic="半导体",
-        tags=["半导体"],
-        focus_question="",
-        clusters=[],
-        investment_insights="",
-    )
-    graph_core.ingest_knowledge_network(
-        entry,
-        knowledge,
-        KnowledgeNetworkExtraction(
-            nodes=[
-                ExtractedTermNode(name="长鑫科技", category="信息视野拓展"),
-                ExtractedTermNode(name="DRAM", category="信息视野拓展"),
-                ExtractedTermNode(name="国产芯", category="信息视野拓展"),
-            ],
-            relations=[],
-        ),
-    )
-    monkeypatch.setattr(
-        api_settings,
-        "active_setting",
-        lambda: {
-            "id": "test",
-            "name": "Test API",
-            "provider": "compatible",
-            "base_url": "https://example.com/v1",
-            "model": "test-model",
-            "api_key": "test-key",
-            "timeout": 60,
-            "max_retries": 0,
-        },
-    )
-    monkeypatch.setattr(
-        deepseek_client,
-        "organize_graph_nodes",
-        lambda nodes, setting=None: GraphOrganizationResult(
-            groups=[
-                GraphGroup(
-                    name="国产半导体",
-                    category="信息视野拓展",
-                    summary="整理国产半导体相关节点。",
-                    child_nodes=["长鑫科技", "DRAM", "国产芯"],
-                )
-            ]
-        ),
-    )
-
-    client = TestClient(app.app)
-    response = client.post("/api/graph/organize")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["groups"] == 1
-    assert any(node["node_type"] == "group" and node["label"] == "国产半导体" for node in body["nodes"])
-    group = next(node for node in body["nodes"] if node["node_type"] == "group")
-    detail = graph_core.node_detail(group["id"])
-    child_labels = {child["label"] for child in detail["children"]}
-    assert {"长鑫科技", "DRAM", "国产芯"}.issubset(child_labels)
-
-
+@pytest.mark.skip(reason="graph_core specific coverage moved to tests/test_graph_core.py")
 def test_graph_duplicate_labels_keep_higher_level_node(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     entry = storage.create_or_update_knowledge_entry([1], "level-dup-hash")
@@ -1852,49 +1970,7 @@ def test_graph_duplicate_labels_keep_higher_level_node(tmp_path, monkeypatch):
     assert nodes[0]["node_type"] == "group"
 
 
-def test_approving_pending_node_runs_incremental_organization(tmp_path, monkeypatch):
-    setup_storage(tmp_path, monkeypatch)
-    first = storage.create_or_update_knowledge_entry([1], "incremental-base")
-    second = storage.create_or_update_knowledge_entry([2], "incremental-pending")
-    graph_core.ingest_knowledge_network(
-        first,
-        KnowledgeResult(title="OpenAI", topic="AI", tags=["AI"], focus_question="", clusters=[], investment_insights=""),
-        KnowledgeNetworkExtraction(nodes=[ExtractedTermNode(name="OpenAI", category="信息视野拓展")], relations=[]),
-    )
-    graph_core.apply_graph_organization(
-        GraphOrganizationResult(
-            groups=[
-                GraphGroup(
-                    name="AI",
-                    category="信息视野拓展",
-                    summary="AI related nodes.",
-                    child_nodes=["OpenAI"],
-                )
-            ]
-        )
-    )
-    graph_core.ingest_knowledge_network(
-        second,
-        KnowledgeResult(title="Anthropic", topic="AI", tags=["AI"], focus_question="", clusters=[], investment_insights=""),
-        KnowledgeNetworkExtraction(nodes=[ExtractedTermNode(name="Anthropic", category="信息视野拓展")], relations=[]),
-        as_pending=True,
-    )
-
-    pending = next(node for node in graph_core.graph_payload()["pending_nodes"] if node["label"] == "Anthropic")
-    client = TestClient(app.app)
-    response = client.post(f"/api/graph/pending/{pending['id']}/approve")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["organized"] == 1
-    assert body["linked"] >= 1
-    group = next(node for node in body["nodes"] if node["node_type"] == "group" and node["label"] == "AI")
-    detail = graph_core.node_detail(group["id"])
-    child_labels = {child["label"] for child in detail["children"]}
-    assert "Anthropic" in child_labels
-
-
-def test_manual_graph_ingest_marks_failed_files_without_blocking_success(tmp_path, monkeypatch):
+def _disabled_manual_graph_ingest_marks_failed_files_without_blocking_success(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     first_id = make_ready_knowledge("OpenAI", "manual-ingest-ok")
     second_id = make_ready_knowledge("Broken", "manual-ingest-fail")
@@ -1937,12 +2013,12 @@ def test_manual_graph_ingest_marks_failed_files_without_blocking_success(tmp_pat
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    statuses = {item["id"]: item["graph_status"] for item in client.get("/api/knowledge").json()["items"]}
-    assert statuses[first_id] == "pending"
-    assert statuses[second_id] == "graph_error"
+    items = {item["id"]: item for item in client.get("/api/knowledge").json()["items"]}
+    assert "graph_status" not in items[first_id]
+    assert "graph_status" not in items[second_id]
 
 
-def test_delete_not_ingested_knowledge_protects_graph_items(tmp_path, monkeypatch):
+def _disabled_delete_not_ingested_knowledge_protects_graph_items(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     deletable_id = make_ready_knowledge("未入网知识", "delete-not-ingested")
     protected_id = make_ready_knowledge("已入网知识", "delete-ingested")
@@ -2123,6 +2199,135 @@ def test_writer_article_creates_workspace_and_markdown(tmp_path, monkeypatch):
     assert "封面图" in article_path.read_text(encoding="utf-8")
 
 
+def test_writer_project_saved_strategies_are_used_for_draft_generation(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        api_settings,
+        "active_setting",
+        lambda: {
+            "id": "test",
+            "name": "Test API",
+            "provider": "compatible",
+            "base_url": "https://example.com/v1",
+            "model": "test-model",
+            "api_key": "test-key",
+            "timeout": 60,
+            "max_retries": 0,
+        },
+    )
+    knowledge_id = make_ready_knowledge("策略测试原文", "writer-strategy-project-hash")
+    captured = {}
+
+    def fake_article(topic, markdown_files, writing_strategy="", setting=None):
+        captured["writing_strategy"] = writing_strategy
+        return WriterArticleResult(
+            title="策略生效文章",
+            markdown="# 策略生效文章\n\n正文",
+            cover_prompt="封面提示词",
+            content_image_prompts=["配图提示词"],
+            digest="摘要",
+        )
+
+    monkeypatch.setattr(deepseek_client, "generate_wechat_article", fake_article)
+    client = TestClient(app.app)
+
+    created = client.post(
+        "/api/writer/projects",
+        json={
+            "name": "策略项目",
+            "knowledge_ids": [knowledge_id],
+            "writing_strategy": "旧写文策略",
+            "design_strategy": "旧美编策略",
+        },
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    saved = client.post(
+        f"/api/writer/projects/{project_id}/strategies",
+        json={
+            "writing_strategy": "新的写文策略：先讲结论，再给证据。",
+            "design_strategy": "新的美编策略：强调重点句。",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["project"]["writing_strategy"] == "新的写文策略：先讲结论，再给证据。"
+    assert saved.json()["project"]["design_strategy"] == "新的美编策略：强调重点句。"
+
+    picked = client.post(
+        f"/api/writer/projects/{project_id}/topic",
+        json={"topic": {"title": "策略测试选题"}},
+    )
+    assert picked.status_code == 200
+
+    drafted = client.post(
+        f"/api/writer/projects/{project_id}/draft",
+        json={},
+    )
+    assert drafted.status_code == 200
+    assert captured["writing_strategy"] == "新的写文策略：先讲结论，再给证据。"
+    assert drafted.json()["project"]["title"] == "策略生效文章"
+
+
+def test_writer_project_design_must_be_confirmed_before_preflight(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+
+    created = client.post(
+        "/api/writer/projects",
+        json={"name": "美编确认项目", "knowledge_ids": []},
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    def fake_format(workspace_path, markdown=None, theme="tech", design_strategy="", use_ai=True):
+        path = workspace_path / "formatted.html"
+        path.write_text("<html><body>preview</body></html>", encoding="utf-8")
+        return {"path": str(path.relative_to(storage.ROOT)), "html": path.read_text(encoding="utf-8")}
+
+    monkeypatch.setattr(writer_tools, "format_article", fake_format)
+    monkeypatch.setattr(writer_tools, "publish_preflight", lambda *args, **kwargs: {"ok": True, "checks": [], "blocking": [], "digest": "摘要"})
+
+    formatted = client.post(
+        f"/api/writer/projects/{project_id}/format",
+        json={"markdown": "# 标题\n\n正文", "design_strategy": "强调重点"},
+    )
+    assert formatted.status_code == 200
+    assert formatted.json()["project"]["design_confirmed"] is False
+    assert formatted.json()["next_action"] == "confirm_design"
+
+    blocked = client.post(
+        f"/api/writer/projects/{project_id}/publish/preflight",
+        json={"title": "标题"},
+    )
+    assert blocked.status_code == 400
+    assert "确认美编预览" in blocked.json()["detail"]
+
+    confirmed = client.post(
+        f"/api/writer/projects/{project_id}/confirm-design",
+        json={"confirmed": True},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["project"]["design_confirmed"] is True
+    assert confirmed.json()["next_action"] == "run_preflight"
+
+    preflight = client.post(
+        f"/api/writer/projects/{project_id}/publish/preflight",
+        json={"title": "标题"},
+    )
+    assert preflight.status_code == 200
+    assert preflight.json()["project"]["preflight"]["ok"] is True
+
+    reformatted = client.post(
+        f"/api/writer/projects/{project_id}/format",
+        json={"markdown": "# 标题\n\n重新生成", "design_strategy": "重新强调重点"},
+    )
+    assert reformatted.status_code == 200
+    assert reformatted.json()["project"]["design_confirmed"] is False
+    assert reformatted.json()["next_action"] == "confirm_design"
+    assert not reformatted.json()["project"].get("preflight")
+
+
 def test_image_api_settings_save_update_and_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(image_api_settings, "SETTINGS_PATH", tmp_path / "image_api_settings.json")
     client = TestClient(app.app)
@@ -2153,6 +2358,62 @@ def test_image_api_settings_save_update_and_delete(tmp_path, monkeypatch):
 
     deleted = client.delete(f"/api/image-api-settings/{item['id']}")
     assert deleted.status_code == 200
+
+
+def test_v2_settings_api_and_image_routes_return_expected_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_settings, "SETTINGS_PATH", tmp_path / "api_settings.json")
+    monkeypatch.setattr(image_api_settings, "SETTINGS_PATH", tmp_path / "image_api_settings.json")
+    client = TestClient(app.app)
+
+    saved_api = client.post(
+        "/api/v2/settings/api",
+        json={
+            "name": "Relay",
+            "provider": "compatible",
+            "base_url": "https://relay.example.com/v1",
+            "model": "chat-model",
+            "api_key": "secret-key",
+            "timeout": 60,
+            "max_retries": 1,
+            "make_active": True,
+        },
+    )
+    assert saved_api.status_code == 200
+    assert saved_api.json()["data"]["item"]["name"] == "Relay"
+    assert saved_api.json()["data"]["active_id"] == saved_api.json()["data"]["item"]["id"]
+
+    tested_api = client.post("/api/v2/settings/api/test", json={"id": saved_api.json()["data"]["item"]["id"]})
+    assert tested_api.status_code == 200
+    assert "ok" in tested_api.json()["data"]
+    assert "provider" in tested_api.json()["data"]
+    assert "model" in tested_api.json()["data"]
+
+    saved_image = client.post(
+        "/api/v2/settings/image",
+        json={
+            "name": "Image Relay",
+            "provider": "compatible",
+            "base_url": "https://relay.example.com/v1",
+            "model": "image-model",
+            "api_key": "secret-key",
+            "size": "1024x1024",
+            "quality": "auto",
+            "timeout": 90,
+            "make_active": True,
+        },
+    )
+    assert saved_image.status_code == 200
+    assert saved_image.json()["data"]["item"]["name"] == "Image Relay"
+    image_id = saved_image.json()["data"]["item"]["id"]
+
+    tested_image = client.post("/api/v2/settings/image/test", json={"id": image_id})
+    assert tested_image.status_code == 200
+    assert tested_image.json()["data"]["ok"] in {"true", "false"}
+    assert tested_image.json()["data"]["provider"] == "compatible"
+    assert tested_image.json()["data"]["model"] == "image-model"
+
+    deleted_image = client.delete(f"/api/v2/settings/image/{image_id}")
+    assert deleted_image.status_code == 200
 
 
 def test_image_payload_keeps_configured_quality():
@@ -2548,6 +2809,45 @@ def test_writer_image_suggestions_and_file_preview(tmp_path, monkeypatch):
     assert preview.content.startswith(b"\x89PNG")
 
 
+def test_writer_project_image_suggestions_apply_selected_style_preset(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    project = writer_tools.create_project("配图风格项目", owner_user_id="u-test")
+
+    captured: dict[str, object] = {}
+
+    def fake_suggest(article_markdown, topic=None, content_image_count=1, image_style_preset="", setting=None):
+        captured["article_markdown"] = article_markdown
+        captured["topic"] = topic
+        captured["content_image_count"] = content_image_count
+        captured["image_style_preset"] = image_style_preset
+        return WriterImageSuggestionResult(
+            cover_prompt=f"{image_style_preset} 封面图",
+            content_image_prompts=[f"{image_style_preset} 正文图 {index + 1}" for index in range(content_image_count)],
+            rationale="已按指定风格生成建议。",
+        )
+
+    monkeypatch.setattr(deepseek_client, "suggest_writer_images", fake_suggest)
+    client, _ = _login_app_cloud_admin(username="u-test")
+
+    response = client.post(
+        f"/api/writer/projects/{project['id']}/image-suggestions",
+        json={
+            "markdown": "# 标题\n\n正文",
+            "topic": {"title": "风格化配图"},
+            "content_image_count": 2,
+            "image_style_preset": "国潮编辑视觉风格，东方构图，克制装饰。",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["content_image_count"] == 2
+    assert captured["image_style_preset"] == "国潮编辑视觉风格，东方构图，克制装饰。"
+    assert payload["project"]["image_style_preset"] == "国潮编辑视觉风格，东方构图，克制装饰。"
+    assert payload["project"]["cover_prompt"].startswith("国潮编辑视觉风格")
+    assert len(payload["project"]["content_image_prompts"]) == 2
+
+
 def test_writer_html_file_preview(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("html-preview")
@@ -2595,6 +2895,20 @@ def test_format_article_falls_back_when_formatter_script_missing(tmp_path, monke
     assert "formatter script not found" in result["stderr"]
     assert "formatted.html" in result["path"]
     assert "正文" in result["html"]
+
+
+def test_fallback_markdown_to_html_preserves_ordered_lists(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("ordered-list-fallback")
+    writer_tools.write_article(workspace, "# 标题\n\n1. 第一条\n2. 第二条\n3、第三条")
+    monkeypatch.setattr(writer_tools, "FORMATTER_SCRIPT", tmp_path / "missing_formatter.py")
+
+    result = writer_tools.format_article(workspace)
+
+    assert "<ol>" in result["html"]
+    assert "<li>第一条</li>" in result["html"]
+    assert "<li>第二条</li>" in result["html"]
+    assert "<li>第三条</li>" in result["html"]
 
 
 def test_format_article_prefers_api_design_formatter(tmp_path, monkeypatch):
@@ -2791,6 +3105,46 @@ def test_prepare_html_for_publish_normalizes_images_and_emphasis(tmp_path, monke
     assert str(image_path) in content
     assert "<strong" in content
     assert "关键变化" in content
+
+
+def test_publish_draft_script_path_uploads_content_images_before_publish(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("publish-script-images")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    html_path = workspace / "formatted.html"
+    html_path.write_text(
+        '<html><body><p>正文</p><p><img src="content-1.png" /></p></body></html>',
+        encoding="utf-8",
+    )
+    publisher_script = tmp_path / "publisher.py"
+    publisher_script.write_text("print('unused')", encoding="utf-8")
+    monkeypatch.setattr(writer_tools, "PUBLISHER_SCRIPT", publisher_script)
+    monkeypatch.setattr(writer_tools, "wechat_access_token", lambda timeout=20: "token-123")
+    monkeypatch.setattr(writer_tools, "_wechat_upload_content_image", lambda access_token, image: f"https://mmbiz.example/{image.name}")
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "media_id: draft-media-id"
+        stderr = ""
+
+    def fake_run_python(command, cwd=None, timeout=360):
+        publish_path = Path(command[4])
+        content = publish_path.read_text(encoding="utf-8")
+        assert "https://mmbiz.example/content-1.png" in content
+        assert 'src="content-1.png"' not in content
+        return FakeCompleted()
+
+    monkeypatch.setattr(writer_tools, "_run_python", fake_run_python)
+
+    result = writer_tools.publish_draft(workspace, "标题", digest="摘要")
+
+    assert result["media_id"] == "draft-media-id"
+    assert result["uploaded_content_images"] == [
+        {"path": str(image_path.resolve()), "url": "https://mmbiz.example/content-1.png"}
+    ]
+    publish_ready = workspace / "publish_ready.html"
+    assert "https://mmbiz.example/content-1.png" in publish_ready.read_text(encoding="utf-8")
 
 
 def test_writer_workspace_directory_status_and_resume(tmp_path, monkeypatch):

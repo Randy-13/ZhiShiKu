@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { AuthContext } from "../api";
 import type { WorkspaceId, WorkspaceNavItem } from "../domain";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
@@ -10,15 +11,13 @@ export function AppShell({
   activeId,
   activeTitle,
   activeDescription,
-  searchPlaceholder,
-  importLabel,
   queueLabel,
   queueStatus,
-  search,
   children,
-  onSearchChange,
-  onImport,
   onOpenQueue,
+  authContext,
+  onLogout,
+  onOpenUserAdmin,
   onSelect,
 }: {
   appName: string;
@@ -27,15 +26,13 @@ export function AppShell({
   activeId: WorkspaceId;
   activeTitle: string;
   activeDescription: string;
-  searchPlaceholder: string;
-  importLabel: string;
   queueLabel: string;
   queueStatus: string;
-  search: string;
   children: ReactNode;
-  onSearchChange: (value: string) => void;
-  onImport: () => void;
   onOpenQueue: () => void;
+  authContext: AuthContext;
+  onLogout: () => void;
+  onOpenUserAdmin: () => void;
   onSelect: (id: WorkspaceId) => void;
 }) {
   return (
@@ -51,14 +48,12 @@ export function AppShell({
         <Topbar
           title={activeTitle}
           description={activeDescription}
-          searchPlaceholder={searchPlaceholder}
-          importLabel={importLabel}
           queueLabel={queueLabel}
           queueStatus={queueStatus}
-          search={search}
-          onSearchChange={onSearchChange}
-          onImport={onImport}
           onOpenQueue={onOpenQueue}
+          authContext={authContext}
+          onLogout={onLogout}
+          onOpenUserAdmin={onOpenUserAdmin}
         />
         {children}
       </main>

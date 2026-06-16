@@ -125,13 +125,6 @@ export const libraryApi = {
     return toKnowledge({ ...(payload.item ?? {}), markdown: payload.content }, undefined, Number(payload.item?.id ?? Date.now()));
   },
 
-  ingestKnowledge(knowledgeIds: number[]) {
-    return requestJson("/api/knowledge/ingest-to-graph", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_ids: knowledgeIds }),
-    });
-  },
 };
 
 function assertV2Ok<T extends { ok?: boolean; error?: string }>(payload: V2Payload<T>): T {
@@ -202,7 +195,7 @@ export function toKnowledge(raw: Record<string, unknown>, material?: SourceMater
     createdAt: firstString(raw.created_at, raw.createdAt),
     updatedAt: firstString(raw.updated_at, raw.updatedAt),
     sourceIds: material ? [material.id] : [],
-    status: raw.graph_status === "ingested" ? "ingested" : "saved",
+    status: "saved",
     confidence: raw.status === "ready" || body ? "medium" : "needsReview",
   };
 }

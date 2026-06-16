@@ -118,9 +118,27 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     [language, requireProjectId, runWriterAction],
   );
 
-  const generateWriterDraft = useCallback(() => {
-    runWriterAction(language === "zh" ? "生成初稿" : "Generate draft", () => writerApi.generateWriterProjectDraft(requireProjectId()));
-  }, [language, requireProjectId, runWriterAction]);
+  const saveWriterStrategies = useCallback(
+    (writingStrategy?: string, designStrategy?: string) => {
+      runWriterAction(language === "zh" ? "保存项目策略" : "Save project strategies", () =>
+        writerApi.updateWriterProjectStrategies(requireProjectId(), writingStrategy, designStrategy),
+      );
+    },
+    [language, requireProjectId, runWriterAction],
+  );
+
+  const generateWriterDraft = useCallback(
+    (writingStrategy?: string, designStrategy?: string) => {
+      runWriterAction(language === "zh" ? "生成初稿" : "Generate draft", async () => {
+        const projectId = requireProjectId();
+        if (writingStrategy !== undefined || designStrategy !== undefined) {
+          await writerApi.updateWriterProjectStrategies(projectId, writingStrategy, designStrategy);
+        }
+        return writerApi.generateWriterProjectDraft(projectId);
+      });
+    },
+    [language, requireProjectId, runWriterAction],
+  );
 
   const reviseWriterProject = useCallback(
     (instruction: string, markdown?: string) => {
@@ -130,10 +148,16 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   );
 
   const suggestWriterImages = useCallback(
-    (markdown?: string, contentImageCount = 1) => {
+    (markdown?: string, contentImageCount = 1, imageStylePreset?: string) => {
       const project = writerState?.project;
       runWriterAction(language === "zh" ? "生成配图建议" : "Suggest images", () =>
-        writerApi.suggestWriterProjectImages(requireProjectId(), markdown ?? project?.article_markdown, project?.topic ?? undefined, contentImageCount),
+        writerApi.suggestWriterProjectImages(
+          requireProjectId(),
+          markdown ?? project?.article_markdown,
+          project?.topic ?? undefined,
+          contentImageCount,
+          imageStylePreset ?? project?.image_style_preset,
+        ),
       );
     },
     [language, requireProjectId, runWriterAction, writerState],
@@ -167,11 +191,21 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   );
 
   const formatWriterProject = useCallback(
-    (markdown?: string, designStrategy?: string) => {
-      runWriterAction(language === "zh" ? "美编排版" : "Design article", () => writerApi.formatWriterProject(requireProjectId(), markdown, designStrategy));
+    (markdown?: string, designStrategy?: string, writingStrategy?: string) => {
+      runWriterAction(language === "zh" ? "美编排版" : "Design article", async () => {
+        const projectId = requireProjectId();
+        if (writingStrategy !== undefined || designStrategy !== undefined) {
+          await writerApi.updateWriterProjectStrategies(projectId, writingStrategy, designStrategy);
+        }
+        return writerApi.formatWriterProject(projectId, markdown, designStrategy);
+      });
     },
     [language, requireProjectId, runWriterAction],
   );
+
+  const confirmWriterDesign = useCallback(() => {
+    runWriterAction(language === "zh" ? "确认美编预览" : "Confirm design preview", () => writerApi.confirmWriterProjectDesign(requireProjectId()));
+  }, [language, requireProjectId, runWriterAction]);
 
   const preflightWriterProject = useCallback(() => {
     const project = writerState?.project;
@@ -197,11 +231,13 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     importWriterKnowledge,
     generateWriterTopics,
     selectWriterTopic,
+    saveWriterStrategies,
     generateWriterDraft,
     reviseWriterProject,
     suggestWriterImages,
     generateWriterImages,
     formatWriterProject,
+    confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,
   };

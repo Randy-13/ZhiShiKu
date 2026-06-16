@@ -1,3 +1,4 @@
 @echo off
-cd /d E:\Invest\FigureLearning
+setlocal
+cd /d "%~dp0"
 .\.venv\Scripts\python.exe run_server.py

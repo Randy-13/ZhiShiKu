@@ -1,8 +1,8 @@
-export function EmptyState({ title, body }: { title: string; body: string }) {
+export function EmptyState({ title, body }: { title: string; body?: string }) {
   return (
     <div className="empty-state">
       <strong>{title}</strong>
-      <p>{body}</p>
+      {body ? <p>{body}</p> : null}
     </div>
   );
 }

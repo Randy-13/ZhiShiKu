@@ -199,7 +199,6 @@ export function MineWorkspace({
             <div>
               <span>{t("common.primary")}</span>
               <h2>{t("mine.interpret.title")}</h2>
-              <p>{t("mine.interpret.body")}</p>
             </div>
             <button
               className="primary-cta"
@@ -221,7 +220,7 @@ export function MineWorkspace({
                 </article>
               ))
             ) : (
-              <EmptyState title={t("mine.sources.empty")} body={t("mine.sources.empty.body")} />
+              <EmptyState title={t("mine.sources.empty")} />
             )}
           </section>
 
@@ -246,7 +245,7 @@ export function MineWorkspace({
               </div>
             </section>
           ) : (
-            <EmptyState title={t("mine.draft.empty")} body={t("mine.draft.empty.body")} />
+            <EmptyState title={t("mine.draft.empty")} />
           )}
         </main>
       </div>
