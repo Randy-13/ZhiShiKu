@@ -2,6 +2,7 @@ import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 
 export function PrimaryTaskPanel({
+  className,
   eyebrow,
   title,
   body,
@@ -12,6 +13,7 @@ export function PrimaryTaskPanel({
   children,
   onAction,
 }: {
+  className?: string;
   eyebrow: string;
   title: string;
   body?: string;
@@ -23,7 +25,7 @@ export function PrimaryTaskPanel({
   onAction?: () => void;
 }) {
   return (
-    <section className="primary-task-panel">
+    <section className={className ? `primary-task-panel ${className}` : "primary-task-panel"}>
       <div className="primary-task-header">
         <div className="primary-task-copy">
           <span>{eyebrow}</span>

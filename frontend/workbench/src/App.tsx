@@ -87,6 +87,7 @@ function WorkbenchApp({
     reviseWriterProject,
     suggestWriterImages,
     generateWriterImages,
+    retryWriterImageItems,
     formatWriterProject,
     confirmWriterDesign,
     preflightWriterProject,
@@ -128,7 +129,6 @@ function WorkbenchApp({
     uploadFiles,
     pasteImages,
     resolveLinks: resolveLinksV2,
-    browserExtractCollectLink,
     generateCollectReadableDraft,
     saveCollectDraftToOriginalLibrary,
     deleteMaterials,
@@ -460,7 +460,6 @@ function WorkbenchApp({
             onUploadFiles={uploadFiles}
             onPasteImages={pasteImages}
             onResolveLinks={resolveLinksV2}
-            onBrowserExtractLink={browserExtractCollectLink}
             onGenerateReadableDraft={generateCollectReadableDraft}
             onUpdateReadableDraft={setCollectDraft}
             onSaveReadableDraft={saveCollectDraftToOriginalLibrary}
@@ -526,6 +525,7 @@ function WorkbenchApp({
             onRevise={reviseWriterProject}
             onSuggestImages={suggestWriterImages}
             onGenerateImages={generateWriterImages}
+            onRetryImageItems={retryWriterImageItems}
             onFormat={formatWriterProject}
             onConfirmDesign={confirmWriterDesign}
             onPreflight={preflightWriterProject}

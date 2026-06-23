@@ -208,12 +208,21 @@ def load_project(project_id: str, owner_user_id: str | None = None, include_owne
         raise FileNotFoundError(f"创作项目不存在：{project_id}")
     workspace = resolve_project_workspace(project_id)
     project["workspace"] = _relative(workspace)
-    project["article_markdown"] = (workspace / "article.md").read_text(encoding="utf-8") if (workspace / "article.md").exists() else ""
-    html_path = workspace / "formatted_wechat.html"
-    if not html_path.exists():
-        html_path = workspace / "formatted.html"
-    project["html"] = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
-    project["html_path"] = _relative(html_path) if html_path.exists() else ""
+    article_ref = project.get("article_path")
+    if article_ref is not None:
+        article_path = storage.resolve_root_path(str(article_ref)) if article_ref else None
+        project["article_markdown"] = article_path.read_text(encoding="utf-8") if article_path and article_path.exists() else ""
+    else:
+        project["article_markdown"] = (workspace / "article.md").read_text(encoding="utf-8") if (workspace / "article.md").exists() else ""
+    html_ref = project.get("html_path")
+    if html_ref is not None:
+        html_path = storage.resolve_root_path(str(html_ref)) if html_ref else None
+    else:
+        html_path = workspace / "formatted_wechat.html"
+        if not html_path.exists():
+            html_path = workspace / "formatted.html"
+    project["html"] = html_path.read_text(encoding="utf-8") if html_path and html_path.exists() else ""
+    project["html_path"] = _relative(html_path) if html_path and html_path.exists() else ""
     return project
 
 
@@ -919,13 +928,28 @@ def check_wechat_publish_ip(timeout: float = 20) -> dict[str, Any]:
 
 
 def _image_endpoint(setting: dict[str, Any]) -> str:
-    base = setting["base_url"].rstrip("/")
-    if base.endswith("/images/generations"):
-        return base
-    return base + "/images/generations"
+    return image_api_settings.image_endpoint(setting)
+
+
+def _image_protocol(setting: dict[str, Any]) -> str:
+    return image_api_settings.normalize_protocol(
+        setting.get("protocol"),
+        setting.get("provider"),
+        setting.get("base_url"),
+    )
 
 
 def _image_payload(setting: dict[str, Any], prompt: str) -> dict[str, Any]:
+    protocol = _image_protocol(setting)
+    if protocol == image_api_settings.MINIMAX_PROTOCOL:
+        response_format = str(setting.get("response_format") or "base64").strip() or "base64"
+        return {
+            "model": setting["model"],
+            "prompt": prompt,
+            "aspect_ratio": image_api_settings.normalize_aspect_ratio(setting.get("aspect_ratio"), setting.get("size")),
+            "response_format": response_format,
+        }
+
     payload: dict[str, Any] = {
         "model": setting["model"],
         "prompt": prompt,
@@ -969,9 +993,11 @@ def _compact_image_prompt(prompt: str, max_chars: int = IMAGE_PROMPT_RETRY_MAX_C
 def _image_request_summary(endpoint: str, payload: dict[str, Any], prompt: str) -> dict[str, Any]:
     return {
         "endpoint": endpoint,
+        "protocol": payload.get("_protocol", ""),
         "model": payload.get("model"),
         "size": payload.get("size"),
         "quality": payload.get("quality", ""),
+        "aspect_ratio": payload.get("aspect_ratio", ""),
         "response_format": payload.get("response_format", ""),
         "prompt_chars": len(prompt or ""),
     }
@@ -986,6 +1012,27 @@ def _download_image(url: str, output_path: Path, timeout: float) -> None:
         output_path.write_bytes(response.read())
 
 
+def _write_generated_image_response(data: dict[str, Any], output_path: Path, timeout: float) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    response_data = data.get("data")
+    if isinstance(response_data, dict):
+        image_base64 = response_data.get("image_base64")
+        if isinstance(image_base64, list) and image_base64:
+            output_path.write_bytes(base64.b64decode(str(image_base64[0])))
+            return
+        if isinstance(image_base64, str) and image_base64:
+            output_path.write_bytes(base64.b64decode(image_base64))
+            return
+
+    first = (response_data or [{}])[0] if isinstance(response_data, list) else {}
+    if isinstance(first, dict) and first.get("b64_json"):
+        output_path.write_bytes(base64.b64decode(first["b64_json"]))
+    elif isinstance(first, dict) and first.get("url"):
+        _download_image(first["url"], output_path, timeout)
+    else:
+        raise RuntimeError(f"图片 API 返回结构中没有可用图片：{json.dumps(data, ensure_ascii=False)[:500]}")
+
+
 def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved = setting or image_api_settings.active_setting()
     prompt = (prompt or "").strip()
@@ -994,12 +1041,14 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
 
     endpoint = _image_endpoint(resolved)
     payload = _image_payload(resolved, prompt)
+    payload["_protocol"] = _image_protocol(resolved)
     timeout = float(resolved.get("timeout") or 120)
 
     def request_once(current_payload: dict[str, Any]) -> dict[str, Any]:
+        request_payload = {key: value for key, value in current_payload.items() if key != "_protocol"}
         request = urllib.request.Request(
             endpoint,
-            data=json.dumps(current_payload, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(request_payload, ensure_ascii=True).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {resolved['api_key']}",
                 "Content-Type": "application/json",
@@ -1023,6 +1072,7 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
                 ) from exc
             retry_prompt = _compact_image_prompt(prompt)
             retry_payload = _image_payload(resolved, retry_prompt)
+            retry_payload["_protocol"] = _image_protocol(resolved)
             try:
                 data = request_once(retry_payload)
                 prompt = retry_prompt
@@ -1044,14 +1094,7 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
             f"图片 API 调用失败：{exc}; request={json.dumps(summary, ensure_ascii=False)}"
         ) from exc
 
-    first = (data.get("data") or [{}])[0]
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if first.get("b64_json"):
-        output_path.write_bytes(base64.b64decode(first["b64_json"]))
-    elif first.get("url"):
-        _download_image(first["url"], output_path, timeout)
-    else:
-        raise RuntimeError(f"图片 API 返回结构中没有 b64_json 或 url：{json.dumps(data, ensure_ascii=False)[:500]}")
+    _write_generated_image_response(data, output_path, timeout)
 
     return {
         "path": _relative(output_path),
@@ -1109,6 +1152,10 @@ def load_writer_image_metadata(workspace: Path) -> dict[str, Any]:
         return _normalize_image_metadata({"errors": [{"kind": "metadata", "message": "image_metadata.json 格式不可读"}]})
 
 
+def clear_writer_image_metadata(workspace: Path) -> dict[str, Any]:
+    return _write_writer_image_metadata(workspace, {})
+
+
 def _write_writer_image_metadata(workspace: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_image_metadata(metadata)
     _image_metadata_path(workspace).write_text(
@@ -1124,6 +1171,20 @@ def _write_writer_image_metadata(workspace: Path, metadata: dict[str, Any]) -> d
         encoding="utf-8",
     )
     return normalized
+
+
+def _metadata_prompt_matches(metadata: dict[str, Any], kind: str, prompt: str, index: int | None = None) -> bool:
+    if kind == "cover":
+        item = metadata.get("cover")
+    else:
+        item = next(
+            (
+                existing for existing in metadata.get("content_images", [])
+                if int(existing.get("index") or 0) == int(index or 0)
+            ),
+            None,
+        )
+    return isinstance(item, dict) and str(item.get("prompt") or "") == prompt
 
 
 def generate_writer_image_item(
@@ -1153,7 +1214,7 @@ def generate_writer_image_item(
     else:
         raise ValueError(f"未知图片类型：{kind}")
 
-    item = _existing_image_item(image_path, prompt)
+    item = _existing_image_item(image_path, prompt) if _metadata_prompt_matches(metadata, kind, prompt, index) else None
     if item is None:
         try:
             item = generate_image(prompt, image_path)

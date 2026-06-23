@@ -126,9 +126,9 @@ export type WriterProject = {
   html?: string;
   html_path?: string;
   images?: {
-    cover?: { path?: string; prompt?: string };
-    content_images?: Array<{ path?: string; prompt?: string }>;
-    items?: Array<{ path?: string; prompt?: string }>;
+    cover?: { path?: string; prompt?: string; index?: number };
+    content_images?: Array<{ path?: string; prompt?: string; index?: number }>;
+    items?: Array<{ path?: string; prompt?: string; index?: number }>;
     errors?: Array<{ kind?: string; index?: number; message?: string }>;
     partial?: boolean;
     ok?: boolean;

@@ -1,6 +1,5 @@
 @echo off
 setlocal
-chcp 65001 >nul
 
 set "APP_DIR=%~dp0"
 if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
@@ -8,11 +7,11 @@ set "VENV_PYTHON=%APP_DIR%\.venv\Scripts\python.exe"
 set "ENV_FILE=%APP_DIR%\.env"
 set "ENV_EXAMPLE=%APP_DIR%\.env.example"
 
-title 知识酷 安装器
+title ZhiShiKu Installer
 
 cd /d "%APP_DIR%"
 if errorlevel 1 (
-  echo 无法进入项目目录：
+  echo Cannot enter project directory:
   echo %APP_DIR%
   pause
   exit /b 1
@@ -24,8 +23,8 @@ if not errorlevel 1 (
 ) else (
   where python >nul 2>nul
   if errorlevel 1 (
-    echo 未检测到 Python。
-    echo 请先安装 Python 3.10 或 3.11，并勾选“Add Python to PATH”。
+    echo Python was not found.
+    echo Install Python 3.10 or 3.11 and enable "Add Python to PATH".
     pause
     exit /b 1
   )
@@ -33,27 +32,27 @@ if not errorlevel 1 (
 )
 
 if not exist "%APP_DIR%\.venv\Scripts\python.exe" (
-  echo 正在创建虚拟环境...
+  echo Creating virtual environment...
   call %PYTHON_BOOTSTRAP% -m venv "%APP_DIR%\.venv"
   if errorlevel 1 (
-    echo 创建虚拟环境失败。
+    echo Failed to create virtual environment.
     pause
     exit /b 1
   )
 )
 
-echo 正在升级 pip...
+echo Upgrading pip...
 "%VENV_PYTHON%" -m pip install --upgrade pip
 if errorlevel 1 (
-  echo pip 升级失败。
+  echo Failed to upgrade pip.
   pause
   exit /b 1
 )
 
-echo 正在安装后端依赖...
+echo Installing backend dependencies...
 "%VENV_PYTHON%" -m pip install -r "%APP_DIR%\requirements.txt"
 if errorlevel 1 (
-  echo 依赖安装失败。
+  echo Failed to install dependencies.
   pause
   exit /b 1
 )
@@ -61,7 +60,7 @@ if errorlevel 1 (
 if not exist "%ENV_FILE%" (
   if exist "%ENV_EXAMPLE%" (
     copy /Y "%ENV_EXAMPLE%" "%ENV_FILE%" >nul
-    echo 已创建 .env，请稍后填写 API Key。
+    echo Created .env. Please add your API key before first use.
   )
 )
 
@@ -72,9 +71,8 @@ if not exist "%APP_DIR%\auth" mkdir "%APP_DIR%\auth"
 if not exist "%APP_DIR%\output" mkdir "%APP_DIR%\output"
 
 echo.
-echo 安装完成。
-echo 下一步：
-echo 1. 打开 .env，填写你的 API Key
-echo 2. 双击“启动知识酷.bat”
+echo Setup complete.
+echo 1. Open .env and add your API key.
+echo 2. Double-click "鍚姩鐭ヨ瘑閰?bat".
 echo.
 pause

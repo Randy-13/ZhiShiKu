@@ -12,6 +12,14 @@ const emptyProfile: PerspectiveProfile = {
   stance: "",
 };
 
+const interpretationSections = [
+  "mine.interpret.section.stance",
+  "mine.interpret.section.extract",
+  "mine.interpret.section.analysis",
+  "mine.interpret.section.risks",
+  "mine.interpret.section.conclusion",
+] as const;
+
 export function MineWorkspace({
   t,
   language,
@@ -51,6 +59,7 @@ export function MineWorkspace({
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isProfileSaving, setIsProfileSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [draftTextarea, setDraftTextarea] = useState<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (isEditorOpen) return;
@@ -64,6 +73,16 @@ export function MineWorkspace({
 
   const draftTitle = draft?.title.trim() || (language === "zh" ? "未命名视角解读" : "Untitled perspective interpretation");
   const canSaveDraft = Boolean(draft?.markdown.trim()) && !isSaving;
+
+  const jumpToInterpretationSection = (label: string) => {
+    if (!draftTextarea || !draft?.markdown) return;
+    const index = draft.markdown.indexOf(label);
+    draftTextarea.focus();
+    if (index >= 0) {
+      draftTextarea.setSelectionRange(index, index);
+      draftTextarea.scrollTop = (index / Math.max(draft.markdown.length, 1)) * draftTextarea.scrollHeight;
+    }
+  };
 
   const updateEditing = (updates: Partial<PerspectiveProfile>) => {
     setEditing((current) => ({ ...current, ...updates }));
@@ -232,7 +251,24 @@ export function MineWorkspace({
               </label>
               <label>
                 <span>{t("library.content")}</span>
+                <div className="interpret-section-nav" aria-label={t("mine.interpret.sections")}>
+                  {interpretationSections.map((key) => {
+                    const label = t(key);
+                    const isPresent = draft.markdown.includes(label);
+                    return (
+                      <button
+                        className={isPresent ? "section-anchor present" : "section-anchor"}
+                        type="button"
+                        key={key}
+                        onClick={() => jumpToInterpretationSection(label)}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
                 <textarea
+                  ref={setDraftTextarea}
                   className="article-editor-large"
                   value={draft.markdown}
                   onChange={(event) => onUpdateDraft({ ...draft, markdown: event.target.value })}

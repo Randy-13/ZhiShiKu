@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import os
 import re
 import shutil
@@ -59,6 +60,7 @@ from src.shared.responses import success_payload
 router = APIRouter(prefix="/api/v2", tags=["v2-contracts"])
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
 
 
 class CollectTextRequest(BaseModel):
@@ -287,6 +289,22 @@ class ApiSettingRequest(BaseModel):
     make_active: bool = True
 
 
+class ImageApiSettingRequest(BaseModel):
+    id: str | None = None
+    name: str = ""
+    provider: str = "compatible"
+    protocol: str | None = None
+    base_url: str = ""
+    model: str = ""
+    api_key: str | None = None
+    timeout: float | None = None
+    size: str | None = None
+    quality: str | None = None
+    aspect_ratio: str | None = None
+    response_format: str | None = None
+    make_active: bool = True
+
+
 class SettingActiveRequest(BaseModel):
     id: str
 
@@ -294,6 +312,13 @@ class SettingActiveRequest(BaseModel):
 class ApiSettingTestRequest(BaseModel):
     id: str | None = None
     setting: ApiSettingRequest | None = None
+
+
+class ImageApiSettingTestRequest(BaseModel):
+    id: str | None = None
+    setting: ImageApiSettingRequest | None = None
+    real_test: bool = False
+    prompt: str | None = None
 
 
 class AsrSettingRequest(BaseModel):
@@ -598,7 +623,7 @@ def settings_image() -> dict[str, object]:
 
 
 @router.post("/settings/image")
-def save_settings_image(request: ApiSettingRequest) -> dict[str, object]:
+def save_settings_image(request: ImageApiSettingRequest) -> dict[str, object]:
     try:
         return success_payload(data={"ok": True, **save_list_setting(image_api_settings, request.model_dump())})
     except ValueError as exc:
@@ -622,10 +647,25 @@ def delete_settings_image(setting_id: str) -> dict[str, object]:
 
 
 @router.post("/settings/image/test")
-def test_settings_image(request: ApiSettingTestRequest) -> dict[str, object]:
+def test_settings_image(request: ImageApiSettingTestRequest) -> dict[str, object]:
     try:
         setting = resolve_image_api_test_setting(request, not_found_message="图片 API 配置不存在")
         diagnostic = image_api_settings.diagnose(setting)
+        if request.real_test and diagnostic.get("ok") == "true":
+            output_dir = storage.WRITER_DIR / "_api_tests"
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            output_path = output_dir / f"image_api_test_{stamp}.png"
+            result = writer_tools.generate_image(
+                request.prompt or "一张简洁的测试图，白色背景，中心写有少量简体中文文字：测试",
+                output_path,
+                setting=setting,
+            )
+            diagnostic = {
+                **diagnostic,
+                "real_test": "true",
+                "generated_path": storage.storage_relative(output_path),
+                "message": f"图片 API 字段诊断通过，并已真实生成测试图片：{result.get('path')}",
+            }
         return success_payload(data={**diagnostic, "ok": diagnostic.get("ok", "true")})
     except Exception as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
@@ -3119,7 +3159,7 @@ def _inspect_link(url: str) -> dict[str, object]:
     }
 
 
-def _extract_link_text(url: str, item: CollectQueueItem) -> dict[str, str]:
+def _extract_link_text(url: str, item: CollectQueueItem, allow_browser: bool = True) -> dict[str, str]:
     inspection = _inspect_link(url)
     link_type = str(inspection.get("link_type") or item.link_type or "")
     if link_type == "platform_wechat":
@@ -3129,6 +3169,45 @@ def _extract_link_text(url: str, item: CollectQueueItem) -> dict[str, str]:
     if link_type == "pdf":
         return _extract_pdf_link_text(url, inspection)
     if str(inspection.get("access_status")) in {"login_or_restricted", "needs_browser_rendering", "needs_specialized_extractor"}:
+        try:
+            fetched = _agent_reach_fetch_webpage_text(url)
+            fetched.update(
+                {
+                    "source": str(inspection.get("source") or fetched.get("source") or ""),
+                    "author": str(inspection.get("author") or fetched.get("author") or ""),
+                    "published_at": str(inspection.get("published_at") or fetched.get("published_at") or ""),
+                    "link_type": link_type or "public_webpage",
+                    "access_status": "accessible",
+                    "extraction_strategy": str(fetched.get("extraction_strategy") or "agent_reach_jina_reader"),
+                }
+            )
+            return fetched
+        except Exception as exc:
+            logger.warning("Agent Reach web reader failed for restricted link %s: %s", url, exc)
+        if allow_browser:
+            try:
+                fetched = _browser_extract_webpage_text(
+                    url,
+                    title=item.title,
+                    wait_ms=3000,
+                    scroll_times=5,
+                    scroll_pause_ms=800,
+                    selector="",
+                    allow_static_fallback=False,
+                )
+                fetched.update(
+                    {
+                        "source": str(inspection.get("source") or fetched.get("source") or ""),
+                        "author": str(inspection.get("author") or fetched.get("author") or ""),
+                        "published_at": str(inspection.get("published_at") or fetched.get("published_at") or ""),
+                        "link_type": link_type or str(fetched.get("link_type") or "browser_webpage"),
+                        "access_status": "accessible",
+                        "extraction_strategy": str(fetched.get("extraction_strategy") or "browser_automation_wait_scroll"),
+                    }
+                )
+                return fetched
+            except Exception as exc:
+                logger.warning("Browser extraction failed for classified link %s: %s", url, exc)
         return {
             "title": str(inspection.get("title") or item.title or url),
             "text": str(inspection.get("notes") or "当前链接需要浏览器自动化或专门平台工具处理。"),
@@ -3146,8 +3225,8 @@ def _extract_link_text(url: str, item: CollectQueueItem) -> dict[str, str]:
             "author": str(inspection.get("author") or ""),
             "published_at": str(inspection.get("published_at") or ""),
             "link_type": link_type or "public_webpage",
-            "access_status": str(inspection.get("access_status") or "accessible"),
-            "extraction_strategy": str(inspection.get("extraction_strategy") or "direct_fetch"),
+            "access_status": str(fetched.get("access_status") or inspection.get("access_status") or "accessible"),
+            "extraction_strategy": str(fetched.get("extraction_strategy") or inspection.get("extraction_strategy") or "direct_fetch"),
         }
     )
     return fetched
@@ -3303,14 +3382,25 @@ def _browser_extract_webpage_text(
     scroll_times: int = 5,
     scroll_pause_ms: int = 800,
     selector: str = "",
+    allow_static_fallback: bool = True,
 ) -> dict[str, str]:
-    data = _browser_extract_article_payload(
-        url,
-        wait_ms=wait_ms,
-        scroll_times=scroll_times,
-        scroll_pause_ms=scroll_pause_ms,
-        selector=selector,
-    )
+    try:
+        data = _browser_extract_article_payload(
+            url,
+            wait_ms=wait_ms,
+            scroll_times=scroll_times,
+            scroll_pause_ms=scroll_pause_ms,
+            selector=selector,
+        )
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError, TimeoutError, ValueError) as exc:
+        if not allow_static_fallback:
+            raise
+        logger.warning("Browser extraction failed for %s, falling back to static extraction: %s", url, exc)
+        fetched = _extract_link_text(url, CollectQueueItem(url=url, title=title), allow_browser=False)
+        fetched["link_type"] = str(fetched.get("link_type") or "browser_webpage")
+        fetched["access_status"] = str(fetched.get("access_status") or "accessible")
+        fetched["extraction_strategy"] = f"{fetched.get('extraction_strategy') or 'direct_fetch'}_after_browser_error"
+        return fetched
     content = _collapse_space_multiline(str(data.get("content") or ""))
     if len(content) < 80:
         raise ValueError("浏览器提取到的正文为空或过短，请确认页面已加载完成，或尝试增加等待/滚动参数。")
@@ -3674,6 +3764,11 @@ def _fetch_url_bytes(url: str, max_bytes: int) -> dict[str, object]:
 
 
 def _fetch_webpage_text(url: str) -> dict[str, str]:
+    try:
+        return _agent_reach_fetch_webpage_text(url)
+    except Exception as exc:
+        logger.info("Agent Reach web reader unavailable for %s, falling back to direct fetch: %s", url, exc)
+
     fetched = _fetch_url_bytes(url, max_bytes=2_000_000)
     content_type = str(fetched["content_type"])
     html_text = _decode_response_text(bytes(fetched["body"]), content_type)
@@ -3682,6 +3777,77 @@ def _fetch_webpage_text(url: str) -> dict[str, str]:
     if not text.strip():
         raise ValueError("网页正文为空")
     return {"title": title, "text": text}
+
+
+def _agent_reach_fetch_webpage_text(url: str) -> dict[str, str]:
+    if os.environ.get("FIGURELEARNING_AGENT_REACH_WEB", "1").lower() in {"0", "false", "off", "no"}:
+        raise ValueError("Agent Reach web reader is disabled")
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise ValueError("Agent Reach web reader is disabled during tests")
+
+    python_path = os.environ.get("FIGURELEARNING_AGENT_REACH_PYTHON", "").strip()
+    if not python_path:
+        python_path = r"C:\Users\Bo Yang\.agent-reach-venv\Scripts\python.exe"
+    command = Path(python_path)
+    if not command.exists():
+        raise FileNotFoundError(f"Agent Reach Python not found: {python_path}")
+
+    script = (
+        "import json, sys\n"
+        "from agent_reach.channels.web import WebChannel\n"
+        "text = WebChannel().read(sys.argv[1])\n"
+        "print(json.dumps({'text': text}, ensure_ascii=False))\n"
+    )
+    completed = subprocess.run(
+        [str(command), "-c", script, url],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=45,
+        check=True,
+    )
+    payload = json.loads(completed.stdout.strip())
+    reader_text = str(payload.get("text") or "").strip()
+    if not reader_text:
+        raise ValueError("Agent Reach web reader returned empty text")
+
+    title, text = _parse_agent_reach_reader_markdown(reader_text, url)
+    if not text.strip():
+        raise ValueError("Agent Reach web reader returned empty article text")
+    return {
+        "title": title,
+        "text": text,
+        "source": urllib.parse.urlparse(url).netloc,
+        "access_status": "accessible",
+        "extraction_strategy": "agent_reach_jina_reader",
+    }
+
+
+def _parse_agent_reach_reader_markdown(reader_text: str, url: str) -> tuple[str, str]:
+    title = ""
+    body_lines: list[str] = []
+    in_body = False
+    for raw_line in reader_text.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        line = raw_line.strip()
+        if not title and line.lower().startswith("title:"):
+            title = line.split(":", 1)[1].strip()
+            continue
+        if line.lower().startswith(("url source:", "markdown content:")):
+            in_body = True
+            continue
+        if in_body or not line.lower().startswith(("warning:", "error:")):
+            body_lines.append(raw_line)
+
+    text = "\n".join(body_lines).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not title:
+        for line in text.splitlines():
+            candidate = line.strip().lstrip("#").strip()
+            if candidate and not _looks_like_url(candidate):
+                title = candidate[:120]
+                break
+    return title or url, text
 
 
 def _decode_response_text(raw: bytes, content_type: str) -> str:
@@ -3702,16 +3868,20 @@ def _html_title(html_text: str) -> str:
 
 
 def _html_to_text(html_text: str) -> str:
-    html_text = _main_content_hint(html_text)
     try:
-        soup = BeautifulSoup(html_text, "lxml")
-        text = _extract_best_html_text(soup)
-        if text:
-            cleaned = _clean_html_article_text(text)
-            if cleaned:
-                return cleaned
+        best_cleaned = ""
+        for parser in ("lxml", "html.parser"):
+            soup = BeautifulSoup(html_text, parser)
+            text = _extract_best_html_text(soup)
+            if text:
+                cleaned = _clean_html_article_text(text)
+                if len(cleaned) > len(best_cleaned):
+                    best_cleaned = cleaned
+        if best_cleaned:
+            return best_cleaned
     except Exception:
         pass
+    html_text = _main_content_hint(html_text)
     cleaned = re.sub(r"<(script|style|noscript|nav|footer|aside)[^>]*>.*?</\1>", " ", html_text, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</(p|div|section|article|li|h[1-6]|br|blockquote|figcaption)>", "\n", cleaned, flags=re.IGNORECASE)
     cleaned = _strip_tags(cleaned)
@@ -3733,7 +3903,21 @@ def _main_content_hint(html_text: str) -> str:
 
 
 def _extract_best_html_text(soup: BeautifulSoup) -> str:
-    for selector in ("article", "main", "[role='main']", "[itemprop='articleBody']"):
+    for selector in (
+        "#UCAP-CONTENT",
+        "#zoom",
+        "#content",
+        ".pages_content",
+        ".trs_editor_view",
+        ".article-content",
+        ".article_content",
+        ".article",
+        ".content",
+        "article",
+        "main",
+        "[role='main']",
+        "[itemprop='articleBody']",
+    ):
         node = soup.select_one(selector)
         if node:
             text = _node_text_score(node)
@@ -3760,7 +3944,7 @@ def _node_text_score(node) -> str:
     for tag in node.find_all(["script", "style", "noscript", "nav", "footer", "aside", "form", "header", "menu"]):
         tag.decompose()
     parts = []
-    for element in node.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "figcaption"]):
+    for element in node.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "figcaption", "td"]):
         text = _collapse_space(element.get_text(" ", strip=True))
         if text:
             parts.append(text)

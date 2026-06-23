@@ -2172,6 +2172,199 @@ def test_v2_collect_webpage_text_extraction_cleans_navigation_noise(monkeypatch)
     assert "Second substantive paragraph" in text["text"]
 
 
+def test_v2_collect_webpage_text_prefers_gov_article_body(monkeypatch):
+    html = """
+    <html>
+      <head><title>Gov Article</title></head>
+      <body>
+        <div class="policyLibraryOverview_content">
+          <div class="policyLibraryOverview_header">
+            <table><tr><td>标 题：</td><td>商务部等8部门关于加快“人工智能+消费”发展的实施意见</td></tr></table>
+          </div>
+          <div class="pages_content mhide" id="UCAP-CONTENT">
+            <div class="trs_editor_view TRS_UEDITOR">
+              <p>商务部等8部门关于加快“人工智能+消费”发展的实施意见 商建发2026年第89号</p>
+              <p>为贯彻落实有关部署，推动人工智能与消费深度融合，培育消费新增长点，形成消费新动能，提出如下意见。</p>
+              <p><strong>一、总体要求</strong></p>
+              <p>以习近平新时代中国特色社会主义思想为指导，充分发挥我国超大规模市场优势，加快人工智能新产品新服务新场景示范应用。</p>
+              <p><strong>二、提升人工智能+商品消费</strong></p>
+              <p>增加人工智能产品新供给，完善人工智能新产品研发机制，推广智能家电、智能厨卫、智能照明等智能家居产品。</p>
+              <p>培育智能穿戴消费市场，加强人工智能眼镜等新产品研发推广，打造实时翻译、移动支付等显示度高的消费场景。</p>
+            </div>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    def fake_fetch_url_bytes(url: str, max_bytes: int) -> dict[str, object]:
+        return {
+            "body": html.encode("utf-8"),
+            "content_type": "text/html; charset=utf-8",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(api_v2, "_fetch_url_bytes", fake_fetch_url_bytes)
+
+    text = api_v2._fetch_webpage_text("https://www.gov.cn/example.htm")
+
+    assert "一、总体要求" in text["text"]
+    assert "二、提升人工智能+商品消费" in text["text"]
+    assert len(text["text"]) > 250
+
+
+def test_v2_collect_browser_extract_falls_back_to_static_text(monkeypatch):
+    def fake_browser_payload(*args, **kwargs):
+        raise ValueError("agent-browser 没有返回可解析的文章 JSON")
+
+    def fake_extract_link_text(url: str, item: api_v2.CollectQueueItem, allow_browser: bool = True) -> dict[str, str]:
+        return {
+            "title": "Gov Article",
+            "text": "一、总体要求\n静态抽取正文。" * 20,
+            "source": "www.gov.cn",
+            "link_type": "public_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "direct_fetch",
+        }
+
+    monkeypatch.setattr(api_v2, "_browser_extract_article_payload", fake_browser_payload)
+    monkeypatch.setattr(api_v2, "_extract_link_text", fake_extract_link_text)
+
+    fetched = api_v2._browser_extract_webpage_text("https://www.gov.cn/example.htm", title="Gov Article")
+
+    assert fetched["access_status"] == "accessible"
+    assert fetched["extraction_strategy"] == "direct_fetch_after_browser_error"
+    assert "一、总体要求" in fetched["text"]
+
+
+def test_v2_collect_readable_draft_auto_uses_browser_for_dynamic_link(monkeypatch):
+    def fake_inspect(url: str) -> dict[str, object]:
+        return {
+            "url": url,
+            "final_url": url,
+            "title": "Dynamic Article",
+            "link_type": "dynamic_webpage",
+            "access_status": "needs_browser_rendering",
+            "extraction_strategy": "browser_automation",
+            "source": "example.com",
+        }
+
+    def fake_agent_reach(url: str) -> dict[str, str]:
+        raise ValueError("reader unavailable")
+
+    def fake_browser_extract(*args, **kwargs) -> dict[str, str]:
+        return {
+            "title": "Dynamic Article",
+            "text": "browser selected article body " * 10,
+            "source": "example.com",
+            "link_type": "browser_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "browser_automation_wait_scroll",
+        }
+
+    monkeypatch.setattr(api_v2, "_inspect_link", fake_inspect)
+    monkeypatch.setattr(api_v2, "_agent_reach_fetch_webpage_text", fake_agent_reach)
+    monkeypatch.setattr(api_v2, "_browser_extract_webpage_text", fake_browser_extract)
+    monkeypatch.setattr(
+        api_v2,
+        "_polish_raw_material",
+        lambda material_type, body, title: {"markdown": body, "title": title, "response": {"status": "skipped"}},
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={
+            "material_type": "web_link",
+            "items": [
+                {
+                    "url": "https://example.com/dynamic",
+                    "title": "Dynamic Article",
+                    "link_type": "dynamic_webpage",
+                    "access_status": "needs_browser_rendering",
+                    "extraction_strategy": "browser_automation",
+                }
+            ],
+        },
+    )
+
+    payload = response.json()["data"]
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert "Extraction Strategy: browser_automation_wait_scroll" in payload["markdown"]
+    assert "browser selected article body" in payload["markdown"]
+
+
+def test_v2_collect_readable_draft_prefers_agent_reach_reader(monkeypatch):
+    def fake_inspect(url: str) -> dict[str, object]:
+        return {
+            "url": url,
+            "final_url": url,
+            "title": "Direct Title",
+            "link_type": "public_webpage",
+            "access_status": "accessible",
+            "extraction_strategy": "direct_fetch",
+            "source": "example.com",
+        }
+
+    def fake_agent_reach(url: str) -> dict[str, str]:
+        return {
+            "title": "Agent Reach Article",
+            "text": "Agent Reach extracted paragraph with stable article text. " * 8,
+            "source": "example.com",
+            "access_status": "accessible",
+            "extraction_strategy": "agent_reach_jina_reader",
+        }
+
+    monkeypatch.setattr(api_v2, "_inspect_link", fake_inspect)
+    monkeypatch.setattr(api_v2, "_agent_reach_fetch_webpage_text", fake_agent_reach)
+    monkeypatch.setattr(
+        api_v2,
+        "_polish_raw_material",
+        lambda material_type, body, title: {"markdown": body, "title": title, "response": {"status": "skipped"}},
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={"material_type": "web_link", "items": [{"url": "https://example.com/article", "title": ""}]},
+    )
+
+    payload = response.json()["data"]
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert "Agent Reach Article" in payload["markdown"]
+    assert "Extraction Strategy: agent_reach_jina_reader" in payload["markdown"]
+    assert "Agent Reach extracted paragraph" in payload["markdown"]
+
+
+def test_v2_collect_webpage_text_falls_back_when_agent_reach_fails(monkeypatch):
+    html = """
+    <html>
+      <head><title>Fallback Article</title></head>
+      <body><main><p>Direct fetch fallback paragraph with enough substantive article text.</p></main></body>
+    </html>
+    """
+
+    def fake_agent_reach(url: str) -> dict[str, str]:
+        raise ValueError("agent reach unavailable")
+
+    def fake_fetch_url_bytes(url: str, max_bytes: int) -> dict[str, object]:
+        return {
+            "body": html.encode("utf-8"),
+            "content_type": "text/html; charset=utf-8",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(api_v2, "_agent_reach_fetch_webpage_text", fake_agent_reach)
+    monkeypatch.setattr(api_v2, "_fetch_url_bytes", fake_fetch_url_bytes)
+
+    text = api_v2._fetch_webpage_text("https://example.com/article")
+
+    assert text["title"] == "Fallback Article"
+    assert "Direct fetch fallback paragraph" in text["text"]
+
+
 def test_v2_collect_raw_markdown_extracts_wechat_with_browser_payload(monkeypatch):
     def fake_browser_payload(url: str) -> dict[str, object]:
         return {

@@ -11,6 +11,12 @@ type Options = {
   selectWorkspace: (id: WorkspaceId) => void;
 };
 
+export type WriterImageRetryTask = {
+  kind: "cover" | "content";
+  prompt: string;
+  index?: number;
+};
+
 export function useWriterFlow({ language, addActivity, selectWorkspace }: Options) {
   const [writerProjects, setWriterProjects] = useState<WriterProject[]>([]);
   const [writerState, setWriterState] = useState<WriterProjectState>();
@@ -190,6 +196,27 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     [language, requireProjectId, runWriterAction, writerState],
   );
 
+  const retryWriterImageItems = useCallback(
+    (tasks: WriterImageRetryTask[], onProgress?: (done: number, total: number) => void) => {
+      runWriterAction(language === "zh" ? "重试失败图片" : "Retry failed images", async () => {
+        const projectId = requireProjectId();
+        const runnable = tasks
+          .map((task) => ({ ...task, prompt: task.prompt.trim() }))
+          .filter((task) => task.prompt && (task.kind === "cover" || (task.index ?? 0) > 0));
+        if (!runnable.length) return writerApi.writerProject(projectId);
+        let latest: WriterProjectState | undefined;
+        onProgress?.(0, runnable.length);
+        for (const [index, task] of runnable.entries()) {
+          latest = await writerApi.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index);
+          setWriterState(latest);
+          onProgress?.(index + 1, runnable.length);
+        }
+        return latest ?? writerApi.writerProject(projectId);
+      });
+    },
+    [language, requireProjectId, runWriterAction],
+  );
+
   const formatWriterProject = useCallback(
     (markdown?: string, designStrategy?: string, writingStrategy?: string) => {
       runWriterAction(language === "zh" ? "美编排版" : "Design article", async () => {
@@ -236,6 +263,7 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     reviseWriterProject,
     suggestWriterImages,
     generateWriterImages,
+    retryWriterImageItems,
     formatWriterProject,
     confirmWriterDesign,
     preflightWriterProject,

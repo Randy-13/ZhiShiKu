@@ -37,6 +37,7 @@ def resolve_api_test_setting(
             "id": payload.get("id") or "temporary",
             "name": payload.get("name") or "临时 API",
             "provider": payload.get("provider") or "compatible",
+            "protocol": payload.get("protocol") or "",
             "base_url": (payload.get("base_url") or "").strip().rstrip("/"),
             "model": (payload.get("model") or "").strip(),
             "api_key": (payload.get("api_key") or "").strip(),
@@ -71,6 +72,7 @@ def resolve_image_api_test_setting(
             "api_key": (payload.get("api_key") or "").strip(),
             "size": (payload.get("size") or "1024x1024").strip(),
             "quality": (payload.get("quality") or "auto").strip(),
+            "aspect_ratio": (payload.get("aspect_ratio") or "").strip(),
             "response_format": (payload.get("response_format") or "").strip(),
             "timeout": payload.get("timeout") or 120,
         }

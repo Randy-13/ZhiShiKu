@@ -44,6 +44,13 @@ export function LibraryWorkspace({
   }, [draft, selectedKnowledge]);
 
   const canSave = Boolean(selectedKnowledge && draft.body.trim() && !isSaving && isDirty);
+  const saveStateLabel = saveError
+    ? t("library.saveFailed")
+    : isSaving
+      ? t("library.saving")
+      : isDirty
+        ? t("library.unsaved")
+        : t("library.saved");
 
   async function handleSave() {
     if (!canSave) return;
@@ -94,7 +101,8 @@ export function LibraryWorkspace({
                 />
               </label>
 
-              <div className="library-editor-actions">
+              <div className="library-editor-savebar" data-state={saveError ? "error" : isDirty ? "dirty" : "clean"}>
+                <span>{saveStateLabel}</span>
                 <button className="primary-cta" type="button" disabled={!canSave} onClick={handleSave}>
                   <strong>{isSaving ? t("library.saving") : t("library.save")}</strong>
                 </button>
@@ -102,7 +110,6 @@ export function LibraryWorkspace({
 
               {!selectedKnowledge.backendId ? <p className="disabled-reason">{t("library.localOnly")}</p> : null}
               {saveError ? <p className="disabled-reason">{saveError}</p> : null}
-              {!isDirty ? <p className="hint">{t("library.noChanges")}</p> : null}
             </div>
           ) : (
             <EmptyState title={t("library.editor.empty")} />

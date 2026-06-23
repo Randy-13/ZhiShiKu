@@ -47,6 +47,7 @@ type ApiFormState = {
   id?: string;
   name: string;
   provider: string;
+  protocol: string;
   base_url: string;
   model: string;
   api_key: string;
@@ -54,6 +55,7 @@ type ApiFormState = {
   max_retries: string;
   size: string;
   quality: string;
+  aspect_ratio: string;
   response_format: string;
   real_image_test: boolean;
   make_active: boolean;
@@ -70,6 +72,7 @@ type AsrFormState = {
 const emptyForm: ApiFormState = {
   name: "",
   provider: "compatible",
+  protocol: "openai_compatible",
   base_url: "",
   model: "",
   api_key: "",
@@ -77,6 +80,7 @@ const emptyForm: ApiFormState = {
   max_retries: "2",
   size: "1024x1024",
   quality: "auto",
+  aspect_ratio: "1:1",
   response_format: "",
   real_image_test: false,
   make_active: true,
@@ -1073,10 +1077,13 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
       id: undefined,
       name: typedTemplate.name,
       provider: typedTemplate.provider,
+      protocol: typedTemplate.protocol ?? current.protocol,
       base_url: typedTemplate.base_url,
       model: typedTemplate.model,
       size: typedTemplate.size ?? current.size,
       quality: typedTemplate.quality ?? current.quality,
+      aspect_ratio: typedTemplate.aspect_ratio ?? current.aspect_ratio,
+      response_format: typedTemplate.response_format ?? current.response_format,
       api_key: "",
       make_active: true,
     }));
@@ -1278,9 +1285,34 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
                   <span>{language === "zh" ? "服务商" : "Provider"}</span>
                   <input value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })} />
                 </label>
+                {mode === "image" ? (
+                  <label>
+                    <span>{language === "zh" ? "协议" : "Protocol"}</span>
+                    <select value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value })}>
+                      <option value="openai_compatible">{language === "zh" ? "OpenAI 兼容" : "OpenAI compatible"}</option>
+                      <option value="minimax">MiniMax</option>
+                      <option value="custom_endpoint">{language === "zh" ? "完整 Endpoint" : "Full endpoint"}</option>
+                    </select>
+                  </label>
+                ) : null}
                 <label className="wide-field">
                   <span>Base URL</span>
                   <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="https://api.example.com/v1" />
+                  {mode === "image" ? (
+                    <small className="field-hint">
+                      {form.protocol === "minimax"
+                        ? language === "zh"
+                          ? "MiniMax 请填完整 endpoint，不会追加 /images/generations。"
+                          : "Use the full MiniMax endpoint; /images/generations will not be appended."
+                        : form.protocol === "custom_endpoint"
+                          ? language === "zh"
+                            ? "完整 Endpoint 会原样调用。"
+                            : "The full endpoint will be called as-is."
+                          : language === "zh"
+                            ? "OpenAI 兼容协议会自动追加 /images/generations。"
+                            : "OpenAI-compatible mode appends /images/generations automatically."}
+                    </small>
+                  ) : null}
                 </label>
                 <label>
                   <span>{language === "zh" ? "模型" : "Model"}</span>
@@ -1306,26 +1338,45 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
                   </label>
                 ) : (
                   <>
-                    <label>
-                      <span>{language === "zh" ? "图片尺寸" : "Image size"}</span>
-                      <input value={form.size} onChange={(event) => setForm({ ...form, size: event.target.value })} />
-                    </label>
-                    <label>
-                      <span>{language === "zh" ? "图片质量" : "Image quality"}</span>
-                      <input
-                        value={form.quality}
-                        onChange={(event) => setForm({ ...form, quality: event.target.value })}
-                        placeholder={language === "zh" ? "留空通常最兼容" : "Blank is most compatible"}
-                      />
-                    </label>
-                    <label className="inline-check wide-field">
-                      <input
-                        type="checkbox"
-                        checked={form.response_format === "b64_json"}
-                        onChange={(event) => setForm({ ...form, response_format: event.target.checked ? "b64_json" : "" })}
-                      />
-                      {language === "zh" ? "返回 Base64 图片数据" : "Return Base64 image data"}
-                    </label>
+                    {form.protocol === "minimax" ? (
+                      <>
+                        <label>
+                          <span>{language === "zh" ? "图片比例" : "Aspect ratio"}</span>
+                          <input value={form.aspect_ratio} onChange={(event) => setForm({ ...form, aspect_ratio: event.target.value })} placeholder="1:1" />
+                        </label>
+                        <label>
+                          <span>{language === "zh" ? "返回格式" : "Response format"}</span>
+                          <input
+                            value={form.response_format || "base64"}
+                            onChange={(event) => setForm({ ...form, response_format: event.target.value })}
+                            placeholder="base64"
+                          />
+                        </label>
+                      </>
+                    ) : (
+                      <>
+                        <label>
+                          <span>{language === "zh" ? "图片尺寸" : "Image size"}</span>
+                          <input value={form.size} onChange={(event) => setForm({ ...form, size: event.target.value })} />
+                        </label>
+                        <label>
+                          <span>{language === "zh" ? "图片质量" : "Image quality"}</span>
+                          <input
+                            value={form.quality}
+                            onChange={(event) => setForm({ ...form, quality: event.target.value })}
+                            placeholder={language === "zh" ? "留空通常最兼容" : "Blank is most compatible"}
+                          />
+                        </label>
+                        <label className="inline-check wide-field">
+                          <input
+                            type="checkbox"
+                            checked={form.response_format === "b64_json"}
+                            onChange={(event) => setForm({ ...form, response_format: event.target.checked ? "b64_json" : "" })}
+                          />
+                          {language === "zh" ? "返回 Base64 图片数据" : "Return Base64 image data"}
+                        </label>
+                      </>
+                    )}
                     <label className="inline-check wide-field">
                       <input
                         type="checkbox"
@@ -1401,6 +1452,7 @@ function formFromItem(item: ApiSettingItem | ImageApiSettingItem | undefined, mo
     id: item.id,
     name: item.name ?? "",
     provider: item.provider ?? "compatible",
+    protocol: image.protocol ?? inferImageProtocol(image),
     base_url: item.base_url ?? "",
     model: item.model ?? "",
     api_key: "",
@@ -1408,6 +1460,7 @@ function formFromItem(item: ApiSettingItem | ImageApiSettingItem | undefined, mo
     max_retries: String(item.max_retries ?? 2),
     size: image.size ?? "1024x1024",
     quality: image.quality ?? "auto",
+    aspect_ratio: image.aspect_ratio ?? inferAspectRatio(image.size),
     response_format: image.response_format ?? "",
     real_image_test: false,
     make_active: true,
@@ -1437,6 +1490,7 @@ function toChatInput(form: ApiFormState): ApiSettingInput {
     id: form.id,
     name: form.name.trim(),
     provider: form.provider.trim() || "compatible",
+    protocol: form.protocol || "openai_compatible",
     base_url: form.base_url.trim(),
     model: form.model.trim(),
     api_key: form.api_key.trim(),
@@ -1457,7 +1511,8 @@ function toImageInput(form: ApiFormState): ImageApiSettingInput {
     timeout: numberOrUndefined(form.timeout),
     size: normalizeImageSize(form.size),
     quality: form.quality.trim() || "auto",
-    response_format: form.response_format,
+    aspect_ratio: form.aspect_ratio.trim() || inferAspectRatio(form.size),
+    response_format: form.protocol === "minimax" ? form.response_format.trim() || "base64" : form.response_format,
     make_active: form.make_active,
   };
 }
@@ -1470,6 +1525,23 @@ function toAsrInput(form: AsrFormState): AsrSettingInput {
     api_key: form.api_key.trim(),
     timeout: numberOrUndefined(form.timeout),
   };
+}
+
+function inferImageProtocol(item: ImageApiSettingItem) {
+  const provider = (item.provider || "").toLowerCase();
+  const baseUrl = (item.base_url || "").toLowerCase();
+  if (provider === "minimax" || baseUrl.includes("minimaxi.com")) return "minimax";
+  return "openai_compatible";
+}
+
+function inferAspectRatio(size?: string) {
+  const normalized = normalizeImageSize(size || "");
+  const [widthText, heightText] = normalized.split("x");
+  const width = Number(widthText);
+  const height = Number(heightText);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return "1:1";
+  if (width === height) return "1:1";
+  return width > height ? "16:9" : "9:16";
 }
 
 function normalizeImageSize(value: string) {

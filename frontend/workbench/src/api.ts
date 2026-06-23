@@ -422,11 +422,14 @@ export type ApiSettingTemplate = {
   id: string;
   name: string;
   provider: string;
+  protocol?: string;
   base_url: string;
   model: string;
   api_key_placeholder?: string;
   size?: string;
   quality?: string;
+  aspect_ratio?: string;
+  response_format?: string;
 };
 
 export type ApiSettingsPayload = {
@@ -449,8 +452,10 @@ export type ApiSettingInput = {
 };
 
 export type ImageApiSettingItem = ApiSettingItem & {
+  protocol?: string;
   size?: string;
   quality?: string;
+  aspect_ratio?: string;
   response_format?: string;
 };
 
@@ -462,8 +467,10 @@ export type ImageApiSettingsPayload = {
 };
 
 export type ImageApiSettingInput = Omit<ApiSettingInput, "max_retries"> & {
+  protocol?: string;
   size?: string;
   quality?: string;
+  aspect_ratio?: string;
   response_format?: string;
 };
 

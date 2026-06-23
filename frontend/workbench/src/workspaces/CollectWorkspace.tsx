@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
+import { UploadCloud } from "lucide-react";
 import type { ReadableDraftInput } from "../api";
 import type { MaterialType, SourceMaterial } from "../domain";
 import type { Translator } from "../i18n";
@@ -7,7 +8,7 @@ import { EmptyState } from "../components/EmptyState";
 import { ObjectList } from "../components/ObjectList";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 
-export type CollectInputBusy = "image" | "file" | "media" | "link" | "browser-link" | "paste-image" | null;
+export type CollectInputBusy = "image" | "file" | "media" | "link" | "paste-image" | null;
 
 const panes: Array<{ id: MaterialType; labelKey: string; helper: string }> = [
   { id: "text", labelKey: "collect.type.text", helper: "键入、粘贴或临时记录" },
@@ -31,7 +32,6 @@ export function CollectWorkspace({
   onUploadFiles,
   onPasteImages,
   onResolveLinks,
-  onBrowserExtractLink,
   onGenerateReadableDraft,
   onUpdateReadableDraft,
   onSaveReadableDraft,
@@ -50,7 +50,6 @@ export function CollectWorkspace({
   onUploadFiles: (type: MaterialType, files: File[]) => void;
   onPasteImages: (files: File[]) => void;
   onResolveLinks: (urls: string[]) => void;
-  onBrowserExtractLink: (id: string) => void;
   onGenerateReadableDraft: (ids?: string[]) => void;
   onUpdateReadableDraft: (draft: ReadableDraftInput) => void;
   onSaveReadableDraft: () => void;
@@ -67,8 +66,6 @@ export function CollectWorkspace({
   const busyMessage =
     inputBusy === "link"
       ? "正在加入链接材料..."
-      : inputBusy === "browser-link"
-        ? t("collect.browserExtractBusy")
       : inputBusy === "image"
         ? "正在上传图片..."
         : inputBusy === "paste-image"
@@ -85,9 +82,6 @@ export function CollectWorkspace({
   }, [materials]);
 
   const selectedIds = checkedMaterialIds.length ? checkedMaterialIds : selectedMaterial ? [selectedMaterial.id] : [];
-  const browserExtractTarget =
-    selectedIds.length === 1 ? materials.find((item) => item.id === selectedIds[0] && isBrowserExtractableLink(item)) : undefined;
-
   const handleDrop = (event: DragEvent<HTMLElement>, type: MaterialType) => {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files ?? []);
@@ -120,10 +114,10 @@ export function CollectWorkspace({
                 onClick={() => setActivePane(pane.id)}
               >
                 <strong>{t(pane.labelKey)}</strong>
-                <span>{pane.helper}</span>
               </button>
             ))}
           </div>
+          <p className="collector-pane-helper">{panes.find((pane) => pane.id === activePane)?.helper}</p>
           {busyMessage ? (
             <div className="collector-busy" role="status" aria-live="polite">
               <span className="collector-busy-dot" />
@@ -292,31 +286,20 @@ export function CollectWorkspace({
                 <span>
                   {t("collect.selectedCount")} {checkedMaterialIds.length} / {materials.length}
                 </span>
-                <div className="action-row">
+                <div className="collect-selection-tools">
                   <button className="secondary-button" type="button" onClick={() => setCheckedMaterialIds(materials.map((item) => item.id))}>
                     {t("common.selectAll")}
                   </button>
                   <button className="secondary-button" type="button" onClick={() => setCheckedMaterialIds([])}>
                     {t("common.clearSelection")}
                   </button>
-                  <button className="secondary-button" type="button" disabled={!checkedMaterialIds.length} onClick={() => onDeleteMaterials(checkedMaterialIds)}>
+                  <button className="secondary-button danger-button" type="button" disabled={!checkedMaterialIds.length} onClick={() => onDeleteMaterials(checkedMaterialIds)}>
                     {t("collect.deleteSelected")}
                   </button>
+                </div>
+                <div className="collect-main-action">
                   <button
-                    className="secondary-button"
-                    type="button"
-                    disabled={!browserExtractTarget || inputBusy === "browser-link"}
-                    title={browserExtractTarget ? "" : t("collect.browserExtractDisabled")}
-                    onClick={() => {
-                      if (!browserExtractTarget) return;
-                      onBrowserExtractLink(browserExtractTarget.id);
-                      setCheckedMaterialIds([]);
-                    }}
-                  >
-                    {inputBusy === "browser-link" ? t("collect.browserExtracting") : t("collect.browserExtract")}
-                  </button>
-                  <button
-                    className="secondary-button"
+                    className="primary-cta"
                     type="button"
                     disabled={!selectedIds.length || isGeneratingReadable}
                     onClick={() => {
@@ -345,14 +328,6 @@ export function CollectWorkspace({
         <section className="content-panel">
           <div className="section-heading">
             <h2>{t("collect.preview")}</h2>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={!readableDraft || isSavingReadable}
-              onClick={onSaveReadableDraft}
-            >
-              {isSavingReadable ? t("collect.savingOriginal") : t("collect.addToOriginalLibrary")}
-            </button>
           </div>
           {readableDraft ? (
             <div className="knowledge-draft-editor">
@@ -378,6 +353,17 @@ export function CollectWorkspace({
                   onChange={(event) => onUpdateReadableDraft({ ...readableDraft, body: event.target.value })}
                 />
               </label>
+              <div className="library-editor-savebar collect-preview-savebar" data-state={isSavingReadable ? "dirty" : "clean"}>
+                <span>{isSavingReadable ? t("collect.savingOriginal") : t("collect.draftReady")}</span>
+                <button
+                  className="primary-cta"
+                  type="button"
+                  disabled={!readableDraft || isSavingReadable}
+                  onClick={onSaveReadableDraft}
+                >
+                  <strong>{isSavingReadable ? t("collect.savingOriginal") : t("collect.addToOriginalLibrary")}</strong>
+                </button>
+              </div>
             </div>
           ) : (
             <EmptyState title={t("collect.preview.empty")} />
@@ -388,11 +374,6 @@ export function CollectWorkspace({
       {rightRail}
     </section>
   );
-}
-
-function isBrowserExtractableLink(item: SourceMaterial) {
-  if (item.type !== "link") return false;
-  return item.linkType === "public_webpage" || item.linkType === "dynamic_webpage" || item.linkType === "browser_webpage";
 }
 
 function Dropzone({
@@ -417,7 +398,9 @@ function Dropzone({
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}
     >
-      <span className="drop-icon">+</span>
+      <span className="drop-icon">
+        <UploadCloud size={21} aria-hidden="true" />
+      </span>
       <strong>{title}</strong>
       <small>{body}</small>
     </button>

@@ -3,11 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { LibraryKind, WriterLibraryFileInput } from "../api";
 import { writerApi } from "../apiWriter";
+import type { WriterImageRetryTask } from "../hooks/useWriterFlow";
 import type { KnowledgeItem, WriterProject, WriterProjectState, WriterStep } from "../domain";
 import type { Translator } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
-import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
-import { StatusBadge } from "../components/StatusBadge";
 import { Stepper } from "../components/Stepper";
 
 const projectTypes = [
@@ -120,6 +119,7 @@ type Props = {
   onRevise: (instruction: string, markdown?: string) => void;
   onSuggestImages: (markdown?: string, contentImageCount?: number, imageStylePreset?: string) => void;
   onGenerateImages: (coverPrompt?: string, contentPrompts?: string[], onProgress?: (done: number, total: number) => void) => void;
+  onRetryImageItems: (tasks: WriterImageRetryTask[], onProgress?: (done: number, total: number) => void) => void;
   onFormat: (markdown?: string, designStrategy?: string, writingStrategy?: string) => void;
   onConfirmDesign: () => void;
   onPreflight: () => void;
@@ -130,6 +130,44 @@ type ImageProgress = {
   done: number;
   total: number;
 } | null;
+
+function CreateSummaryBar({
+  eyebrow,
+  title,
+  status,
+  action,
+  disabled,
+  disabledReason,
+  onAction,
+}: {
+  eyebrow: string;
+  title: string;
+  status?: ReactNode;
+  action?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <section className="create-summary-bar">
+      <div className="create-summary-main">
+        <div className="create-summary-copy">
+          <span>{eyebrow}</span>
+          <h2>{title}</h2>
+        </div>
+        {action && onAction ? (
+          <div className="create-summary-actions">
+            <button className="primary-cta" type="button" disabled={disabled} onClick={onAction}>
+              <strong>{action}</strong>
+            </button>
+            {disabled && disabledReason ? <p className="disabled-reason create-summary-reason">{disabledReason}</p> : null}
+          </div>
+        ) : null}
+      </div>
+      {status ? <div className="create-summary-status">{status}</div> : null}
+    </section>
+  );
+}
 
 export function CreateWorkspace({
   language,
@@ -149,6 +187,7 @@ export function CreateWorkspace({
   onRevise,
   onSuggestImages,
   onGenerateImages,
+  onRetryImageItems,
   onFormat,
   onConfirmDesign,
   onPreflight,
@@ -167,24 +206,84 @@ export function CreateWorkspace({
   const [imageStylePreset, setImageStylePreset] = useState(imageStylePresets[0].prompt);
   const [imageProgress, setImageProgress] = useState<ImageProgress>(null);
   const [pendingTopic, setPendingTopic] = useState<Record<string, unknown> | null>(null);
+  const [reviewStep, setReviewStep] = useState<WriterStep | null>(null);
 
-  const project = writerState?.project;
+  const project = normalizeWriterProject(writerState?.project);
   const step = writerState?.step ?? "created";
   const nextAction = writerState?.next_action ?? "";
-  const visibleStep = visibleWriterStep(step, nextAction);
+  const actualVisibleStep = visibleWriterStep(step, nextAction);
+  const actualStepIndex = stepIndex[actualVisibleStep] ?? 0;
+  const visibleStep = reviewStep && (stepIndex[reviewStep] ?? 0) <= actualStepIndex ? reviewStep : actualVisibleStep;
   const articleMarkdown = markdownDraft || project?.article_markdown || "";
+  const strategyDirty =
+    writingStrategy !== (project?.writing_strategy ?? "") || designStrategy !== (project?.design_strategy ?? "");
+  const imagePromptDirty =
+    coverPrompt !== (project?.cover_prompt ?? "") ||
+    contentPromptsText !== (project?.content_image_prompts ?? []).join("\n");
+  const viewNextAction = nextActionForVisibleStep(visibleStep, actualVisibleStep, nextAction, project, imagePromptDirty);
   const labels = steps.map((item) => (language === "zh" ? item.zh : item.en));
   const selectedLibraryFiles = useMemo(() => toWriterLibraryFiles(selectedKnowledgeFiles), [selectedKnowledgeFiles]);
   const images = imageItems(project);
-  const guide = guideForState(language, project, step, nextAction);
-  const primary = primaryAction(language, project, step, nextAction, isRunning);
+  const guide = guideForState(language, project, visibleStep, viewNextAction);
+  const primary = primaryAction(language, project, visibleStep, viewNextAction, isRunning);
+  const clearReviewStep = () => setReviewStep(null);
+  const runRetryFailedImages = (tasks = imageRetryTasks(project, coverPrompt, contentPromptsText, contentImageCount)) => {
+    clearReviewStep();
+    if (!tasks.length) return;
+    setImageProgress({ done: 0, total: tasks.length });
+    onRetryImageItems(tasks, (done, total) => setImageProgress({ done, total }));
+  };
+  const runPrimaryAction = () =>
+    runPrimary(visibleStep, viewNextAction, {
+      onGenerateTopics: () => {
+        clearReviewStep();
+        onGenerateTopics();
+      },
+      onGenerateDraft: () => {
+        clearReviewStep();
+        onGenerateDraft(writingStrategy, designStrategy);
+      },
+      onSuggestImages: () => {
+        clearReviewStep();
+        onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
+      },
+      onGenerateImages: () => {
+        clearReviewStep();
+        setImageProgress({ done: 0, total: Math.max(1, 1 + promptLines(contentPromptsText).length) });
+        onGenerateImages(coverPrompt || project?.cover_prompt, promptLines(contentPromptsText), (done, total) =>
+          setImageProgress({ done, total }),
+        );
+      },
+      onRetryFailedImages: () => runRetryFailedImages(),
+      onFormat: () => {
+        clearReviewStep();
+        onFormat(articleMarkdown, designStrategy, writingStrategy);
+      },
+      onConfirmDesign: () => {
+        clearReviewStep();
+        onConfirmDesign();
+      },
+      onPreflight: () => {
+        clearReviewStep();
+        onPreflight();
+      },
+      onPublish: () => {
+        clearReviewStep();
+        onPublish();
+      },
+    });
 
   useEffect(() => {
     setMarkdownDraft("");
     setRevision("");
     setImageProgress(null);
     setPendingTopic(null);
+    setReviewStep(null);
   }, [project?.id, project?.article_markdown]);
+
+  useEffect(() => {
+    if (reviewStep && (stepIndex[reviewStep] ?? 0) > actualStepIndex) setReviewStep(null);
+  }, [actualStepIndex, reviewStep]);
 
   useEffect(() => {
     if (project?.id) setCreateMode(false);
@@ -251,7 +350,7 @@ export function CreateWorkspace({
             }}
           />
         ) : (
-          <PrimaryTaskPanel
+          <CreateSummaryBar
             eyebrow={language === "zh" ? "当前项目下一步" : "Next in project"}
             title={guide.title}
             status={
@@ -262,7 +361,7 @@ export function CreateWorkspace({
                 </div>
                 <div className="project-status-card">
                   <span>{language === "zh" ? "当前步骤" : "Current step"}</span>
-                  <strong>{stageLabel(visibleStep, language)}</strong>
+                  <strong>{stageLabel(actualVisibleStep, language)}</strong>
                 </div>
               </div>
             }
@@ -270,33 +369,58 @@ export function CreateWorkspace({
             disabled={primary.disabled}
             disabledReason={primary.reason}
             onAction={() =>
-              runPrimary(step, nextAction, {
-                onGenerateTopics,
-                onGenerateDraft: () => onGenerateDraft(writingStrategy, designStrategy),
-                onSuggestImages: () => onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset),
+              runPrimary(visibleStep, viewNextAction, {
+                onGenerateTopics: () => {
+                  clearReviewStep();
+                  onGenerateTopics();
+                },
+                onGenerateDraft: () => {
+                  clearReviewStep();
+                  onGenerateDraft(writingStrategy, designStrategy);
+                },
+                onSuggestImages: () => {
+                  clearReviewStep();
+                  onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
+                },
                 onGenerateImages: () => {
+                  clearReviewStep();
                   setImageProgress({ done: 0, total: Math.max(1, 1 + promptLines(contentPromptsText).length) });
                   onGenerateImages(coverPrompt || project.cover_prompt, promptLines(contentPromptsText), (done, total) => setImageProgress({ done, total }));
                 },
-                onFormat: () => onFormat(articleMarkdown, designStrategy, writingStrategy),
-                onConfirmDesign,
-                onPreflight,
-                onPublish,
+                onRetryFailedImages: () => runRetryFailedImages(),
+                onFormat: () => {
+                  clearReviewStep();
+                  onFormat(articleMarkdown, designStrategy, writingStrategy);
+                },
+                onConfirmDesign: () => {
+                  clearReviewStep();
+                  onConfirmDesign();
+                },
+                onPreflight: () => {
+                  clearReviewStep();
+                  onPreflight();
+                },
+                onPublish: () => {
+                  clearReviewStep();
+                  onPublish();
+                },
               })
             }
-          >
-            <div className="project-meta-row">
-              <StatusBadge tone="done">{nextAction || visibleStep}</StatusBadge>
-              <span>{project.workspace}</span>
-            </div>
+          />
+        )}
+
+        {project ? (
+          <div className="create-stepper-wrap">
             <Stepper
               steps={labels}
               activeIndex={stepIndex[visibleStep] ?? 0}
+              progressIndex={actualStepIndex}
+              maxSelectableIndex={actualStepIndex}
               activeLabel={guide.checkpoints?.[0]}
-              onSelect={() => undefined}
+              onSelect={(index) => setReviewStep(steps[index]?.id ?? null)}
             />
-          </PrimaryTaskPanel>
-        )}
+          </div>
+        ) : null}
 
         <section className="content-panel project-work-panel">
           {!project ? (
@@ -304,12 +428,16 @@ export function CreateWorkspace({
               title={language === "zh" ? "先创建项目" : "Create a project first"}
             />
           ) : (
-            <ProjectStageWorkspace
+          <ProjectStageWorkspace
               language={language}
               project={project}
               step={step}
               visibleStep={visibleStep}
-              nextAction={nextAction}
+              actualVisibleStep={actualVisibleStep}
+              nextAction={viewNextAction}
+              backendNextAction={nextAction}
+              isReviewingStep={visibleStep !== actualVisibleStep}
+              strategyDirty={strategyDirty}
               selectedLibraryFiles={selectedLibraryFiles}
               isRunning={isRunning}
               writingStrategy={writingStrategy}
@@ -324,7 +452,12 @@ export function CreateWorkspace({
               images={images}
               imageErrors={project.images?.errors ?? []}
               pendingTopic={pendingTopic}
+              primaryAction={primary}
+              guideTitle={guide.title}
               onPendingTopicChange={setPendingTopic}
+              onPrimaryAction={runPrimaryAction}
+              onContinueFormat={() => onFormat(articleMarkdown, designStrategy, writingStrategy)}
+              onRetryImageTasks={runRetryFailedImages}
               onImportKnowledge={() => onImportKnowledge(selectedLibraryFiles)}
               onSaveStrategies={onSaveStrategies}
               onSelectTopic={(topic) => {
@@ -358,7 +491,11 @@ function ProjectStageWorkspace({
   project,
   step,
   visibleStep,
+  actualVisibleStep,
   nextAction,
+  backendNextAction,
+  isReviewingStep,
+  strategyDirty,
   selectedLibraryFiles,
   isRunning,
   writingStrategy,
@@ -373,7 +510,12 @@ function ProjectStageWorkspace({
   images,
   imageErrors,
   pendingTopic,
+  primaryAction,
+  guideTitle,
   onPendingTopicChange,
+  onPrimaryAction,
+  onContinueFormat,
+  onRetryImageTasks,
   onImportKnowledge,
   onSaveStrategies,
   onSelectTopic,
@@ -391,7 +533,11 @@ function ProjectStageWorkspace({
   project: WriterProject;
   step: WriterStep;
   visibleStep: WriterStep;
+  actualVisibleStep: WriterStep;
   nextAction: string;
+  backendNextAction: string;
+  isReviewingStep: boolean;
+  strategyDirty: boolean;
   selectedLibraryFiles: WriterLibraryFileInput[];
   isRunning: boolean;
   writingStrategy: string;
@@ -406,7 +552,12 @@ function ProjectStageWorkspace({
   images: Array<{ path?: string; prompt?: string }>;
   imageErrors: Array<{ kind?: string; index?: number; message?: string }>;
   pendingTopic: Record<string, unknown> | null;
+  primaryAction: { label: string; disabled: boolean; reason?: string };
+  guideTitle: string;
   onPendingTopicChange: (topic: Record<string, unknown> | null) => void;
+  onPrimaryAction: () => void;
+  onContinueFormat: () => void;
+  onRetryImageTasks: (tasks?: WriterImageRetryTask[]) => void;
   onImportKnowledge: () => void;
   onSaveStrategies: (writingStrategy: string, designStrategy: string) => void;
   onSelectTopic: (topic: Record<string, unknown>) => void;
@@ -427,12 +578,36 @@ function ProjectStageWorkspace({
         <div>
           <span>{language === "zh" ? "当前工作区" : "Current workspace"}</span>
           <h2>{stageTitle}</h2>
+          {isReviewingStep ? (
+            <small className="stage-review-note">
+              {language === "zh"
+                ? `正在回看：真实进度在「${stageLabel(actualVisibleStep, language)}」。如果在这里继续，将从此步骤重新生成后续流程。`
+                : `Reviewing this step. The real progress is ${stageLabel(actualVisibleStep, language)}. Continuing here will regenerate the downstream flow.`}
+            </small>
+          ) : null}
         </div>
         <div className="stage-heading-tools">
           {visibleStep === "designed" ? (
             <DesignStrategySelect language={language} value={designStrategy} onChange={onDesignStrategyChange} />
           ) : null}
-          <StatusBadge tone="muted">{nextAction || visibleStep}</StatusBadge>
+          <button
+            className="primary-cta stage-primary-action"
+            type="button"
+            disabled={primaryAction.disabled}
+            title={primaryAction.disabled ? primaryAction.reason || guideTitle : guideTitle}
+            onClick={onPrimaryAction}
+          >
+            <Sparkles size={16} />
+            <strong>{primaryAction.label}</strong>
+          </button>
+          {visibleStep === actualVisibleStep && visibleStep === "images" && backendNextAction === "retry_failed_images" ? (
+            <button className="secondary-button" type="button" disabled={isRunning} onClick={onContinueFormat}>
+              {language === "zh" ? "继续美编" : "Continue to HTML"}
+            </button>
+          ) : null}
+          {primaryAction.disabled && primaryAction.reason ? (
+            <p className="disabled-reason stage-primary-reason">{primaryAction.reason}</p>
+          ) : null}
         </div>
       </div>
 
@@ -452,7 +627,7 @@ function ProjectStageWorkspace({
         }
       />
 
-      {step === "created" ? (
+      {visibleStep === "created" ? (
         <ProjectKnowledge
           language={language}
           files={project.library_files ?? []}
@@ -462,11 +637,11 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {step === "knowledge_confirmed" ? (
+      {visibleStep === "knowledge_confirmed" ? (
         <ReferenceReadyPanel language={language} project={project} />
       ) : null}
 
-      {step === "topics" ? (
+      {visibleStep === "topics" ? (
         <TopicCards
           language={language}
           topics={project.topics ?? []}
@@ -478,7 +653,7 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {step === "topic" ? <TopicSummaryPanel language={language} topic={project.topic} /> : null}
+      {visibleStep === "topic" ? <TopicSummaryPanel language={language} topic={project.topic} /> : null}
 
       {visibleStep === "draft" ? (
         <ArticleEditor
@@ -494,7 +669,7 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {visibleStep === "draft" && step === "draft" && nextAction === "suggest_images" ? (
+      {visibleStep === "draft" && nextAction === "suggest_images" ? (
         <ImageSuggestionOptions
           language={language}
           value={contentImageCount}
@@ -511,11 +686,13 @@ function ProjectStageWorkspace({
           contentPromptsText={contentPromptsText}
           contentImageCount={contentImageCount}
           progress={imageProgress}
+          imageState={project.images}
           images={images}
           errors={imageErrors}
+          isRunning={isRunning}
           onCoverPromptChange={onCoverPromptChange}
           onContentPromptsTextChange={onContentPromptsTextChange}
-          onContentImageCountChange={onContentImageCountChange}
+          onRetryTasks={onRetryImageTasks}
         />
       ) : null}
 
@@ -529,7 +706,7 @@ function ProjectStageWorkspace({
         </div>
       ) : null}
 
-      {step === "publish_check" || step === "published" ? (
+      {visibleStep === "publish_check" || visibleStep === "published" ? (
         <PublishSection language={language} project={project} />
       ) : null}
     </div>
@@ -1144,7 +1321,7 @@ function ImageCountSelect({
   );
 }
 
-function ImageSection({
+function LegacyImageSection({
   language,
   coverPrompt,
   contentPromptsText,
@@ -1223,6 +1400,133 @@ function ImageSection({
   );
 }
 
+function ImageSection({
+  language,
+  coverPrompt,
+  contentPromptsText,
+  contentImageCount,
+  progress,
+  imageState,
+  images,
+  errors,
+  isRunning,
+  onCoverPromptChange,
+  onContentPromptsTextChange,
+  onRetryTasks,
+}: {
+  language: "zh" | "en";
+  coverPrompt: string;
+  contentPromptsText: string;
+  contentImageCount: number;
+  progress: ImageProgress;
+  imageState?: WriterProject["images"];
+  images: Array<{ path?: string; prompt?: string; index?: number }>;
+  errors?: Array<{ kind?: string; index?: number; message?: string }>;
+  isRunning: boolean;
+  onCoverPromptChange: (value: string) => void;
+  onContentPromptsTextChange: (value: string) => void;
+  onRetryTasks: (tasks?: WriterImageRetryTask[]) => void;
+}) {
+  const tasks = imageTaskList(language, coverPrompt, contentPromptsText, contentImageCount, imageState, errors);
+  const failedTasks = tasks.filter((task) => task.status === "failed");
+  const updateContentPrompt = (index: number, value: string) => {
+    const lines = promptLines(contentPromptsText);
+    while (lines.length < index) lines.push("");
+    lines[index - 1] = value;
+    onContentPromptsTextChange(lines.join("\n"));
+  };
+
+  return (
+    <section className="project-section image-stage-panel">
+      <div className="section-heading">
+        <h2>{language === "zh" ? "配图任务" : "Image tasks"}</h2>
+        <span>
+          {images.length} / {tasks.length}
+        </span>
+      </div>
+
+      {failedTasks.length ? (
+        <div className="image-recovery-banner">
+          <div>
+            <strong>{language === "zh" ? "图片生成未完成" : "Image generation needs attention"}</strong>
+            <span>
+              {language === "zh"
+                ? "已成功的图片会保留。可以修改失败项提示词后，只重试失败图片。"
+                : "Successful images are kept. Edit failed prompts and retry only failed items."}
+            </span>
+          </div>
+          <button className="secondary-button" type="button" disabled={isRunning} onClick={() => onRetryTasks(failedTasks.map(taskToRetryInput))}>
+            {language === "zh" ? "重试失败图片" : "Retry failed"}
+          </button>
+        </div>
+      ) : null}
+
+      <p className="hint">
+        {language === "zh"
+          ? "这里展示配图建议生成后的任务清单。失败后可只重试失败图片，不会抹掉已成功图片。"
+          : "This shows the task list after image suggestions. Failed items can be retried without removing successful images."}
+      </p>
+
+      <div className="prompt-grid">
+        <label>
+          <span>{language === "zh" ? "封面图提示词" : "Cover prompt"}</span>
+          <textarea value={coverPrompt} onChange={(event) => onCoverPromptChange(event.target.value)} />
+        </label>
+        <label>
+          <span>{language === "zh" ? "正文配图提示词" : "Content prompts"}</span>
+          <textarea value={contentPromptsText} onChange={(event) => onContentPromptsTextChange(event.target.value)} />
+        </label>
+      </div>
+
+      {progress ? (
+        <div className="image-progress">
+          <span>{language === "zh" ? "生成进度" : "Generation progress"}</span>
+          <strong>{progress.done} / {progress.total}</strong>
+        </div>
+      ) : null}
+
+      <div className="image-task-list">
+        {tasks.map((task) => (
+          <article key={task.id} className={`image-task-card ${task.status}`}>
+            <div className="image-task-preview">
+              {task.path ? <img src={writerApi.writerFileUrl(task.path)} alt={task.label} /> : <ImageIcon size={28} />}
+            </div>
+            <div className="image-task-body">
+              <div className="image-task-title">
+                <strong>{task.label}</strong>
+                <span>{imageTaskStatusLabel(task.status, language)}</span>
+              </div>
+              {task.status === "failed" ? (
+                <label className="image-task-prompt">
+                  <span>{language === "zh" ? "重试提示词" : "Retry prompt"}</span>
+                  <textarea
+                    value={task.prompt}
+                    onChange={(event) =>
+                      task.kind === "cover"
+                        ? onCoverPromptChange(event.target.value)
+                        : updateContentPrompt(task.index ?? 1, event.target.value)
+                    }
+                  />
+                </label>
+              ) : (
+                <p>{task.prompt || (language === "zh" ? "暂无提示词" : "No prompt yet")}</p>
+              )}
+              {task.message ? <small>{task.message}</small> : null}
+            </div>
+            <div className="image-task-actions">
+              {task.status === "failed" ? (
+                <button className="secondary-button" type="button" disabled={isRunning || !task.prompt.trim()} onClick={() => onRetryTasks([taskToRetryInput(task)])}>
+                  {language === "zh" ? "重试这张" : "Retry"}
+                </button>
+              ) : null}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function PublishSection({ language, project }: { language: "zh" | "en"; project: WriterProject }) {
   const checks = project.preflight?.checks ?? [];
   return (
@@ -1250,7 +1554,7 @@ function PublishSection({ language, project }: { language: "zh" | "en"; project:
 
 function HtmlPreviewControls({ language, htmlPath }: { language: "zh" | "en"; htmlPath: string }) {
   const [showPreview, setShowPreview] = useState(false);
-      const url = writerApi.writerFileUrl(htmlPath);
+  const url = writerApi.writerFileUrl(htmlPath);
   return (
     <div className="html-preview-panel">
       <div className="html-preview-actions">
@@ -1355,6 +1659,29 @@ function visibleWriterStep(step: WriterStep, nextAction: string): WriterStep {
   return step;
 }
 
+function nextActionForVisibleStep(
+  visibleStep: WriterStep,
+  actualVisibleStep: WriterStep,
+  backendNextAction: string,
+  project: WriterProject | undefined,
+  imagePromptDirty: boolean,
+) {
+  if (visibleStep === actualVisibleStep) return backendNextAction;
+  if (visibleStep === "created") return "confirm_knowledge";
+  if (visibleStep === "knowledge_confirmed") return "generate_topics";
+  if (visibleStep === "topics") return "select_topic";
+  if (visibleStep === "topic") return "generate_draft";
+  if (visibleStep === "draft") return "suggest_images";
+  if (visibleStep === "images") {
+    if (imagePromptDirty || !project?.images?.items?.length) return "generate_images";
+    return "format_article";
+  }
+  if (visibleStep === "designed") return project?.design_confirmed ? "run_preflight" : "confirm_design";
+  if (visibleStep === "publish_check") return "run_preflight";
+  if (visibleStep === "published") return "publish";
+  return backendNextAction;
+}
+
 function primaryAction(language: "zh" | "en", project: WriterProject | undefined, step: WriterStep, nextAction: string, isRunning: boolean) {
   if (isRunning) return { label: language === "zh" ? "处理中..." : "Working...", disabled: true, reason: "" };
   if (!project) return { label: language === "zh" ? "先创建项目" : "Create project first", disabled: true, reason: "" };
@@ -1372,12 +1699,19 @@ function primaryAction(language: "zh" | "en", project: WriterProject | undefined
       reason: language === "zh" ? "请在下方导入右侧三库勾选文件。" : "Import checked library files below first.",
     };
   }
+  if (step === "images" && nextAction === "retry_failed_images") {
+    return {
+      label: language === "zh" ? "重试失败图片" : "Retry failed images",
+      disabled: false,
+      reason: "",
+    };
+  }
   const labelMap: Partial<Record<WriterStep, string>> = {
     knowledge_confirmed: language === "zh" ? "生成选题" : "Generate topics",
     topics: language === "zh" ? "请选择一个选题" : "Pick a topic",
     topic: language === "zh" ? "生成初稿" : "Generate draft",
     draft: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "生成配图建议" : "Suggest images"),
-    images: language === "zh" ? "美编生成 HTML" : "Generate HTML",
+    images: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "美编生成 HTML" : "Generate HTML"),
     designed: nextAction === "confirm_design" ? (language === "zh" ? "确认并进入预检" : "Confirm and continue") : (language === "zh" ? "执行预检" : "Run preflight"),
     publish_check: nextAction === "publish" ? (language === "zh" ? "发布" : "Publish") : (language === "zh" ? "重新预检" : "Run preflight again"),
     published: language === "zh" ? "已发布" : "Published",
@@ -1397,6 +1731,7 @@ function runPrimary(
     onGenerateDraft: () => void;
     onSuggestImages: () => void;
     onGenerateImages: () => void;
+    onRetryFailedImages: () => void;
     onFormat: () => void;
     onConfirmDesign: () => void;
     onPreflight: () => void;
@@ -1407,6 +1742,8 @@ function runPrimary(
   else if (step === "topic") actions.onGenerateDraft();
   else if (step === "draft" && nextAction === "generate_images") actions.onGenerateImages();
   else if (step === "draft") actions.onSuggestImages();
+  else if (step === "images" && nextAction === "generate_images") actions.onGenerateImages();
+  else if (step === "images" && nextAction === "retry_failed_images") actions.onRetryFailedImages();
   else if (step === "images") actions.onFormat();
   else if (step === "designed" && nextAction === "confirm_design") actions.onConfirmDesign();
   else if (step === "designed") actions.onPreflight();
@@ -1432,7 +1769,83 @@ function toWriterLibraryFiles(items: KnowledgeItem[]): WriterLibraryFileInput[] 
   return files;
 }
 
-function imageItems(project?: WriterProject) {
+type ImageTask = WriterImageRetryTask & {
+  id: string;
+  label: string;
+  status: "success" | "failed" | "pending";
+  path?: string;
+  message?: string;
+};
+
+function imageTaskList(
+  language: "zh" | "en",
+  coverPrompt: string,
+  contentPromptsText: string,
+  contentImageCount: number,
+  imageState?: WriterProject["images"],
+  errors: Array<{ kind?: string; index?: number; message?: string }> = [],
+): ImageTask[] {
+  const contentPrompts = promptLines(contentPromptsText);
+  const contentImages = imageState?.content_images ?? [];
+  const maxContentIndex = Math.max(
+    contentImageCount,
+    contentPrompts.length,
+    ...contentImages.map((item) => Number(item.index || 0)),
+    ...errors.filter((item) => item.kind === "content").map((item) => Number(item.index || 0)),
+  );
+  const coverError = errors.find((item) => item.kind === "cover");
+  const tasks: ImageTask[] = [];
+  if (coverPrompt.trim() || imageState?.cover || coverError) {
+    tasks.push({
+      id: "cover",
+      kind: "cover",
+      label: language === "zh" ? "封面图" : "Cover",
+      prompt: coverPrompt || imageState?.cover?.prompt || "",
+      path: imageState?.cover?.path,
+      status: coverError ? "failed" : imageState?.cover?.path ? "success" : "pending",
+      message: coverError?.message,
+    });
+  }
+  for (let index = 1; index <= maxContentIndex; index += 1) {
+    const image = contentImages.find((item) => Number(item.index || 0) === index);
+    const error = errors.find((item) => item.kind === "content" && Number(item.index || 0) === index);
+    tasks.push({
+      id: `content-${index}`,
+      kind: "content",
+      index,
+      label: language === "zh" ? `正文配图 ${index}` : `Content image ${index}`,
+      prompt: contentPrompts[index - 1] || image?.prompt || "",
+      path: image?.path,
+      status: error ? "failed" : image?.path ? "success" : "pending",
+      message: error?.message,
+    });
+  }
+  return tasks;
+}
+
+function imageRetryTasks(project: WriterProject | undefined, coverPrompt: string, contentPromptsText: string, contentImageCount: number): WriterImageRetryTask[] {
+  if (!project) return [];
+  return imageTaskList("zh", coverPrompt, contentPromptsText, contentImageCount, project.images, project.images?.errors ?? [])
+    .filter((task) => task.status === "failed" || task.status === "pending")
+    .map(taskToRetryInput)
+    .filter((task) => task.prompt.trim());
+}
+
+function taskToRetryInput(task: ImageTask): WriterImageRetryTask {
+  return {
+    kind: task.kind,
+    index: task.index,
+    prompt: task.prompt,
+  };
+}
+
+function imageTaskStatusLabel(status: ImageTask["status"], language: "zh" | "en") {
+  if (status === "success") return language === "zh" ? "已生成" : "Generated";
+  if (status === "failed") return language === "zh" ? "失败" : "Failed";
+  return language === "zh" ? "待生成" : "Pending";
+}
+
+function imageItems(project?: WriterProject): Array<{ path?: string; prompt?: string; index?: number }> {
   if (!project?.images) return [];
   const items = project.images.items ?? [];
   const cover = project.images.cover ? [project.images.cover] : [];
@@ -1479,4 +1892,52 @@ function libraryLabel(value: unknown, language: "zh" | "en") {
   };
   const key = String(value || "original");
   return labels[key] ? (language === "zh" ? labels[key].zh : labels[key].en) : key;
+}
+
+function normalizeWriterProject(project?: WriterProject): WriterProject | undefined {
+  if (!project) return undefined;
+  return {
+    ...project,
+    library_files: Array.isArray(project.library_files) ? project.library_files.filter(isRecord) : [],
+    topics: Array.isArray(project.topics) ? project.topics.filter(isRecord) : [],
+    topic: isRecord(project.topic) ? project.topic : null,
+    content_image_prompts: normalizeStringArray(project.content_image_prompts),
+    images: normalizeImages(project.images),
+    preflight: normalizePreflight(project.preflight),
+  };
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value === "string" && value.trim()) return [value];
+  return [];
+}
+
+function normalizeImages(value: WriterProject["images"] | unknown): WriterProject["images"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const cover = isRecord(value.cover) ? value.cover : undefined;
+  const items = Array.isArray(value.items) ? value.items.filter(isRecord) : [];
+  const contentImages = Array.isArray(value.content_images) ? value.content_images.filter(isRecord) : [];
+  const errors = Array.isArray(value.errors) ? value.errors.filter(isRecord) : [];
+  return {
+    cover,
+    items,
+    content_images: contentImages,
+    errors,
+    partial: Boolean(value.partial),
+    ok: typeof value.ok === "boolean" ? value.ok : undefined,
+  };
+}
+
+function normalizePreflight(value: WriterProject["preflight"] | unknown): WriterProject["preflight"] | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    ...value,
+    checks: Array.isArray(value.checks) ? value.checks.filter(isRecord) : [],
+    blocking: Array.isArray(value.blocking) ? value.blocking.filter(isRecord) : [],
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

@@ -678,6 +678,125 @@ def test_cloud_writer_projects_are_scoped_to_owner(tmp_path, monkeypatch):
     assert own_read.json()["project"]["owner_user_id"] == first_payload["user"]["id"]
 
 
+def _create_writer_project_ready_for_images(client: TestClient, name: str = "Image retry project") -> str:
+    created = client.post("/api/writer/projects", json={"name": name, "knowledge_ids": []})
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+    workspace = writer_tools.resolve_project_workspace(project_id)
+    article_path = writer_tools.write_article(workspace, "# Article\n\nBody")
+    writer_tools.update_project(
+        project_id,
+        article_path=storage.storage_relative(article_path),
+        cover_prompt="cover prompt",
+        content_image_prompts=["content prompt 1"],
+    )
+    return project_id
+
+
+def test_writer_image_failures_keep_project_on_retry_action(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    project_id = _create_writer_project_ready_for_images(client)
+
+    def fail_image(*args, **kwargs):
+        raise RuntimeError("image api unavailable")
+
+    monkeypatch.setattr(writer_tools, "generate_image", fail_image)
+    response = client.post(f"/api/writer/projects/{project_id}/images", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    images = payload["project"]["images"]
+    assert payload["step"] == "images"
+    assert payload["next_action"] == "retry_failed_images"
+    assert images["partial"] is True
+    assert images["ok"] is False
+    assert len(images["errors"]) == 2
+    assert images["items"] == []
+
+
+def test_writer_partial_image_success_preserves_success_and_requires_retry(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    project_id = _create_writer_project_ready_for_images(client)
+
+    def generate_some(prompt, output_path, setting=None):
+        if output_path.name == "cover.png":
+            output_path.write_bytes(PNG_1X1)
+            return {"path": storage.storage_relative(output_path), "prompt": prompt}
+        raise RuntimeError("content image failed")
+
+    monkeypatch.setattr(writer_tools, "generate_image", generate_some)
+    response = client.post(f"/api/writer/projects/{project_id}/images", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    images = payload["project"]["images"]
+    assert payload["step"] == "images"
+    assert payload["next_action"] == "retry_failed_images"
+    assert images["cover"]["path"].endswith("cover.png")
+    assert images["content_images"] == []
+    assert images["errors"][0]["kind"] == "content"
+
+
+def test_writer_image_success_allows_format_action(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    project_id = _create_writer_project_ready_for_images(client)
+
+    def generate_image(prompt, output_path, setting=None):
+        output_path.write_bytes(PNG_1X1)
+        return {"path": storage.storage_relative(output_path), "prompt": prompt}
+
+    monkeypatch.setattr(writer_tools, "generate_image", generate_image)
+    response = client.post(f"/api/writer/projects/{project_id}/images", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    images = payload["project"]["images"]
+    assert payload["step"] == "images"
+    assert payload["next_action"] == "format_article"
+    assert images["ok"] is True
+    assert images["cover"]["path"].endswith("cover.png")
+    assert images["content_images"][0]["index"] == 1
+
+
+def test_writer_failed_image_item_can_retry_to_format_action(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    project_id = _create_writer_project_ready_for_images(client)
+    attempts = {"cover": 0, "content": 0}
+
+    def fail_then_generate(prompt, output_path, setting=None):
+        kind = "cover" if output_path.name == "cover.png" else "content"
+        attempts[kind] += 1
+        if kind == "content" and attempts[kind] == 1:
+            raise RuntimeError("temporary image outage")
+        output_path.write_bytes(PNG_1X1)
+        return {"path": storage.storage_relative(output_path), "prompt": prompt}
+
+    monkeypatch.setattr(writer_tools, "generate_image", fail_then_generate)
+    failed = client.post(f"/api/writer/projects/{project_id}/images", json={})
+    assert failed.status_code == 200
+    assert failed.json()["next_action"] == "retry_failed_images"
+    assert len(failed.json()["project"]["images"]["errors"]) == 1
+
+    retried = client.post(
+        f"/api/writer/projects/{project_id}/images/item",
+        json={"kind": "content", "index": 1, "prompt": "content prompt retry"},
+    )
+
+    assert retried.status_code == 200
+    payload = retried.json()
+    images = payload["project"]["images"]
+    assert payload["step"] == "images"
+    assert payload["next_action"] == "format_article"
+    assert images["errors"] == []
+    assert images["cover"]["path"].endswith("cover.png")
+    assert images["content_images"][0]["path"].endswith("content-1.png")
+    assert images["content_images"][0]["prompt"] == "content prompt retry"
+
+
 def test_cloud_legacy_writer_paths_are_scoped_to_owned_projects(tmp_path, monkeypatch):
     monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
     monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
@@ -2392,25 +2511,32 @@ def test_v2_settings_api_and_image_routes_return_expected_data(tmp_path, monkeyp
         "/api/v2/settings/image",
         json={
             "name": "Image Relay",
-            "provider": "compatible",
-            "base_url": "https://relay.example.com/v1",
-            "model": "image-model",
+            "provider": "minimax",
+            "protocol": "minimax",
+            "base_url": "https://api.minimaxi.com/v1/image_generation",
+            "model": "image-01",
             "api_key": "secret-key",
             "size": "1024x1024",
-            "quality": "auto",
+            "quality": "",
+            "aspect_ratio": "1:1",
+            "response_format": "base64",
             "timeout": 90,
             "make_active": True,
         },
     )
     assert saved_image.status_code == 200
     assert saved_image.json()["data"]["item"]["name"] == "Image Relay"
+    assert saved_image.json()["data"]["item"]["protocol"] == "minimax"
+    assert saved_image.json()["data"]["item"]["aspect_ratio"] == "1:1"
+    assert saved_image.json()["data"]["item"]["response_format"] == "base64"
     image_id = saved_image.json()["data"]["item"]["id"]
 
     tested_image = client.post("/api/v2/settings/image/test", json={"id": image_id})
     assert tested_image.status_code == 200
     assert tested_image.json()["data"]["ok"] in {"true", "false"}
-    assert tested_image.json()["data"]["provider"] == "compatible"
-    assert tested_image.json()["data"]["model"] == "image-model"
+    assert tested_image.json()["data"]["provider"] == "minimax"
+    assert tested_image.json()["data"]["protocol"] == "minimax"
+    assert tested_image.json()["data"]["model"] == "image-01"
 
     deleted_image = client.delete(f"/api/v2/settings/image/{image_id}")
     assert deleted_image.status_code == 200
@@ -2443,6 +2569,148 @@ def test_image_payload_keeps_configured_quality():
         "测试图",
     )
     assert payload["response_format"] == "b64_json"
+
+
+def test_image_endpoint_respects_protocol():
+    assert (
+        image_api_settings.image_endpoint(
+            {
+                "provider": "compatible",
+                "protocol": "openai_compatible",
+                "base_url": "https://relay.example.com/v1",
+            }
+        )
+        == "https://relay.example.com/v1/images/generations"
+    )
+    assert (
+        image_api_settings.image_endpoint(
+            {
+                "provider": "compatible",
+                "protocol": "openai_compatible",
+                "base_url": "https://relay.example.com/v1/images/generations",
+            }
+        )
+        == "https://relay.example.com/v1/images/generations"
+    )
+    assert (
+        image_api_settings.image_endpoint(
+            {
+                "provider": "minimax",
+                "protocol": "minimax",
+                "base_url": "https://api.minimaxi.com/v1/image_generation",
+            }
+        )
+        == "https://api.minimaxi.com/v1/image_generation"
+    )
+
+
+def test_minimax_image_payload_uses_native_shape():
+    payload = writer_tools._image_payload(
+        {
+            "provider": "minimax",
+            "protocol": "minimax",
+            "model": "image-01",
+            "base_url": "https://api.minimaxi.com/v1/image_generation",
+            "api_key": "secret-key",
+            "size": "1024x1024",
+            "aspect_ratio": "1:1",
+            "response_format": "base64",
+        },
+        "测试图",
+    )
+
+    assert payload == {
+        "model": "image-01",
+        "prompt": "测试图",
+        "aspect_ratio": "1:1",
+        "response_format": "base64",
+    }
+    assert "size" not in payload
+    assert "quality" not in payload
+    assert "n" not in payload
+
+
+def test_generate_image_accepts_minimax_image_base64_response(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    setting = {
+        "provider": "minimax",
+        "protocol": "minimax",
+        "model": "image-01",
+        "base_url": "https://api.minimaxi.com/v1/image_generation",
+        "api_key": "secret-key",
+        "size": "1024x1024",
+        "aspect_ratio": "1:1",
+        "response_format": "base64",
+        "timeout": 90,
+    }
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"data": {"image_base64": [base64.b64encode(PNG_1X1).decode("ascii")]}}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    output_path = tmp_path / "generated.png"
+    result = writer_tools.generate_image("测试图", output_path, setting=setting)
+
+    assert captured["url"] == "https://api.minimaxi.com/v1/image_generation"
+    assert captured["body"] == {
+        "model": "image-01",
+        "prompt": "测试图",
+        "aspect_ratio": "1:1",
+        "response_format": "base64",
+    }
+    assert output_path.read_bytes() == PNG_1X1
+    assert result["path"].endswith("generated.png")
+
+
+def test_generate_image_escapes_non_ascii_prompt_for_compatible_api(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    setting = {
+        "provider": "compatible",
+        "protocol": "openai_compatible",
+        "model": "gpt-image-2",
+        "base_url": "https://relay.example.com/v1",
+        "api_key": "secret-key",
+        "size": "1024x1024",
+        "quality": "auto",
+        "timeout": 90,
+    }
+    captured: dict[str, bytes] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        captured["body"] = request.data
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    writer_tools.generate_image("测试图", tmp_path / "escaped.png", setting=setting)
+
+    assert "\\u6d4b\\u8bd5\\u56fe".encode("ascii") in captured["body"]
+    assert "测试图".encode("utf-8") not in captured["body"]
+    assert json.loads(captured["body"].decode("utf-8"))["prompt"] == "测试图"
 
 
 def test_generate_image_retries_long_prompt_after_upstream_error(tmp_path, monkeypatch):

@@ -1,6 +1,5 @@
 @echo off
 setlocal
-chcp 65001 >nul
 
 set "APP_DIR=%~dp0"
 if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
@@ -11,37 +10,37 @@ set "FIGURELEARNING_SESSION_COOKIE_SECURE="
 set "FIGURELEARNING_YTDLP_COOKIES_FILE=%APP_DIR%\auth\bilibili.cookies.txt"
 set "FIGURELEARNING_YTDLP_COOKIES_FROM_BROWSER="
 
-title 知识酷 本地模式
+title ZhiShiKu Local
 
 cd /d "%APP_DIR%"
 if errorlevel 1 (
-  echo 无法进入项目目录：
+  echo Cannot enter project directory:
   echo %APP_DIR%
   pause
   exit /b 1
 )
 
 if not exist "%PYTHON%" (
-  echo 尚未完成首次安装。
-  echo 请先双击运行“安装知识酷-首次运行.bat”。
+  echo First-run setup is incomplete.
+  echo Please run "瀹夎鐭ヨ瘑閰?棣栨杩愯.bat" first.
   pause
   exit /b 1
 )
 
-echo 正在关闭旧的 8000 端口服务...
+echo Stopping old service on port 8000...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ports = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue; foreach ($p in $ports) { try { Stop-Process -Id $p.OwningProcess -Force -ErrorAction Stop } catch {} }"
 
-echo 正在以本地模式启动知识酷：
+echo Starting ZhiShiKu in local mode from:
 echo %APP_DIR%
 echo.
-echo 浏览器地址：%URL%
-echo 使用期间请保持此窗口开启。
-echo 按 Ctrl+C 可停止服务。
+echo Browser URL: %URL%
+echo Keep this window open while using the app.
+echo Press Ctrl+C to stop the server.
 echo.
 
 start "" powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 3; Start-Process '%URL%'"
 "%PYTHON%" run_server.py
 
 echo.
-echo 服务已停止。
+echo Server stopped.
 pause

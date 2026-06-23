@@ -205,54 +205,6 @@ export function useCollectFlow({ language, textExtractionMode, addActivity, refr
     [createMaterial, insertMaterial, language, materials],
   );
 
-  const browserExtractCollectLink = useCallback(
-    async (id: string) => {
-      const material = materials.find((item) => item.id === id && item.type === "link");
-      if (!material) return;
-      setCollectInputBusy("browser-link");
-      setMaterials((current) =>
-        current.map((item) => (item.id === id ? { ...item, status: "learning", error: undefined } : item)),
-      );
-      try {
-        const draft = await collectApi.browserExtractLink(material);
-        setCollectDraft(draft);
-        setMaterials((current) =>
-          current.map((item) =>
-            item.id === id
-              ? {
-                  ...item,
-                  status: "ready",
-                  error: undefined,
-                  linkType: item.linkType ?? "browser_webpage",
-                  extractionStrategy: "browser_automation_wait_scroll",
-                  accessStatus: "accessible",
-                }
-              : item,
-          ),
-        );
-        addActivity({
-          title: draft.title,
-          detail: language === "zh" ? "浏览器提取完成，请确认后加入原文库。" : "Browser extraction completed.",
-          workspace: "collect",
-          status: "done",
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "Browser extraction failed";
-        setMaterials((current) =>
-          current.map((item) => (item.id === id ? { ...item, status: "error", error: detail } : item)),
-        );
-        addActivity({
-          title: language === "zh" ? "浏览器提取失败" : "Browser extraction failed",
-          detail,
-          workspace: "collect",
-          status: "error",
-        });
-      } finally {
-        setCollectInputBusy(null);
-      }
-    },
-    [addActivity, language, materials],
-  );
 
   const generateCollectReadableDraft = useCallback(
     async (ids?: string[]) => {
@@ -351,7 +303,6 @@ export function useCollectFlow({ language, textExtractionMode, addActivity, refr
     uploadFiles,
     pasteImages,
     resolveLinks,
-    browserExtractCollectLink,
     generateCollectReadableDraft,
     saveCollectDraftToOriginalLibrary,
     deleteMaterials,

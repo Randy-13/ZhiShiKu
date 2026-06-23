@@ -132,9 +132,9 @@ export const collectApi = {
       content: material.type === "text" ? material.source : "",
       url: material.type === "link" || material.type === "media" ? material.source : "",
       title: material.title,
-      link_type: "",
-      extraction_strategy: "",
-      access_status: material.status,
+      link_type: material.linkType ?? "",
+      extraction_strategy: material.extractionStrategy ?? "",
+      access_status: material.accessStatus ?? material.status,
     }));
     const payload = await requestJson<V2Payload<{ ok: boolean; error?: string; item?: Record<string, unknown>; errors?: string[] }>>(
       "/api/v2/collect/raw-markdown",
@@ -173,9 +173,9 @@ export const collectApi = {
             content: material.type === "text" ? material.source : "",
             url: material.type === "link" || material.type === "media" ? material.source : "",
             title: material.title,
-            link_type: "",
-            extraction_strategy: "",
-            access_status: material.status,
+            link_type: material.linkType ?? "",
+            extraction_strategy: material.extractionStrategy ?? "",
+            access_status: material.accessStatus ?? material.status,
           })),
         }),
       }, { timeoutMs: READABLE_DRAFT_TIMEOUT_MS });

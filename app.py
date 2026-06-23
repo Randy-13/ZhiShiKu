@@ -280,11 +280,13 @@ class ImageApiSettingSaveRequest(BaseModel):
     id: str | None = None
     name: str
     provider: str
+    protocol: str | None = None
     base_url: str
     model: str
     api_key: str | None = None
     size: str | None = None
     quality: str | None = None
+    aspect_ratio: str | None = None
     response_format: str | None = None
     timeout: float | None = None
     make_active: bool = True
@@ -2839,9 +2841,36 @@ def _writer_project_next_action(step: str) -> str:
     }.get(step, "confirm_knowledge")
 
 
+def _writer_project_images_need_retry(project: dict[str, object]) -> bool:
+    images = project.get("images")
+    if not isinstance(images, dict):
+        return False
+    if images.get("partial") or images.get("ok") is False or images.get("errors"):
+        return True
+    cover_prompt = str(project.get("cover_prompt") or "").strip()
+    if cover_prompt and not isinstance(images.get("cover"), dict):
+        return True
+    expected_content_count = len(
+        [
+            str(item).strip()
+            for item in (project.get("content_image_prompts") or [])
+            if str(item).strip()
+        ]
+    )
+    content_images = images.get("content_images") if isinstance(images.get("content_images"), list) else []
+    existing_indexes = {
+        int(item.get("index") or 0)
+        for item in content_images
+        if isinstance(item, dict) and item.get("path")
+    }
+    return any(index not in existing_indexes for index in range(1, expected_content_count + 1))
+
+
 def _writer_project_next_action_for_project(project: dict[str, object], step: str) -> str:
     if step == "draft" and project.get("image_suggestion_rationale"):
         return "generate_images"
+    if step == "images" and _writer_project_images_need_retry(project):
+        return "retry_failed_images"
     if step == "designed" and not project.get("design_confirmed"):
         return "confirm_design"
     if step == "publish_check" and not (project.get("preflight") or {}).get("ok"):
@@ -2959,6 +2988,24 @@ def writer_project_confirm_knowledge(project_id: str, payload: WriterProjectKnow
         if not files:
             raise HTTPException(status_code=400, detail="Selected knowledge files have no readable Markdown path")
         writer_tools.set_project_library_files(project_id, files)
+        writer_tools.clear_writer_image_metadata(_writer_project_workspace(project_id))
+        writer_tools.update_project(
+            project_id,
+            topics=[],
+            topic={},
+            title="",
+            digest="",
+            article_path="",
+            cover_prompt="",
+            content_image_prompts=[],
+            image_suggestion_rationale="",
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return _writer_project_payload(project_id, owner_user_id=owner_user_id)
     except HTTPException:
         raise
@@ -2976,7 +3023,24 @@ def writer_project_generate_topics(project_id: str, request: Request) -> dict[st
         materials = _require_project_materials(project)
         result = deepseek_client.generate_topics(materials, setting=deepseek_client.current_setting())
         suggestions = result.model_dump().get("suggestions", [])
-        updated = writer_tools.update_project(project_id, topics=suggestions)
+        writer_tools.clear_writer_image_metadata(_writer_project_workspace(project_id))
+        updated = writer_tools.update_project(
+            project_id,
+            topics=suggestions,
+            topic={},
+            title="",
+            digest="",
+            article_path="",
+            cover_prompt="",
+            content_image_prompts=[],
+            image_suggestion_rationale="",
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "topics": updated.get("topics", [])}
     except HTTPException:
         raise
@@ -2993,7 +3057,23 @@ def writer_project_select_topic(project_id: str, payload: WriterProjectTopicRequ
     try:
         owner_user_id = _writer_owner_scope(request)
         _writer_load_project(project_id, owner_user_id=owner_user_id)
-        writer_tools.update_project(project_id, topic=payload.topic)
+        writer_tools.clear_writer_image_metadata(_writer_project_workspace(project_id))
+        writer_tools.update_project(
+            project_id,
+            topic=payload.topic,
+            title="",
+            digest="",
+            article_path="",
+            cover_prompt="",
+            content_image_prompts=[],
+            image_suggestion_rationale="",
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return _writer_project_payload(project_id, owner_user_id=owner_user_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -3044,6 +3124,13 @@ def writer_project_generate_draft(project_id: str, payload: WriterProjectDraftRe
             cover_prompt=getattr(result, "cover_prompt", "") or project.get("cover_prompt"),
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
             article_path=storage.storage_relative(article_path),
+            image_suggestion_rationale="",
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
         )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "article": result.model_dump()}
     except HTTPException:
@@ -3081,6 +3168,13 @@ def writer_project_revise(project_id: str, payload: WriterProjectReviseRequest, 
             change_summary=getattr(result, "change_summary", ""),
             cover_prompt=getattr(result, "cover_prompt", "") or project.get("cover_prompt"),
             content_image_prompts=getattr(result, "content_image_prompts", []) or project.get("content_image_prompts"),
+            image_suggestion_rationale="",
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
         )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "revision": result.model_dump(), "version_path": storage.storage_relative(version_path)}
     except HTTPException:
@@ -3110,12 +3204,19 @@ def writer_project_image_suggestions(project_id: str, payload: WriterProjectImag
             setting=deepseek_client.current_setting(),
         )
         result.content_image_prompts = (result.content_image_prompts or [])[:content_image_count]
+        writer_tools.clear_writer_image_metadata(_writer_project_workspace(project_id))
         writer_tools.update_project(
             project_id,
             cover_prompt=result.cover_prompt,
             content_image_prompts=result.content_image_prompts,
             image_style_preset=image_style_preset,
             image_suggestion_rationale=result.rationale,
+            images={},
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
         )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "suggestions": result.model_dump()}
     except HTTPException:
@@ -3141,7 +3242,15 @@ def writer_project_generate_images(project_id: str, payload: WriterProjectImages
             cover_prompt=str(cover_prompt) if cover_prompt else None,
             content_prompts=[str(item) for item in content_prompts],
         )
-        writer_tools.update_project(project_id, images=result)
+        writer_tools.update_project(
+            project_id,
+            images=result,
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
     except HTTPException:
         raise
@@ -3165,7 +3274,15 @@ def writer_project_generate_image_item(project_id: str, payload: WriterProjectIm
             payload.prompt,
             index=payload.index,
         )
-        writer_tools.update_project(project_id, images=result)
+        writer_tools.update_project(
+            project_id,
+            images=result,
+            html_path="",
+            design_confirmed=False,
+            preflight={},
+            publish_result={},
+            status="active",
+        )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
