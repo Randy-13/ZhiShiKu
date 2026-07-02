@@ -3893,6 +3893,44 @@ textarea {
   grid-column: span 2;
 }
 
+.wechat-publisher-card {
+  grid-column: span 2;
+  display: grid;
+  gap: 12px;
+}
+
+.wechat-publisher-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.wechat-publisher-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.wechat-publisher-form span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.wechat-publisher-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.wechat-publisher-meta span {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+  background: var(--surface-2);
+}
+
 .database-status-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4464,11 +4502,13 @@ textarea {
   }
 
   .database-settings-card,
+  .wechat-publisher-card,
   .storage-settings-card {
     grid-column: span 1;
   }
 
   .database-status-grid,
+  .wechat-publisher-form,
   .database-table-counts {
     grid-template-columns: 1fr;
   }

@@ -13,6 +13,8 @@ import type {
   ImageApiSettingsPayload,
   MediaDependencyStatus,
   TrashStatus,
+  WechatPublisherBindingInput,
+  WechatPublisherBindingStatus,
   WorkbenchSettings,
 } from "./api";
 
@@ -166,6 +168,30 @@ export const settingsApi = {
 
   async databaseStatus(): Promise<DatabaseStatus> {
     return unwrapV2(await requestJson<import("./apiCore").V2Payload<DatabaseStatus>>("/api/v2/admin/database/status"));
+  },
+
+  wechatPublisherBinding(): Promise<WechatPublisherBindingStatus> {
+    return requestJson<WechatPublisherBindingStatus>("/api/settings/wechat-publisher");
+  },
+
+  async saveWechatPublisherBinding(setting: WechatPublisherBindingInput): Promise<WechatPublisherBindingStatus> {
+    return ensureSettingsOk(await requestJson<WechatPublisherBindingStatus>("/api/settings/wechat-publisher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(setting),
+    }));
+  },
+
+  async bindLocalWechatPublisher(accountName = "本地微信公众号", author = "Bobo"): Promise<WechatPublisherBindingStatus> {
+    return ensureSettingsOk(await requestJson<WechatPublisherBindingStatus>("/api/settings/wechat-publisher/bind-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_name: accountName, author }),
+    }));
+  },
+
+  refreshWechatPublisherToken(): Promise<Record<string, unknown>> {
+    return requestJson<Record<string, unknown>>("/api/settings/wechat-publisher/token/refresh", { method: "POST" });
   },
 
   async clearTrash(): Promise<TrashStatus> {

@@ -1424,7 +1424,7 @@ def create_writer_format(project_id: str, request: CreateWriterFormatRequest, ht
 @router.post("/create/projects/{project_id}/writer/publish/preflight")
 def create_writer_publish_preflight(project_id: str, request: CreateWriterPublishPreflightRequest, http_request: Request) -> dict[str, object]:
     context = _request_context(http_request)
-    _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
+    account_key = writer_tools.wechat_account_key_for_context(context)
     project = _load_writer_project(project_id, context)
     workspace = writer_tools.resolve_project_workspace(project_id)
     title = request.title.strip() or project.get("name") or "未命名文章"
@@ -1434,6 +1434,7 @@ def create_writer_publish_preflight(project_id: str, request: CreateWriterPublis
         author=request.author or "Bobo",
         digest=request.digest,
         cover_path=request.cover_path,
+        account_key=account_key,
     )
     return success_payload(
         data={
@@ -1447,7 +1448,7 @@ def create_writer_publish_preflight(project_id: str, request: CreateWriterPublis
 @router.post("/create/projects/{project_id}/writer/publish")
 def create_writer_publish(project_id: str, request: CreateWriterPublishPreflightRequest, http_request: Request) -> dict[str, object]:
     context = _request_context(http_request)
-    _require_local_or_admin(context, "公网内测普通用户不能发布到服务器公众号")
+    account_key = writer_tools.wechat_account_key_for_context(context)
     project = _load_writer_project(project_id, context)
     workspace = writer_tools.resolve_project_workspace(project_id)
     title = request.title.strip() or project.get("name") or "未命名文章"
@@ -1457,6 +1458,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
         author=request.author or "Bobo",
         digest=request.digest,
         cover_path=request.cover_path,
+        account_key=account_key,
     )
     if not preflight.get("ok"):
         return success_payload(
@@ -1474,6 +1476,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
         author=request.author or "Bobo",
         digest=request.digest,
         cover_path=request.cover_path,
+        account_key=account_key,
     )
     return success_payload(
         data={
@@ -1668,7 +1671,6 @@ def _validate_job_payload(kind: str, payload: object, context: dict[str, object]
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Content image index must be greater than 0")
             return
         if kind == "publish_preflight":
-            _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
             _load_writer_project(_job_project_id(payload_dict), context)
             WriterPublishPreflightJobRequest.model_validate(payload_dict)
             return
@@ -1917,7 +1919,7 @@ def _execute_writer_image_item_job(payload: dict[str, object], context: dict[str
 
 
 def _execute_publish_preflight_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
-    _require_local_or_admin(context, "公网内测普通用户不能操作公众号发布预检")
+    account_key = writer_tools.wechat_account_key_for_context(context)
     request = WriterPublishPreflightJobRequest.model_validate(payload)
     project = _load_writer_project(request.project_id, context)
     workspace = writer_tools.resolve_project_workspace(request.project_id)
@@ -1928,6 +1930,7 @@ def _execute_publish_preflight_job(payload: dict[str, object], context: dict[str
         author=request.author or "Bobo",
         digest=request.digest,
         cover_path=request.cover_path,
+        account_key=account_key,
     )
     return {
         "ok": True,

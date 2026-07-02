@@ -147,16 +147,41 @@ PM_RESEARCH_DESIGN_STRATEGY = """PM 研究型美编策略
 """
 
 
-def wechat_config_file() -> Path:
-    return Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or str(Path.home())) / ".wechat-publisher" / "config.json"
+def _safe_wechat_account_key(account_key: str | None) -> str:
+    value = (account_key or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    return value.strip("._")[:80]
 
 
-def wechat_token_cache_file() -> Path:
-    return Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or str(Path.home())) / ".wechat-publisher" / "token_cache.json"
+def wechat_config_dir(account_key: str | None = None) -> Path:
+    key = _safe_wechat_account_key(account_key)
+    if key:
+        return storage.ROOT / "auth" / "wechat_publisher" / key
+    return Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or str(Path.home())) / ".wechat-publisher"
 
 
-def wechat_config() -> dict[str, str]:
-    config_file = wechat_config_file()
+def wechat_config_file(account_key: str | None = None) -> Path:
+    return wechat_config_dir(account_key) / "config.json"
+
+
+def wechat_token_cache_file(account_key: str | None = None) -> Path:
+    return wechat_config_dir(account_key) / "token_cache.json"
+
+
+def _legacy_wechat_config_file() -> Path:
+    return wechat_config_file(None)
+
+
+def wechat_user_config_exists(account_key: str | None) -> bool:
+    return bool(_safe_wechat_account_key(account_key)) and wechat_config_file(account_key).exists()
+
+
+def wechat_config(account_key: str | None = None, *, allow_legacy_fallback: bool = True) -> dict[str, str]:
+    config_file = wechat_config_file(account_key) if account_key else wechat_config_file()
+    if account_key and not config_file.exists() and allow_legacy_fallback:
+        config_file = _legacy_wechat_config_file()
     if not config_file.exists():
         return {}
     try:
@@ -166,20 +191,121 @@ def wechat_config() -> dict[str, str]:
     return {
         "appid": (config.get("appid") or "").strip(),
         "appsecret": (config.get("appsecret") or "").strip(),
+        "account_name": (config.get("account_name") or config.get("name") or "").strip(),
+        "author": (config.get("author") or "").strip(),
+        "owner_user_id": (config.get("owner_user_id") or "").strip(),
+        "owner_username": (config.get("owner_username") or "").strip(),
+        "updated_at": (config.get("updated_at") or "").strip(),
     }
 
 
-def clear_wechat_token_cache(reason: str = "") -> bool:
-    token_file = wechat_token_cache_file()
+def _redact_appsecret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}{'*' * 8}{value[-4:]}"
+
+
+def wechat_binding_status(account_key: str | None, username: str = "") -> dict[str, Any]:
+    config_file = wechat_config_file(account_key)
+    config = wechat_config(account_key, allow_legacy_fallback=False)
+    token_file = wechat_token_cache_file(account_key)
+    token_cache: dict[str, Any] = {}
+    if token_file.exists():
+        try:
+            token_cache = json.loads(token_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            token_cache = {}
+    configured = bool(config.get("appid") and config.get("appsecret"))
+    legacy_config = wechat_config(None, allow_legacy_fallback=False)
+    return {
+        "configured": configured,
+        "account_key": _safe_wechat_account_key(account_key),
+        "username": username,
+        "account_name": config.get("account_name") or "",
+        "author": config.get("author") or "Bobo",
+        "appid": config.get("appid", ""),
+        "appid_masked": redact_appid(config.get("appid", "")),
+        "appsecret": _redact_appsecret(config.get("appsecret", "")) if configured else "",
+        "config_path": str(config_file),
+        "token_cached": bool(token_cache.get("access_token")),
+        "token_updated_at": token_cache.get("updated_at", ""),
+        "updated_at": config.get("updated_at") or "",
+        "can_bind_local_config": bool(legacy_config.get("appid") and legacy_config.get("appsecret")),
+        "legacy_appid": legacy_config.get("appid", ""),
+        "legacy_appid_masked": redact_appid(legacy_config.get("appid", "")),
+    }
+
+
+def save_wechat_binding(
+    account_key: str,
+    username: str = "",
+    *,
+    appid: str,
+    appsecret: str | None = None,
+    account_name: str = "",
+    author: str = "Bobo",
+) -> dict[str, Any]:
+    key = _safe_wechat_account_key(account_key)
+    if not key:
+        raise ValueError("Missing WeChat binding account key")
+    existing = wechat_config(key, allow_legacy_fallback=False)
+    cleaned_appid = appid.strip()
+    cleaned_secret = (appsecret or "").strip() or existing.get("appsecret", "")
+    if not cleaned_appid or not cleaned_secret:
+        raise ValueError("微信公众号 AppID 和 AppSecret 都必须填写")
+    config_file = wechat_config_file(key)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "appid": cleaned_appid,
+        "appsecret": cleaned_secret,
+        "account_name": account_name.strip(),
+        "author": author.strip() or "Bobo",
+        "owner_user_id": account_key,
+        "owner_username": username,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    config_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    clear_wechat_token_cache("config changed", account_key=key)
+    return wechat_binding_status(key, username)
+
+
+def bind_legacy_wechat_config_to_user(account_key: str, username: str = "", *, account_name: str = "", author: str = "Bobo") -> dict[str, Any]:
+    legacy = wechat_config(None, allow_legacy_fallback=False)
+    if not legacy.get("appid") or not legacy.get("appsecret"):
+        raise FileNotFoundError(f"未找到本机微信公众号配置：{_legacy_wechat_config_file()}")
+    return save_wechat_binding(
+        account_key,
+        username,
+        appid=legacy["appid"],
+        appsecret=legacy["appsecret"],
+        account_name=account_name or legacy.get("account_name") or "本地微信公众号",
+        author=author or legacy.get("author") or "Bobo",
+    )
+
+
+def wechat_account_key_for_context(context: dict[str, Any]) -> str | None:
+    user = context.get("user") or {}
+    user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
+    if not user_id:
+        return None
+    if context.get("deploymentMode") == "cloud":
+        return user_id
+    return user_id if wechat_user_config_exists(user_id) else None
+
+
+def clear_wechat_token_cache(reason: str = "", account_key: str | None = None) -> bool:
+    token_file = wechat_token_cache_file(account_key)
     if token_file.exists():
         token_file.unlink()
         return True
     return False
 
 
-def invalidate_stale_wechat_token_cache() -> bool:
-    token_file = wechat_token_cache_file()
-    config = wechat_config()
+def invalidate_stale_wechat_token_cache(account_key: str | None = None) -> bool:
+    token_file = wechat_token_cache_file(account_key)
+    config = wechat_config(account_key)
     if not token_file.exists() or not config.get("appid"):
         return False
     try:
@@ -1215,9 +1341,9 @@ def prepare_html_for_publish(workspace: Path, html_path: Path) -> Path:
     return output_path
 
 
-def wechat_access_token(timeout: float = 20) -> str:
-    token_file = wechat_token_cache_file()
-    config = wechat_config()
+def wechat_access_token(timeout: float = 20, account_key: str | None = None) -> str:
+    token_file = wechat_token_cache_file(account_key)
+    config = wechat_config(account_key)
     now = time.time()
     if token_file.exists():
         try:
@@ -1230,14 +1356,14 @@ def wechat_access_token(timeout: float = 20) -> str:
             and float(cached.get("expires_at") or 0) > now + 120
         ):
             return str(cached["access_token"])
-    refreshed = refresh_wechat_access_token(timeout=timeout)
+    refreshed = refresh_wechat_access_token(timeout=timeout, account_key=account_key)
     if not refreshed.get("ok"):
         raise RuntimeError(str(refreshed.get("message") or "微信 access_token 获取失败"))
     cached = json.loads(token_file.read_text(encoding="utf-8"))
     return str(cached["access_token"])
 
 
-def _wechat_request_json(url: str, payload: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
+def _wechat_request_json(url: str, payload: dict[str, Any], timeout: float = 60, account_key: str | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1253,12 +1379,12 @@ def _wechat_request_json(url: str, payload: dict[str, Any], timeout: float = 60)
     data = json.loads(raw)
     if data.get("errcode"):
         if data.get("errcode") == 40001:
-            clear_wechat_token_cache("40001 from built-in publisher")
+            clear_wechat_token_cache("40001 from built-in publisher", account_key=account_key)
         raise RuntimeError(f"微信接口错误 {data.get('errcode')}: {data.get('errmsg')}")
     return data
 
 
-def _wechat_upload_file(url: str, file_path: Path, field_name: str, timeout: float = 120) -> dict[str, Any]:
+def _wechat_upload_file(url: str, file_path: Path, field_name: str, timeout: float = 120, account_key: str | None = None) -> dict[str, Any]:
     boundary = f"----zhishiku-{uuid4().hex}"
     mime = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
     header = (
@@ -1282,30 +1408,30 @@ def _wechat_upload_file(url: str, file_path: Path, field_name: str, timeout: flo
     data = json.loads(raw)
     if data.get("errcode"):
         if data.get("errcode") == 40001:
-            clear_wechat_token_cache("40001 from built-in upload")
+            clear_wechat_token_cache("40001 from built-in upload", account_key=account_key)
         raise RuntimeError(f"微信上传错误 {data.get('errcode')}: {data.get('errmsg')}")
     return data
 
 
-def _wechat_upload_cover(access_token: str, cover: Path) -> str:
+def _wechat_upload_cover(access_token: str, cover: Path, account_key: str | None = None) -> str:
     url = "https://api.weixin.qq.com/cgi-bin/material/add_material?type=image&access_token=" + urllib.parse.quote(access_token)
-    data = _wechat_upload_file(url, cover, "media")
+    data = _wechat_upload_file(url, cover, "media", account_key=account_key)
     media_id = data.get("media_id")
     if not media_id:
         raise RuntimeError(f"微信封面上传未返回 media_id：{json.dumps(data, ensure_ascii=False)}")
     return str(media_id)
 
 
-def _wechat_upload_content_image(access_token: str, image_path: Path) -> str:
+def _wechat_upload_content_image(access_token: str, image_path: Path, account_key: str | None = None) -> str:
     url = "https://api.weixin.qq.com/cgi-bin/media/uploadimg?access_token=" + urllib.parse.quote(access_token)
-    data = _wechat_upload_file(url, image_path, "media")
+    data = _wechat_upload_file(url, image_path, "media", account_key=account_key)
     image_url = data.get("url")
     if not image_url:
         raise RuntimeError(f"微信正文图片上传未返回 url：{json.dumps(data, ensure_ascii=False)}")
     return str(image_url)
 
 
-def _replace_local_images_with_wechat_urls(html_text: str, base_dir: Path, access_token: str) -> tuple[str, list[dict[str, str]]]:
+def _replace_local_images_with_wechat_urls(html_text: str, base_dir: Path, access_token: str, account_key: str | None = None) -> tuple[str, list[dict[str, str]]]:
     uploaded: list[dict[str, str]] = []
 
     def replace(match: re.Match[str]) -> str:
@@ -1317,7 +1443,11 @@ def _replace_local_images_with_wechat_urls(html_text: str, base_dir: Path, acces
             raise RuntimeError(f"Unsupported WeChat content image type: {image_path}")
         if image_path.stat().st_size > WECHAT_IMAGE_MAX_BYTES:
             raise RuntimeError(f"WeChat content image exceeds 10MB: {image_path}")
-        image_url = _wechat_upload_content_image(access_token, image_path)
+        image_url = (
+            _wechat_upload_content_image(access_token, image_path, account_key=account_key)
+            if account_key
+            else _wechat_upload_content_image(access_token, image_path)
+        )
         uploaded.append({"path": str(image_path), "url": image_url})
         return f'<img{before}src="{html.escape(image_url)}"{after}>'
 
@@ -1329,6 +1459,7 @@ def prepare_publish_html_with_wechat_images(
     workspace: Path,
     html_path: Path,
     access_token: str,
+    account_key: str | None = None,
 ) -> tuple[Path, str, list[dict[str, str]]]:
     publish_html_path = prepare_html_for_publish(workspace, html_path)
     source_html = html_path.read_text(encoding="utf-8")
@@ -1336,7 +1467,7 @@ def prepare_publish_html_with_wechat_images(
     html_text = publish_html_path.read_text(encoding="utf-8")
     before_report = inspect_wechat_html_for_publish(html_text, publish_html_path.parent)
     expected_local_count = len(before_report.get("local_image_paths") or [])
-    html_text, uploaded_images = _replace_local_images_with_wechat_urls(html_text, publish_html_path.parent, access_token)
+    html_text, uploaded_images = _replace_local_images_with_wechat_urls(html_text, publish_html_path.parent, access_token, account_key=account_key)
     html_text, sanitize_report = sanitize_wechat_html(html_text)
     publish_html_path.write_text(html_text, encoding="utf-8")
     after_report = inspect_wechat_html_for_publish(html_text, publish_html_path.parent)
@@ -1397,9 +1528,10 @@ def publish_draft_builtin(
     author: str = "Bobo",
     digest: str | None = None,
     cover_path: str | None = None,
+    account_key: str | None = None,
 ) -> dict[str, Any]:
     digest = truncate_utf8(digest, 120)
-    invalidated_token = invalidate_stale_wechat_token_cache()
+    invalidated_token = invalidate_stale_wechat_token_cache(account_key=account_key)
     html_path = workspace / "formatted_wechat.html"
     if not html_path.exists():
         html_path = workspace / "formatted.html"
@@ -1411,9 +1543,9 @@ def publish_draft_builtin(
     if not cover.exists():
         raise FileNotFoundError(f"找不到封面图：{cover}")
 
-    access_token = wechat_access_token()
-    thumb_media_id = _wechat_upload_cover(access_token, cover)
-    publish_html_path, html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token)
+    access_token = wechat_access_token(account_key=account_key) if account_key else wechat_access_token()
+    thumb_media_id = _wechat_upload_cover(access_token, cover, account_key=account_key) if account_key else _wechat_upload_cover(access_token, cover)
+    publish_html_path, html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token, account_key=account_key)
     payload = {
         "articles": [
             {
@@ -1429,7 +1561,7 @@ def publish_draft_builtin(
         ]
     }
     url = "https://api.weixin.qq.com/cgi-bin/draft/add?access_token=" + urllib.parse.quote(access_token)
-    data = _wechat_request_json(url, payload, timeout=120)
+    data = _wechat_request_json(url, payload, timeout=120, account_key=account_key) if account_key else _wechat_request_json(url, payload, timeout=120)
     media_id = data.get("media_id")
     result = {
         "returncode": 0,
@@ -1444,6 +1576,8 @@ def publish_draft_builtin(
         "media_id": media_id,
         "uploaded_content_images": uploaded_images,
         "publisher": "builtin",
+        "wechat_account_key": _safe_wechat_account_key(account_key),
+        "wechat_account": wechat_binding_status(account_key).get("account_name") if account_key else wechat_config().get("account_name", ""),
     }
     attach_publish_image_warning(result, workspace)
     result_path = workspace / "publish_result.json"
@@ -1458,6 +1592,7 @@ def publish_preflight(
     author: str = "Bobo",
     digest: str | None = None,
     cover_path: str | None = None,
+    account_key: str | None = None,
 ) -> dict[str, Any]:
     original_digest = digest or ""
     safe_digest = truncate_utf8(original_digest, 120)
@@ -1471,13 +1606,15 @@ def publish_preflight(
         cover = storage.ROOT / cover
     html_text = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
     config: dict[str, Any] = {}
-    config_file = wechat_config_file()
-    token_cache_file = wechat_token_cache_file()
+    config_file = wechat_config_file(account_key) if account_key else wechat_config_file()
+    token_cache_file = wechat_token_cache_file(account_key) if account_key else wechat_token_cache_file()
     if config_file.exists():
         try:
             config = json.loads(config_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             config = {}
+    elif not account_key:
+        config = wechat_config()
     token_cache: dict[str, Any] = {}
     if token_cache_file.exists():
         try:
@@ -1485,7 +1622,9 @@ def publish_preflight(
         except json.JSONDecodeError:
             token_cache = {}
     config_ready = bool(config.get("appid") and config.get("appsecret"))
-    wechat_api_check: dict[str, Any] | None = refresh_wechat_access_token() if config_ready else None
+    wechat_api_check: dict[str, Any] | None = (
+        refresh_wechat_access_token(account_key=account_key) if account_key else refresh_wechat_access_token()
+    ) if config_ready else None
     publish_inspection = inspect_wechat_html_for_publish(html_text, html_path.parent) if html_path.exists() else {
         "ok": False,
         "local_image_paths": [],
@@ -1632,6 +1771,14 @@ def publish_preflight(
         "digest_original_bytes": utf8_len(original_digest),
         "digest_bytes": utf8_len(safe_digest),
         "digest_truncated": digest_was_truncated,
+        "wechat_account": wechat_binding_status(account_key) if account_key else {
+            "configured": config_ready,
+            "account_key": "",
+            "account_name": config.get("account_name", ""),
+            "author": config.get("author") or author or "Bobo",
+            "appid": redact_appid(config.get("appid", "")),
+            "config_path": str(config_file),
+        },
         "publish_inspection": {key: value for key, value in publish_inspection.items() if key != "sanitized_html"},
         "flow": [
             "1. 获取 access_token：GET /cgi-bin/token?grant_type=client_credential",
@@ -1672,9 +1819,9 @@ def sanitize_publish_html_preview(workspace: Path) -> dict[str, Any]:
     return result
 
 
-def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
-    config_file = wechat_config_file()
-    config = wechat_config()
+def refresh_wechat_access_token(timeout: float = 20, account_key: str | None = None) -> dict[str, Any]:
+    config_file = wechat_config_file(account_key)
+    config = wechat_config(account_key)
     if not config_file.exists():
         return {
             "ok": False,
@@ -1686,7 +1833,7 @@ def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
     secret = config.get("appsecret", "")
     if not appid or not secret:
         return {"ok": False, "message": "微信 AppID/AppSecret 未配置完整", "ip": "", "raw": ""}
-    clear_wechat_token_cache("force refresh")
+    clear_wechat_token_cache("force refresh", account_key=account_key)
     url = (
         "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential"
         + "&appid="
@@ -1700,7 +1847,7 @@ def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
         return {"ok": False, "message": f"微信 token 接口调用失败：{exc}", "ip": "", "raw": ""}
     data = json.loads(raw)
     if data.get("access_token"):
-        token_file = wechat_token_cache_file()
+        token_file = wechat_token_cache_file(account_key)
         token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text(
             json.dumps(
@@ -1720,6 +1867,8 @@ def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
             "message": "微信 token 接口已通过，当前出口 IP 已在白名单中，并已刷新本地 token 缓存。",
             "ip": "",
             "raw": json.dumps({"expires_in": data.get("expires_in")}, ensure_ascii=False),
+            "account_key": _safe_wechat_account_key(account_key),
+            "account_name": config.get("account_name", ""),
         }
     errmsg = data.get("errmsg", "")
     match = re.search(r"invalid ip ([0-9.]+)", errmsg)
@@ -1729,11 +1878,13 @@ def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
         "message": f"微信接口返回错误：{data.get('errcode')} {errmsg}",
         "ip": ip,
         "raw": json.dumps(data, ensure_ascii=False),
+        "account_key": _safe_wechat_account_key(account_key),
+        "account_name": config.get("account_name", ""),
     }
 
 
-def check_wechat_publish_ip(timeout: float = 20) -> dict[str, Any]:
-    return refresh_wechat_access_token(timeout=timeout)
+def check_wechat_publish_ip(timeout: float = 20, account_key: str | None = None) -> dict[str, Any]:
+    return refresh_wechat_access_token(timeout=timeout, account_key=account_key)
 
 
 def _image_endpoint(setting: dict[str, Any]) -> str:
@@ -2485,11 +2636,12 @@ def publish_draft(
     author: str = "Bobo",
     digest: str | None = None,
     cover_path: str | None = None,
+    account_key: str | None = None,
 ) -> dict[str, Any]:
     digest = truncate_utf8(digest, 120)
-    if not PUBLISHER_SCRIPT.exists():
-        return publish_draft_builtin(workspace, title, author=author, digest=digest, cover_path=cover_path)
-    invalidated_token = invalidate_stale_wechat_token_cache()
+    if account_key or not PUBLISHER_SCRIPT.exists():
+        return publish_draft_builtin(workspace, title, author=author, digest=digest, cover_path=cover_path, account_key=account_key)
+    invalidated_token = invalidate_stale_wechat_token_cache(account_key=account_key)
     html_path = workspace / "formatted_wechat.html"
     if not html_path.exists():
         html_path = workspace / "formatted.html"
@@ -2498,8 +2650,8 @@ def publish_draft(
     cover = Path(cover_path) if cover_path else workspace / "cover.png"
     if not cover.is_absolute():
         cover = storage.ROOT / cover
-    access_token = wechat_access_token()
-    publish_html_path, _html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token)
+    access_token = wechat_access_token(account_key=account_key) if account_key else wechat_access_token()
+    publish_html_path, _html_text, uploaded_images = prepare_publish_html_with_wechat_images(workspace, html_path, access_token, account_key=account_key)
 
     command = [
         str(PUBLISHER_SCRIPT),
@@ -2559,7 +2711,7 @@ def publish_draft(
     if completed.returncode != 0:
         raw = (completed.stderr or completed.stdout or "").strip()
         if "错误码40001" in raw or "errcode\":40001" in raw or "AppSecret错误" in raw:
-            clear_wechat_token_cache("40001 from publisher")
+            clear_wechat_token_cache("40001 from publisher", account_key=account_key)
             raise RuntimeError(
                 "微信返回 40001。已自动清除本地 access_token 缓存。"
                 "如果 AppID/AppSecret 确认正确，请在发布页点击“检测微信IP”刷新 token 后再发布。原始错误："

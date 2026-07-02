@@ -4,6 +4,7 @@ import {
   Database,
   ExternalLink,
   FolderOpen,
+  KeyRound,
   Plug,
   RefreshCw,
   Save,
@@ -37,6 +38,7 @@ import type {
   StorageLocations,
   TrashFileItem,
   TrashStatus,
+  WechatPublisherBindingStatus,
 } from "../api";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 import { StatusBadge } from "../components/StatusBadge";
@@ -72,6 +74,13 @@ type AsrFormState = {
   timeout: string;
 };
 
+type WechatPublisherFormState = {
+  appid: string;
+  appsecret: string;
+  accountName: string;
+  author: string;
+};
+
 const emptyForm: ApiFormState = {
   name: "",
   provider: "compatible",
@@ -95,6 +104,13 @@ const emptyAsrForm: AsrFormState = {
   model: "",
   api_key: "",
   timeout: "60",
+};
+
+const emptyWechatPublisherForm: WechatPublisherFormState = {
+  appid: "",
+  appsecret: "",
+  accountName: "",
+  author: "Bobo",
 };
 
 const storageFields: Array<{
@@ -223,6 +239,10 @@ export function SettingsWorkspace({
   const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatus>();
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseMessage, setDatabaseMessage] = useState("");
+  const [wechatPublisherStatus, setWechatPublisherStatus] = useState<WechatPublisherBindingStatus>();
+  const [wechatPublisherForm, setWechatPublisherForm] = useState<WechatPublisherFormState>(emptyWechatPublisherForm);
+  const [wechatPublisherLoading, setWechatPublisherLoading] = useState(false);
+  const [wechatPublisherMessage, setWechatPublisherMessage] = useState("");
 
   const localDiagnosticsVisible = authContext
     ? authContext.deploymentMode !== "cloud" || authContext.user?.role === "admin"
@@ -270,6 +290,77 @@ export function SettingsWorkspace({
       setDatabaseMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setDatabaseLoading(false);
+    }
+  }
+
+  function applyWechatPublisherStatus(status: WechatPublisherBindingStatus) {
+    setWechatPublisherStatus(status);
+    setWechatPublisherForm({
+      appid: status.appid || "",
+      appsecret: "",
+      accountName: status.account_name || "",
+      author: status.author || "Bobo",
+    });
+  }
+
+  async function refreshWechatPublisherBinding() {
+    setWechatPublisherLoading(true);
+    setWechatPublisherMessage("");
+    try {
+      applyWechatPublisherStatus(await settingsApi.wechatPublisherBinding());
+    } catch (error) {
+      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWechatPublisherLoading(false);
+    }
+  }
+
+  async function saveWechatPublisherBinding() {
+    setWechatPublisherLoading(true);
+    setWechatPublisherMessage("");
+    try {
+      const result = await settingsApi.saveWechatPublisherBinding({
+        appid: wechatPublisherForm.appid.trim(),
+        appsecret: wechatPublisherForm.appsecret.trim() || undefined,
+        account_name: wechatPublisherForm.accountName.trim(),
+        author: wechatPublisherForm.author.trim() || "Bobo",
+      });
+      applyWechatPublisherStatus(result);
+      setWechatPublisherMessage(language === "zh" ? "公众号绑定已保存。" : "WeChat account binding saved.");
+    } catch (error) {
+      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWechatPublisherLoading(false);
+    }
+  }
+
+  async function bindLocalWechatPublisher() {
+    setWechatPublisherLoading(true);
+    setWechatPublisherMessage("");
+    try {
+      const result = await settingsApi.bindLocalWechatPublisher(
+        wechatPublisherForm.accountName.trim() || "本地微信公众号",
+        wechatPublisherForm.author.trim() || "Bobo",
+      );
+      applyWechatPublisherStatus(result);
+      setWechatPublisherMessage(language === "zh" ? "已把本机公众号配置绑定到当前用户。" : "Bound the local WeChat account to this user.");
+    } catch (error) {
+      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWechatPublisherLoading(false);
+    }
+  }
+
+  async function refreshWechatPublisherToken() {
+    setWechatPublisherLoading(true);
+    setWechatPublisherMessage("");
+    try {
+      const result = await settingsApi.refreshWechatPublisherToken();
+      setWechatPublisherMessage(String(result.message || (result.ok ? "Token OK" : "Token check failed")));
+      await refreshWechatPublisherBinding();
+    } catch (error) {
+      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
+      setWechatPublisherLoading(false);
     }
   }
 
@@ -392,6 +483,7 @@ export function SettingsWorkspace({
         refreshQuotaStatus();
         refreshDependencyStatus();
         refreshHtmlGrabStatus();
+        refreshWechatPublisherBinding();
         if (canSeeLocalDiagnostics) {
           refreshStorageLocations();
           refreshTrashStatus();
@@ -403,6 +495,7 @@ export function SettingsWorkspace({
         refreshQuotaStatus();
         refreshDependencyStatus();
         refreshHtmlGrabStatus();
+        refreshWechatPublisherBinding();
       });
   }, []);
 
@@ -456,6 +549,89 @@ export function SettingsWorkspace({
               <Plug size={16} />
               {language === "zh" ? "配置 API" : "Configure API"}
             </button>
+          </div>
+
+          <div className="wechat-publisher-card">
+            <div className="dependency-check-title">
+              <KeyRound size={17} />
+              <h2>{language === "zh" ? "公众号发布绑定" : "WeChat publishing"}</h2>
+              <StatusBadge tone={wechatPublisherStatus?.configured ? "done" : "error"}>
+                {wechatPublisherStatus?.configured ? (language === "zh" ? "已绑定" : "Bound") : language === "zh" ? "未绑定" : "Not bound"}
+              </StatusBadge>
+            </div>
+            <p className="hint">
+              {language === "zh"
+                ? `当前用户：${wechatPublisherStatus?.username || authContext?.user?.username || "-"}；发布会进入该用户绑定公众号的草稿箱。`
+                : `Current user: ${wechatPublisherStatus?.username || authContext?.user?.username || "-"}; drafts go to this user's bound WeChat account.`}
+            </p>
+            <div className="wechat-publisher-form">
+              <label>
+                <span>{language === "zh" ? "公众号名称" : "Account name"}</span>
+                <input
+                  value={wechatPublisherForm.accountName}
+                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, accountName: event.target.value }))}
+                  placeholder={language === "zh" ? "例如：Bobo 的公众号" : "Example: Bobo's account"}
+                  autoComplete="off"
+                  name="wechat-publisher-account-name"
+                />
+              </label>
+              <label>
+                <span>AppID</span>
+                <input
+                  value={wechatPublisherForm.appid}
+                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, appid: event.target.value }))}
+                  placeholder="wx..."
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  name="wechat-publisher-appid"
+                />
+              </label>
+              <label>
+                <span>AppSecret</span>
+                <input
+                  type="password"
+                  value={wechatPublisherForm.appsecret}
+                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, appsecret: event.target.value }))}
+                  placeholder={wechatPublisherStatus?.configured ? (language === "zh" ? "留空表示不修改" : "Leave blank to keep current secret") : ""}
+                  autoComplete="new-password"
+                  name="wechat-publisher-appsecret-new"
+                />
+              </label>
+              <label>
+                <span>{language === "zh" ? "默认作者" : "Default author"}</span>
+                <input
+                  value={wechatPublisherForm.author}
+                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, author: event.target.value }))}
+                  autoComplete="off"
+                  name="wechat-publisher-author"
+                />
+              </label>
+            </div>
+            <div className="wechat-publisher-meta">
+              <span>Token: {wechatPublisherStatus?.token_cached ? (language === "zh" ? "已缓存" : "cached") : language === "zh" ? "未缓存" : "not cached"}</span>
+              {wechatPublisherStatus?.token_updated_at ? <span>{wechatPublisherStatus.token_updated_at}</span> : null}
+              {wechatPublisherStatus?.legacy_appid_masked ? <span>{language === "zh" ? "本机配置" : "Local config"}: {wechatPublisherStatus.legacy_appid_masked}</span> : null}
+            </div>
+            {wechatPublisherMessage ? <p className={isErrorMessage(wechatPublisherMessage) ? "inline-error" : "hint"}>{wechatPublisherMessage}</p> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={refreshWechatPublisherBinding} disabled={wechatPublisherLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "刷新" : "Refresh"}
+              </button>
+              <button className="secondary-button" type="button" onClick={saveWechatPublisherBinding} disabled={wechatPublisherLoading || !wechatPublisherForm.appid.trim()}>
+                <Save size={16} />
+                {language === "zh" ? "保存绑定" : "Save binding"}
+              </button>
+              <button className="secondary-button" type="button" onClick={bindLocalWechatPublisher} disabled={wechatPublisherLoading || !wechatPublisherStatus?.can_bind_local_config}>
+                <Plug size={16} />
+                {language === "zh" ? "绑定本机配置" : "Bind local config"}
+              </button>
+              <button className="secondary-button" type="button" onClick={refreshWechatPublisherToken} disabled={wechatPublisherLoading || !wechatPublisherStatus?.configured}>
+                <CheckCircle2 size={16} />
+                {language === "zh" ? "检测 Token" : "Check token"}
+              </button>
+            </div>
           </div>
 
           <div className="settings-action-card">

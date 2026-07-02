@@ -448,6 +448,18 @@ class WriterProjectPublishRequest(BaseModel):
     cover_path: str | None = None
 
 
+class WechatPublisherBindingRequest(BaseModel):
+    appid: str
+    appsecret: str | None = None
+    account_name: str = ""
+    author: str = "Bobo"
+
+
+class WechatPublisherBindLocalRequest(BaseModel):
+    account_name: str = "本地微信公众号"
+    author: str = "Bobo"
+
+
 class WriterProjectAdvanceRequest(BaseModel):
     step: str | None = None
     knowledge_ids: list[int] = []
@@ -1140,6 +1152,24 @@ def _redact_bilibili_cookie_status(payload: dict[str, object]) -> dict[str, obje
     }
 
 
+def _wechat_user_binding_context(request: Request) -> tuple[dict[str, object], str, str]:
+    storage.init_storage()
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    user = context.get("user") or {}
+    if not isinstance(user, dict) or not user.get("id"):
+        raise HTTPException(status_code=401, detail="请先登录后再配置公众号")
+    return context, str(user.get("id") or ""), str(user.get("username") or "")
+
+
+def _writer_wechat_account_key(request: Request) -> str | None:
+    context, user_id, _username = _wechat_user_binding_context(request)
+    account_key = writer_tools.wechat_account_key_for_context(context)
+    if context.get("deploymentMode") == "cloud" and not writer_tools.wechat_user_config_exists(user_id):
+        raise HTTPException(status_code=403, detail="请先在设置中心绑定自己的微信公众号")
+    return account_key
+
+
 def _knowledge_entries_for_screenshot(screenshot_id: int) -> list[dict[str, object]]:
     needle = str(int(screenshot_id))
     with storage.connect() as conn:
@@ -1506,6 +1536,48 @@ def save_workbench_settings(request: WorkbenchSettingsRequest, http_request: Req
     if _should_redact_local_settings(http_request):
         payload.pop("storage_locations", None)
     return _redact_workbench_settings_for_request(workbench_settings.save_settings(payload), http_request)
+
+
+@app.get("/api/settings/wechat-publisher")
+def get_wechat_publisher_binding(request: Request) -> dict[str, object]:
+    _context, user_id, username = _wechat_user_binding_context(request)
+    return {"ok": True, **writer_tools.wechat_binding_status(user_id, username)}
+
+
+@app.post("/api/settings/wechat-publisher")
+def save_wechat_publisher_binding(payload: WechatPublisherBindingRequest, request: Request) -> dict[str, object]:
+    _context, user_id, username = _wechat_user_binding_context(request)
+    try:
+        return {"ok": True, **writer_tools.save_wechat_binding(
+            user_id,
+            username,
+            appid=payload.appid,
+            appsecret=payload.appsecret,
+            account_name=payload.account_name,
+            author=payload.author,
+        )}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/wechat-publisher/bind-local")
+def bind_local_wechat_publisher(payload: WechatPublisherBindLocalRequest, request: Request) -> dict[str, object]:
+    _context, user_id, username = _wechat_user_binding_context(request)
+    try:
+        return {"ok": True, **writer_tools.bind_legacy_wechat_config_to_user(
+            user_id,
+            username,
+            account_name=payload.account_name,
+            author=payload.author,
+        )}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/settings/wechat-publisher/token/refresh")
+def refresh_wechat_publisher_binding_token(request: Request) -> dict[str, object]:
+    _context, user_id, _username = _wechat_user_binding_context(request)
+    return writer_tools.refresh_wechat_access_token(account_key=user_id)
 
 
 @app.post("/api/media/plan-ranges")
@@ -3586,7 +3658,7 @@ def writer_project_confirm_design(project_id: str, payload: WriterProjectDesignC
 @app.post("/api/writer/projects/{project_id}/publish/preflight")
 def writer_project_publish_preflight(project_id: str, payload: WriterProjectPublishRequest, request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能操作公众号发布预检")
+        account_key = _writer_wechat_account_key(request)
         owner_user_id = _writer_owner_scope(request)
         project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         if not project.get("html_path"):
@@ -3596,7 +3668,7 @@ def writer_project_publish_preflight(project_id: str, payload: WriterProjectPubl
         workspace = _writer_project_workspace(project_id)
         title = payload.title or str(project.get("title") or project.get("name") or "")
         digest = payload.digest if payload.digest is not None else project.get("digest")
-        result = writer_tools.publish_preflight(workspace, title, author=payload.author or "Bobo", digest=str(digest or ""), cover_path=payload.cover_path)
+        result = writer_tools.publish_preflight(workspace, title, author=payload.author or "Bobo", digest=str(digest or ""), cover_path=payload.cover_path, account_key=account_key)
         safe_digest = result.get("digest", str(digest or ""))
         writer_tools.update_project(
             project_id,
@@ -3619,7 +3691,7 @@ def writer_project_publish_preflight(project_id: str, payload: WriterProjectPubl
 @app.post("/api/writer/projects/{project_id}/publish")
 def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest, request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能发布到服务器公众号")
+        account_key = _writer_wechat_account_key(request)
         owner_user_id = _writer_owner_scope(request)
         project = _writer_load_project(project_id, owner_user_id=owner_user_id)
         if not project.get("html_path"):
@@ -3637,6 +3709,7 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
             author=author,
             digest=str(digest or ""),
             cover_path=str(cover_path) if cover_path else None,
+            account_key=account_key,
         )
         digest = preflight.get("digest", str(digest or ""))
         if not preflight["ok"]:
@@ -3648,6 +3721,7 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
             author=author,
             digest=str(digest or ""),
             cover_path=str(cover_path) if cover_path else None,
+            account_key=account_key,
         )
         writer_tools.update_project(
             project_id,
@@ -3900,7 +3974,7 @@ def writer_format(payload: WriterFormatRequest, request: Request) -> dict[str, o
 @app.post("/api/writer/publish")
 def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能发布到服务器公众号")
+        account_key = _writer_wechat_account_key(request)
         workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         preflight = writer_tools.publish_preflight(
             workspace,
@@ -3908,17 +3982,19 @@ def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str,
             author=payload.author or "Bobo",
             digest=payload.digest,
             cover_path=payload.cover_path,
+            account_key=account_key,
         )
         digest = preflight.get("digest", payload.digest or "")
         if not preflight["ok"]:
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
-        result = writer_tools.publish_draft(
-            workspace,
-            payload.title,
-            author=payload.author or "Bobo",
-            digest=str(digest or ""),
-            cover_path=payload.cover_path,
-        )
+        publish_kwargs = {
+            "author": payload.author or "Bobo",
+            "digest": str(digest or ""),
+            "cover_path": payload.cover_path,
+        }
+        if account_key:
+            publish_kwargs["account_key"] = account_key
+        result = writer_tools.publish_draft(workspace, payload.title, **publish_kwargs)
         return {"workspace": storage.storage_relative(workspace), "preflight": preflight, **result}
     except HTTPException:
         raise
@@ -3929,7 +4005,7 @@ def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str,
 @app.post("/api/writer/publish/preflight")
 def writer_publish_preflight(payload: WriterPublishRequest, request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能操作公众号发布预检")
+        account_key = _writer_wechat_account_key(request)
         workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
         result = writer_tools.publish_preflight(
             workspace,
@@ -3937,6 +4013,7 @@ def writer_publish_preflight(payload: WriterPublishRequest, request: Request) ->
             author=payload.author or "Bobo",
             digest=payload.digest,
             cover_path=payload.cover_path,
+            account_key=account_key,
         )
         return {"workspace": storage.storage_relative(workspace), **result}
     except HTTPException:
@@ -3948,8 +4025,7 @@ def writer_publish_preflight(payload: WriterPublishRequest, request: Request) ->
 @app.get("/api/writer/publish/ip-check")
 def writer_publish_ip_check(request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能检测服务器公众号 IP")
-        return writer_tools.check_wechat_publish_ip()
+        return writer_tools.check_wechat_publish_ip(account_key=_writer_wechat_account_key(request))
     except HTTPException:
         raise
     except Exception as exc:
@@ -3959,8 +4035,7 @@ def writer_publish_ip_check(request: Request) -> dict[str, object]:
 @app.post("/api/writer/publish/token/refresh")
 def writer_publish_token_refresh(request: Request) -> dict[str, object]:
     try:
-        _require_local_or_cloud_admin(request, "公网内测普通用户不能刷新服务器公众号 Token")
-        return writer_tools.refresh_wechat_access_token()
+        return writer_tools.refresh_wechat_access_token(account_key=_writer_wechat_account_key(request))
     except HTTPException:
         raise
     except Exception as exc:

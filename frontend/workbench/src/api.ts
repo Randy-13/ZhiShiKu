@@ -130,6 +130,34 @@ export type DatabaseStatus = {
   duplicate_hashes?: Record<string, Array<Record<string, unknown>>>;
 };
 
+export type WechatPublisherBindingStatus = {
+  ok?: boolean;
+  configured: boolean;
+  account_key?: string;
+  username?: string;
+  account_name?: string;
+  author?: string;
+  appid?: string;
+  appid_masked?: string;
+  appsecret?: string;
+  config_path?: string;
+  token_cached?: boolean;
+  token_updated_at?: string;
+  updated_at?: string;
+  can_bind_local_config?: boolean;
+  legacy_appid?: string;
+  legacy_appid_masked?: string;
+  message?: string;
+  error?: string;
+};
+
+export type WechatPublisherBindingInput = {
+  appid: string;
+  appsecret?: string;
+  account_name?: string;
+  author?: string;
+};
+
 type LibraryFilePayload = Record<string, unknown> & {
   id?: string;
   title?: string;
