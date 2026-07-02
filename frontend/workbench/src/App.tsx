@@ -89,6 +89,7 @@ function WorkbenchApp({
     generateWriterImages,
     retryWriterImageItems,
     formatWriterProject,
+    sanitizeWriterPublishHtml,
     confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,
@@ -527,6 +528,7 @@ function WorkbenchApp({
             onGenerateImages={generateWriterImages}
             onRetryImageItems={retryWriterImageItems}
             onFormat={formatWriterProject}
+            onSanitizePublishHtml={sanitizeWriterPublishHtml}
             onConfirmDesign={confirmWriterDesign}
             onPreflight={preflightWriterProject}
             onPublish={publishWriterProject}
@@ -559,7 +561,16 @@ function WorkbenchApp({
   })();
 
   const activeItem = navItems.find((item) => item.id === activeWorkspace) ?? navItems[0];
-  const runningCount = activeJobCount || Number(isLearning) + Number(isWriting) + activities.filter((event) => event.status === "running").length;
+  const localRunningCount =
+    Number(Boolean(collectInputBusy)) +
+    Number(isCollectingReadable) +
+    Number(isSavingRawDraft) +
+    Number(isLearning) +
+    Number(isMining) +
+    Number(isSavingPerspective) +
+    Number(isWriting) +
+    activities.filter((event) => event.status === "running").length;
+  const runningCount = activeJobCount + localRunningCount;
   const logout = useCallback(async () => {
     try {
       await authApi.logout();

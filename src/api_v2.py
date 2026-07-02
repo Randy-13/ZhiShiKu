@@ -31,7 +31,7 @@ import storage
 import web_settings
 import writer_tools
 from markdown_writer import render_knowledge_markdown
-from media_transcriber import transcribe_audio_url
+from media_transcriber import transcribe_audio, transcribe_audio_url
 from src.materials.entities import MaterialType
 from src.auth import (
     create_invitation,
@@ -61,6 +61,8 @@ router = APIRouter(prefix="/api/v2", tags=["v2-contracts"])
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
+
+SCREENSHOT_POLISH_TIMEOUT_SECONDS = 45.0
 
 
 class CollectTextRequest(BaseModel):
@@ -329,6 +331,14 @@ class AsrSettingRequest(BaseModel):
     timeout: float | None = None
 
 
+class HtmlGrabCheckRequest(BaseModel):
+    url: HttpUrl | None = None
+
+
+class HtmlGrabAuthorizeRequest(BaseModel):
+    url: HttpUrl | None = None
+
+
 @auth_router.get("/me")
 def auth_me(request: Request) -> dict[str, object]:
     storage.init_storage()
@@ -587,7 +597,7 @@ def settings_api() -> dict[str, object]:
 def save_settings_api(request: ApiSettingRequest) -> dict[str, object]:
     try:
         return success_payload(data={"ok": True, **save_list_setting(api_settings, request.model_dump())})
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
 
@@ -626,7 +636,7 @@ def settings_image() -> dict[str, object]:
 def save_settings_image(request: ImageApiSettingRequest) -> dict[str, object]:
     try:
         return success_payload(data={"ok": True, **save_list_setting(image_api_settings, request.model_dump())})
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
 
@@ -689,12 +699,48 @@ def test_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
     try:
         return success_payload(
             data={
-                **test_asr_setting_payload(request.model_dump(), transcribe_audio_url_fn=transcribe_audio_url),
+                **test_asr_setting_payload(
+                    request.model_dump(),
+                    transcribe_audio_url_fn=transcribe_audio_url,
+                    transcribe_audio_fn=transcribe_audio,
+                ),
             }
         )
     except (ValueError, RuntimeError) as exc:
         asr_settings.mark_test_result(False, str(exc))
         return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/settings/html-grab-check")
+def settings_html_grab_check(request: HtmlGrabCheckRequest) -> dict[str, object]:
+    target_url = str(request.url).strip() if request.url else ""
+    try:
+        return success_payload(data=_html_grab_check_status(target_url))
+    except Exception as exc:
+        return success_payload(
+            data={
+                "ok": False,
+                "target_url": target_url,
+                "message": str(exc),
+                "authorization_required": False,
+            }
+        )
+
+
+@router.post("/settings/html-grab-authorize")
+def settings_html_grab_authorize(request: HtmlGrabAuthorizeRequest) -> dict[str, object]:
+    target_url = str(request.url).strip() if request.url else "about:blank"
+    try:
+        _open_edge_remote_debugging_page(target_url)
+        return success_payload(
+            data={
+                "ok": True,
+                "target_url": target_url,
+                "message": "Opened the Edge dev session window. Log in there only if the target site needs it.",
+            }
+        )
+    except Exception as exc:
+        return success_payload(data={"ok": False, "target_url": target_url, "error": str(exc), "message": str(exc)})
 
 
 @router.get("/libraries/{library_id}/files")
@@ -849,14 +895,14 @@ def inspect_link(request: InspectLinkRequest, http_request: Request) -> dict[str
 
 @router.post("/collect/browser-extract-link")
 def browser_extract_link(request: BrowserExtractLinkRequest, http_request: Request) -> dict[str, object]:
-    _consume_daily_quota(_request_context(http_request), "link_parse_daily", "链接解析")
+    _consume_daily_quota(_request_context(http_request), "link_parse_daily", "link parse")
     url = str(request.url)
     inspection = _inspect_link(url)
     link_type = str(inspection.get("link_type") or "")
     if link_type in {"platform_douyin", "platform_bilibili", "platform_wechat_channels"}:
-        return success_payload(data={"ok": False, "error": "音视频平台链接请放入「音视频」入口读取。"})
+        return success_payload(data={"ok": False, "error": "Media platform links should be read through the media entry."})
     if link_type == "pdf":
-        return success_payload(data={"ok": False, "error": "PDF 链接请使用文档解析流程，不需要浏览器提取。"})
+        return success_payload(data={"ok": False, "error": "PDF links should use the document extraction flow."})
 
     try:
         fetched = _browser_extract_webpage_text(
@@ -870,13 +916,23 @@ def browser_extract_link(request: BrowserExtractLinkRequest, http_request: Reque
     except (OSError, subprocess.CalledProcessError, FileNotFoundError, TimeoutError, ValueError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
+    fetched.update(
+        {
+            "source": str(inspection.get("source") or fetched.get("source") or ""),
+            "author": str(inspection.get("author") or fetched.get("author") or ""),
+            "published_at": str(inspection.get("published_at") or fetched.get("published_at") or ""),
+            "link_type": str(fetched.get("link_type") or link_type or "browser_webpage"),
+            "access_status": str(fetched.get("access_status") or "accessible"),
+            "extraction_strategy": str(fetched.get("extraction_strategy") or "browser_automation_wait_scroll"),
+        }
+    )
     title = request.title.strip() or fetched.get("title") or str(inspection.get("title") or url)
-    markdown = _render_link_markdown_block(1, url, title, fetched)
+    markdown = _render_link_markdown_block(1, url, str(title), fetched)
     return success_payload(
         data={
             "ok": True,
             "title": title,
-            "note": f"浏览器提取：等待 {fetched.get('wait_ms', request.wait_ms)}ms，滚动 {fetched.get('scroll_times', request.scroll_times)} 次。",
+            "note": str(fetched.get("extraction_strategy") or "browser extraction"),
             "markdown": markdown,
             "source": fetched.get("source") or str(inspection.get("source") or url),
             "item": fetched,
@@ -2774,7 +2830,11 @@ def _polish_raw_material(material_type: str, body: str, fallback_title: str, pre
 
     response["enabled"] = True
     try:
-        polished = deepseek_client.polish_raw_material(body, material_type=material_type)
+        polished = deepseek_client.polish_raw_material(
+            body,
+            material_type=material_type,
+            setting=_polish_runtime_setting(material_type),
+        )
     except Exception as exc:
         response["status"] = "failed"
         response["error"] = deepseek_client.explain_error(exc)
@@ -2790,6 +2850,22 @@ def _polish_raw_material(material_type: str, body: str, fallback_title: str, pre
     response["status"] = "completed"
     result["extra_meta"] = {"raw_polish": "llm"}
     return result
+
+
+def _polish_runtime_setting(material_type: str) -> dict[str, object] | None:
+    if material_type != "screenshot":
+        return None
+    try:
+        resolved = dict(deepseek_client.current_setting())
+    except Exception:
+        return None
+    try:
+        timeout = float(resolved.get("timeout") or SCREENSHOT_POLISH_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        timeout = SCREENSHOT_POLISH_TIMEOUT_SECONDS
+    resolved["timeout"] = max(5.0, min(timeout, SCREENSHOT_POLISH_TIMEOUT_SECONDS))
+    resolved["max_retries"] = 0
+    return resolved
 
 
 def _write_raw_markdown(
@@ -2842,12 +2918,33 @@ def _extract_queue_text(material_type: str, items: list[CollectQueueItem], parse
 
     if material_type == "screenshot":
         screenshots = [storage.get_screenshot(int(item.id)) for item in items if item.id is not None]
-        image_paths = []
+        image_paths: list[Path] = []
+        sources: list[str] = []
+        errors: list[str] = []
         for screenshot in screenshots:
             path = storage.resolve_root_path(screenshot.get("image_path"))
-            if path:
+            label = str(screenshot.get("image_path") or screenshot.get("title") or screenshot.get("id") or "")
+            if path and path.exists():
                 image_paths.append(path)
-        return ocr_client.recognize_screenshots(image_paths), [item.get("image_path") or "" for item in screenshots], []
+                sources.append(label)
+            else:
+                errors.append(f"{label}: image file not found")
+        if not image_paths:
+            return "", sources, errors
+        if parser_mode == "ai_vision":
+            return deepseek_client.recognize_screenshots_with_ai(
+                image_paths,
+                setting=deepseek_client.current_setting(),
+            ), sources, errors
+        try:
+            return ocr_client.recognize_screenshots(image_paths), sources, errors
+        except Exception as exc:
+            logger.warning("Local screenshot OCR failed, falling back to AI vision: %s", exc)
+            return deepseek_client.recognize_screenshots_with_ai(
+                image_paths,
+                setting=deepseek_client.current_setting(),
+            ), sources, errors
+
 
     if material_type == "document":
         return _extract_document_queue(items, parser_mode=parser_mode)
@@ -2988,6 +3085,8 @@ def _is_generic_raw_title(title: str) -> bool:
         return True
     if re.fullmatch(r"douyin\s+\d+", normalized):
         return True
+    if _looks_like_generic_filename(normalized):
+        return True
     generic_tokens = (
         "test",
         "web link",
@@ -3006,6 +3105,36 @@ def _is_generic_raw_title(title: str) -> bool:
         "网页链接原料",
     )
     return any(token in normalized for token in generic_tokens)
+
+
+def _looks_like_generic_filename(title: str) -> bool:
+    match = re.fullmatch(r"([^\\/]+)\.([a-z0-9]{2,5})", title)
+    if not match:
+        return False
+    stem = re.sub(r"[\s._-]+", "", match.group(1).lower())
+    stem = re.sub(r"\d+", "", stem)
+    if not stem:
+        return True
+    generic_stems = (
+        "image",
+        "img",
+        "screenshot",
+        "screen",
+        "shot",
+        "snapshot",
+        "clip",
+        "clipboard",
+        "capture",
+        "photo",
+        "picture",
+        "scan",
+        "document",
+        "doc",
+        "file",
+        "paste",
+        "pastedimage",
+    )
+    return any(stem == token or stem.startswith(token) for token in generic_stems)
 
 
 def _extract_topic_from_raw_markdown(body: str) -> str:
@@ -3163,6 +3292,21 @@ def _extract_link_text(url: str, item: CollectQueueItem, allow_browser: bool = T
     inspection = _inspect_link(url)
     link_type = str(inspection.get("link_type") or item.link_type or "")
     if link_type == "platform_wechat":
+        try:
+            fetched = _agent_reach_fetch_webpage_text(url)
+            fetched.update(
+                {
+                    "source": str(inspection.get("source") or fetched.get("source") or ""),
+                    "author": str(inspection.get("author") or fetched.get("author") or ""),
+                    "published_at": str(inspection.get("published_at") or fetched.get("published_at") or ""),
+                    "link_type": "platform_wechat",
+                    "access_status": "accessible",
+                    "extraction_strategy": str(fetched.get("extraction_strategy") or "agent_reach_jina_reader"),
+                }
+            )
+            return fetched
+        except Exception as exc:
+            logger.warning("Agent Reach web reader failed for WeChat article %s: %s", url, exc)
         return _extract_wechat_article_text(url)
     if link_type in {"platform_douyin", "platform_bilibili", "platform_wechat_channels"}:
         raise ValueError("音视频平台链接请放入「音视频」入口读取，不应作为普通网页链接提取。")
@@ -3350,7 +3494,11 @@ def _agent_browser_json(command: str, connection_args: list[str], *args: str) ->
 
 
 def _extract_wechat_article_text(url: str) -> dict[str, str]:
-    data = _browser_extract_article_payload(url)
+    try:
+        data = _browser_extract_article_payload(url)
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("WeChat browser extraction failed for %s, falling back to static web text: %s", url, exc)
+        return _extract_wechat_static_text(url)
     title = _collapse_space(str(data.get("title") or "微信公众号文章"))
     account_name = _collapse_space(str(data.get("account_name") or "mp.weixin.qq.com"))
     author = _collapse_space(str(data.get("author") or ""))
@@ -3375,6 +3523,25 @@ def _extract_wechat_article_text(url: str) -> dict[str, str]:
     }
 
 
+
+def _extract_wechat_static_text(url: str) -> dict[str, str]:
+    fetched = _fetch_url_bytes(url, max_bytes=2_000_000)
+    content_type = str(fetched["content_type"])
+    html_text = _decode_response_text(bytes(fetched["body"]), content_type)
+    title = _html_title(html_text) or "微信公众号文章"
+    text = _html_to_text(html_text)
+    if len(text.strip()) < 80:
+        raise ValueError("微信公众号正文提取为空或过短；agent-reach、浏览器和静态网页提取均未拿到正文。")
+    return {
+        "title": title,
+        "text": text,
+        "source": urllib.parse.urlparse(url).netloc,
+        "author": _extract_meta(html_text, ["author", "article:author"]),
+        "published_at": _extract_meta(html_text, ["article:published_time", "publishdate", "date", "pubdate"]),
+        "link_type": "platform_wechat",
+        "access_status": "accessible",
+        "extraction_strategy": "static_fetch_after_wechat_browser_error",
+    }
 def _browser_extract_webpage_text(
     url: str,
     title: str = "",
@@ -3519,14 +3686,7 @@ def _agent_browser_extract_article_payload(
     wait_value = str(_bounded_int(wait_ms, 0, 30000))
     scroll_count = _bounded_int(scroll_times, 0, 30)
     pause_value = str(_bounded_int(scroll_pause_ms, 0, 5000))
-    subprocess.run(
-        [command, *connection_args, "open", url],
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        check=True,
-        timeout=60,
-    )
+    _agent_browser_open_new_page(command, connection_args, url)
     subprocess.run(
         [command, *connection_args, "wait", wait_value],
         text=True,
@@ -3607,15 +3767,18 @@ def _agent_browser_command() -> str:
 
 
 def _agent_browser_connection_args(command: str) -> list[str]:
-    probe = subprocess.run(
-        [command, "--auto-connect", "get", "url"],
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        timeout=15,
-    )
-    if probe.returncode == 0:
-        return ["--auto-connect"]
+    try:
+        probe = subprocess.run(
+            [command, "--auto-connect", "get", "url"],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=15,
+        )
+        if probe.returncode == 0:
+            return ["--auto-connect"]
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("agent-browser auto-connect probe failed, falling back to project Edge CDP: %s", exc)
     _launch_edge_remote_debugging()
     return ["--cdp", "9222"]
 
@@ -3636,6 +3799,146 @@ def _launch_edge_remote_debugging() -> None:
         stderr=subprocess.DEVNULL,
     )
     time.sleep(2)
+
+
+def _open_edge_remote_debugging_page(url: str) -> None:
+    _launch_edge_remote_debugging()
+    edge_path = _edge_executable()
+    user_data_dir = storage.ROOT / "browser_profile" / "edge-remote-debugging"
+    target_url = url.strip() if url.strip() else "about:blank"
+    subprocess.Popen(
+        [
+            edge_path,
+            f"--user-data-dir={user_data_dir}",
+            target_url,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _agent_browser_open_new_page(command: str, connection_args: list[str], url: str) -> None:
+    candidates = [
+        [command, *connection_args, "new-tab", url],
+        [command, *connection_args, "open", "--new-tab", url],
+        [command, *connection_args, "open", url],
+    ]
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            subprocess.run(
+                candidate,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("agent-browser could not open a new page")
+
+
+def _html_grab_check_status(url: str) -> dict[str, object]:
+    result: dict[str, object] = {
+        "ok": False,
+        "target_url": url,
+        "authorization_required": False,
+        "message": "HTML grab check has not completed yet.",
+        "checks": [],
+    }
+    checks: list[dict[str, object]] = []
+
+    if url:
+        try:
+            fetched = _fetch_url_bytes(url, max_bytes=500_000)
+            html_text = _decode_response_text(bytes(fetched["body"]), str(fetched["content_type"]))
+            login_required = _looks_like_login_wall(html_text, str(fetched.get("final_url") or url))
+            checks.append(
+                {
+                    "key": "direct_fetch",
+                    "label": "Direct HTML fetch",
+                    "ok": len(_html_to_text(html_text).strip()) >= 80,
+                    "message": "Direct fetch is available." if not login_required else "Direct fetch works, but the page appears to need login or authorization.",
+                    "authorization_required": login_required,
+                }
+            )
+            if login_required:
+                result["authorization_required"] = True
+        except Exception as exc:
+            checks.append(
+                {
+                    "key": "direct_fetch",
+                    "label": "Direct HTML fetch",
+                    "ok": False,
+                    "message": str(exc),
+                    "authorization_required": False,
+                }
+            )
+
+        try:
+            fetched = _agent_reach_fetch_webpage_text(url)
+            checks.append(
+                {
+                    "key": "agent_reach",
+                    "label": "Agent Reach web reader",
+                    "ok": len(str(fetched.get("text") or "").strip()) >= 80,
+                    "message": "Agent Reach is available.",
+                    "authorization_required": False,
+                }
+            )
+        except Exception as exc:
+            checks.append(
+                {
+                    "key": "agent_reach",
+                    "label": "Agent Reach web reader",
+                    "ok": False,
+                    "message": str(exc),
+                    "authorization_required": False,
+                }
+            )
+
+    try:
+        command = _agent_browser_command()
+        connection_args = _agent_browser_connection_args(command)
+        checks.append(
+            {
+                "key": "browser_session",
+                "label": "Edge browser session",
+                "ok": True,
+                "message": "Browser extraction can start. Open the Edge dev session if the site is restricted.",
+                "authorization_required": True,
+                "auth": "edge_authorization",
+            }
+        )
+        result["authorization_required"] = True
+        result["browser_connection"] = " ".join(connection_args)
+    except Exception as exc:
+        checks.append(
+            {
+                "key": "browser_session",
+                "label": "Edge browser session",
+                "ok": False,
+                "message": str(exc),
+                "authorization_required": True,
+                "auth": "edge_authorization",
+            }
+        )
+        result["authorization_required"] = True
+
+    result["checks"] = checks
+    result["ok"] = any(bool(item.get("ok")) for item in checks)
+    if result["authorization_required"]:
+        result["message"] = "Some webpages may require a live Edge dev session before HTML grabbing works."
+    elif result["ok"]:
+        result["message"] = "HTML grabbing is available."
+    else:
+        result["message"] = "HTML grabbing is currently unavailable. Check browser access and page permissions."
+    return result
 
 
 def _edge_executable() -> str:
@@ -3664,6 +3967,12 @@ def _parse_agent_browser_json(output: str) -> dict[str, object]:
             parsed = json.loads(candidate)
             if isinstance(parsed, dict):
                 return parsed
+            if isinstance(parsed, str):
+                nested = parsed.strip()
+                if nested.startswith("{") and nested.endswith("}"):
+                    nested_parsed = json.loads(nested)
+                    if isinstance(nested_parsed, dict):
+                        return nested_parsed
         except json.JSONDecodeError:
             continue
     raise ValueError("agent-browser 没有返回可解析的文章 JSON")

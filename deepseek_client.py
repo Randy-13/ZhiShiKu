@@ -5,6 +5,8 @@ import json
 import mimetypes
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -81,9 +83,20 @@ def client(setting: dict[str, Any] | None = None) -> OpenAI:
     )
 
 
+def is_anthropic_compatible(setting: dict[str, Any] | None = None) -> bool:
+    resolved = current_setting(setting)
+    provider = str(resolved.get("provider") or "").lower()
+    base_url = str(resolved.get("base_url") or "").lower()
+    return provider == "minimax" or "minimaxi.com/anthropic" in base_url
+
+
 def chat_url(setting: dict[str, Any] | None = None) -> str:
     resolved = current_setting(setting)
     base = resolved["base_url"].rstrip("/")
+    if is_anthropic_compatible(resolved):
+        if base.endswith("/messages"):
+            return base
+        return base + "/messages"
     if base.endswith("/chat/completions"):
         return base
     if base.endswith("/v1"):
@@ -145,12 +158,41 @@ def parse_json_model(
     }
     try:
         content = sdk_chat_completion([system, *messages], json_mode=True, setting=resolved)
-        return model_type.model_validate_json(content)
+        return model_type.model_validate_json(_normalize_json_response_text(content))
     except APIConnectionError:
         content = curl_chat_completion([system, *messages], json_mode=True, setting=resolved)
-        return model_type.model_validate_json(content)
+        return model_type.model_validate_json(_normalize_json_response_text(content))
     except Exception as exc:
         raise RuntimeError(explain_error(exc, resolved)) from exc
+
+
+def _normalize_json_response_text(content: str) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return "{}"
+
+    text = re.sub(r"(?is)<think\b[^>]*>.*?</think>", "", text).strip()
+    text = re.sub(r"(?is)^```(?:json)?\s*", "", text)
+    text = re.sub(r"(?is)\s*```$", "", text).strip()
+
+    if text.startswith("{") or text.startswith("["):
+        return text
+
+    start_positions = [pos for pos in (text.find("{"), text.find("[")) if pos >= 0]
+    if not start_positions:
+        return text
+
+    start = min(start_positions)
+    candidate = text[start:].strip()
+    if candidate.startswith("{"):
+        end = candidate.rfind("}")
+        if end >= 0:
+            return candidate[: end + 1]
+    if candidate.startswith("["):
+        end = candidate.rfind("]")
+        if end >= 0:
+            return candidate[: end + 1]
+    return candidate
 
 
 def sdk_chat_completion(
@@ -159,6 +201,8 @@ def sdk_chat_completion(
     setting: dict[str, Any] | None = None,
 ) -> str:
     resolved = current_setting(setting)
+    if is_anthropic_compatible(resolved):
+        return anthropic_chat_completion(messages, json_mode=json_mode, setting=resolved)
     request: dict[str, Any] = {
         "model": resolved["model"],
         "messages": messages,
@@ -169,6 +213,70 @@ def sdk_chat_completion(
     response = client(resolved).chat.completions.create(**request)
     return response.choices[0].message.content or "{}"
 
+
+def anthropic_chat_completion(
+    messages: list[dict[str, str]],
+    json_mode: bool = False,
+    setting: dict[str, Any] | None = None,
+) -> str:
+    resolved = ensure_credentials(setting)
+    system_messages = [item.get("content", "") for item in messages if item.get("role") == "system"]
+    conversation = [
+        {
+            "role": item.get("role") if item.get("role") in {"user", "assistant"} else "user",
+            "content": item.get("content", ""),
+        }
+        for item in messages
+        if item.get("role") != "system"
+    ]
+    if not conversation:
+        conversation = [{"role": "user", "content": "Reply with ok."}]
+    system = "\n\n".join(part for part in system_messages if part)
+    if json_mode:
+        system = (system + "\n\n" if system else "") + "Output valid JSON only."
+    payload: dict[str, Any] = {
+        "model": resolved["model"],
+        "messages": conversation,
+        "max_tokens": 2048,
+        "temperature": 0.2,
+    }
+    if system:
+        payload["system"] = system
+    request = urllib.request.Request(
+        chat_url(resolved),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": resolved["api_key"],
+            "Authorization": f"Bearer {resolved['api_key']}",
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=float(resolved.get("timeout") or config.LLM_TIMEOUT)) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        response_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"MiniMax Anthropic HTTP {exc.code}: {response_text[:1000]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"MiniMax Anthropic request failed: {exc}") from exc
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MiniMax Anthropic returned non-JSON content: {response_text[:500]}") from exc
+    if "error" in data:
+        raise RuntimeError(f"MiniMax Anthropic API error: {data['error']}")
+    content = data.get("content")
+    if isinstance(content, list):
+        texts = [item.get("text", "") for item in content if isinstance(item, dict)]
+        return "\n".join(text for text in texts if text) or "{}"
+    if isinstance(content, str):
+        return content
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"MiniMax Anthropic response structure is unexpected: {response_text[:500]}") from exc
 
 def curl_chat_completion(
     messages: list[dict[str, str]],
@@ -342,7 +450,8 @@ Hard requirements:
 4. Do not add external facts, explanations, opinions, or background.
 5. Use headings only when the source clearly has title/sections or the text naturally implies numbered sections.
 6. If the source is multiple screenshots/pages from the same article, merge them into one continuous readable document.
-7. Output Chinese when the source is Chinese; otherwise keep the source language.
+7. Do not preserve screenshot-style visual hard wraps inside ordinary paragraphs; rewrite them into natural Markdown paragraphs while keeping paragraph boundaries.
+8. Output Chinese when the source is Chinese; otherwise keep the source language.
 
 Material type: {material_type}
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -11,28 +12,50 @@ import config
 import storage
 
 
-def _select_settings_path(filename: str) -> Path:
+def _settings_path_candidates(filename: str) -> list[Path]:
     candidates = [
         storage.DATA_DIR / filename,
         storage.STORAGE_ROOT / filename,
         storage.ROOT / "data" / "runtime" / filename,
+        storage.SYSTEM_DATA_DIR / filename,
     ]
+    deduped: list[Path] = []
+    seen: set[str] = set()
     for path in candidates:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                path.open("a", encoding="utf-8").close()
-            else:
-                probe = path.with_suffix(path.suffix + ".probe")
-                probe.write_text("ok", encoding="utf-8")
-                probe.unlink(missing_ok=True)
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(path)
+    return deduped
+
+
+def _path_allows_direct_write(path: Path) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            with path.open("r+", encoding="utf-8"):
+                pass
+        else:
+            probe = path.with_name(f".{path.name}.{uuid.uuid4().hex}.probe")
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _select_settings_path(filename: str) -> Path:
+    candidates = _settings_path_candidates(filename)
+    for path in candidates:
+        if _path_allows_direct_write(path):
             return path
-        except OSError:
-            continue
-    return storage.ROOT / "data" / "runtime" / filename
+    fallback = storage.SYSTEM_DATA_DIR / filename
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
-SETTINGS_PATH = _select_settings_path("api_settings.json")
+SETTINGS_FILENAME = "api_settings.json"
+SETTINGS_PATH = _select_settings_path(SETTINGS_FILENAME)
 
 
 @dataclass
@@ -74,6 +97,14 @@ TEMPLATES = [
         "model": "填入中转站支持的模型名",
         "api_key_placeholder": "填入中转站 Key",
     },
+    {
+        "id": "minimax-m3",
+        "name": "MiniMax-M3",
+        "provider": "minimax",
+        "base_url": "https://api.minimaxi.com/anthropic",
+        "model": "MiniMax-M3",
+        "api_key_placeholder": "MiniMax API Key",
+    },
 ]
 
 
@@ -114,26 +145,97 @@ def _default_data() -> dict[str, Any]:
     return {"active_id": setting.id, "settings": [asdict(setting)]}
 
 
-def load_data() -> dict[str, Any]:
-    if not SETTINGS_PATH.exists():
-        data = _default_data()
-        if data["settings"]:
-            save_data(data)
-        return data
-    try:
-        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {"active_id": None, "settings": []}
+def _normalize_data(data: dict[str, Any]) -> dict[str, Any]:
     data.setdefault("active_id", None)
     data.setdefault("settings", [])
     return data
 
 
+def _read_settings_file(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return {"active_id": None, "settings": []}
+    return _normalize_data(data)
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
+
+
+def load_data() -> dict[str, Any]:
+    candidates = _settings_path_candidates(SETTINGS_FILENAME)
+    if SETTINGS_PATH not in candidates:
+        selected_data = _read_settings_file(SETTINGS_PATH)
+        if selected_data is None:
+            selected_data = _default_data()
+            if selected_data["settings"]:
+                save_data(selected_data)
+        return _normalize_data(selected_data)
+
+    selected_data = _read_settings_file(SETTINGS_PATH)
+    selected_mtime = _path_mtime(SETTINGS_PATH) if selected_data is not None else -1.0
+    for path in candidates:
+        if path == SETTINGS_PATH:
+            continue
+        data = _read_settings_file(path)
+        if data is None:
+            continue
+        mtime = _path_mtime(path)
+        if selected_data is None or mtime > selected_mtime:
+            selected_data = data
+            selected_mtime = mtime
+    if selected_data is None:
+        selected_data = _default_data()
+        if selected_data["settings"]:
+            save_data(selected_data)
+    return _normalize_data(selected_data)
+
+
+def _save_data_to_path(path: Path, serialized: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_error: OSError | None = None
+    for attempt in range(6):
+        tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(serialized, encoding="utf-8")
+            tmp_path.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            try:
+                path.write_text(serialized, encoding="utf-8")
+                return
+            except PermissionError as direct_exc:
+                last_error = direct_exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        time.sleep(0.05 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
 def save_data(data: dict[str, Any]) -> None:
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = SETTINGS_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(SETTINGS_PATH)
+    global SETTINGS_PATH
+    serialized = json.dumps(data, ensure_ascii=False, indent=2)
+    errors: list[OSError] = []
+    candidates = [SETTINGS_PATH, *[path for path in _settings_path_candidates(SETTINGS_FILENAME) if path != SETTINGS_PATH]]
+    for path in candidates:
+        try:
+            _save_data_to_path(path, serialized)
+            SETTINGS_PATH = path
+            return
+        except OSError as exc:
+            errors.append(exc)
+    if errors:
+        raise errors[-1]
 
 
 def sanitize(setting: dict[str, Any]) -> dict[str, Any]:

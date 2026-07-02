@@ -24,10 +24,11 @@ import storage
 import workbench_settings
 import writer_tools
 from markdown_writer import render_creation_strategy_markdown, render_knowledge_markdown
-from media_transcriber import transcribe_audio_url
+from media_transcriber import transcribe_audio, transcribe_audio_url
 from schemas import DocumentPlanResult, DocumentPlanSegment, KnowledgeResult
 from src.auth import current_context, is_cloud_mode
 from src import quotas as quota_service
+import src.api_v2 as api_v2
 from src.api_v2 import auth_router, jobs_router, router as api_v2_router
 from src.pages import router as pages_router
 from src.settings_helpers import (
@@ -331,6 +332,8 @@ class WriterImagesRequest(BaseModel):
     workspace: str
     cover_prompt: str | None = None
     content_image_prompts: list[str] = []
+    cover_aspect_ratio: str | None = None
+    content_aspect_ratio: str | None = None
 
 
 class WriterImageSuggestionsRequest(BaseModel):
@@ -347,7 +350,11 @@ class WriterFormatRequest(BaseModel):
 
 def _test_asr_setting_payload_or_400(payload: dict[str, object]) -> dict[str, object]:
     try:
-        return test_asr_setting_payload(payload, transcribe_audio_url_fn=transcribe_audio_url)
+        return test_asr_setting_payload(
+            payload,
+            transcribe_audio_url_fn=transcribe_audio_url,
+            transcribe_audio_fn=transcribe_audio,
+        )
     except ValueError as exc:
         asr_settings.mark_test_result(False, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -372,6 +379,12 @@ class WriterProjectCreateRequest(BaseModel):
     library_files: list[dict[str, object]] = []
     writing_strategy: str = ""
     design_strategy: str = ""
+
+
+class WriterWritingStrategySaveRequest(BaseModel):
+    id: str | None = None
+    name: str
+    body: str
 
 
 class WriterProjectKnowledgeRequest(BaseModel):
@@ -407,12 +420,15 @@ class WriterProjectImageSuggestionsRequest(BaseModel):
 class WriterProjectImagesRequest(BaseModel):
     cover_prompt: str | None = None
     content_image_prompts: list[str] = []
+    cover_aspect_ratio: str | None = None
+    content_aspect_ratio: str | None = None
 
 
 class WriterProjectImageItemRequest(BaseModel):
     kind: str
     prompt: str
     index: int | None = None
+    aspect_ratio: str | None = None
 
 
 class WriterProjectFormatRequest(BaseModel):
@@ -440,6 +456,8 @@ class WriterProjectAdvanceRequest(BaseModel):
     markdown: str | None = None
     cover_prompt: str | None = None
     content_image_prompts: list[str] = []
+    cover_aspect_ratio: str | None = None
+    content_aspect_ratio: str | None = None
     title: str | None = None
     author: str = "Bobo"
     digest: str | None = None
@@ -523,7 +541,7 @@ def list_api_settings() -> dict[str, object]:
 def save_api_setting(request: ApiSettingSaveRequest) -> dict[str, object]:
     try:
         return save_list_setting(api_settings, request.model_dump())
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -582,7 +600,7 @@ def list_image_api_settings() -> dict[str, object]:
 def save_image_api_setting(request: ImageApiSettingSaveRequest) -> dict[str, object]:
     try:
         return save_list_setting(image_api_settings, request.model_dump())
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -833,13 +851,92 @@ def _strip_extraction_wrappers(text: str) -> str:
     return cleaned or text.strip()
 
 
+def _is_markdown_block_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return stripped.startswith(("#", ">", "|", "```"))
+
+
+def _is_markdown_list_line(line: str) -> bool:
+    return bool(re.match(r"^([-*+]\s+|\d+[.)]\s+)", line.strip()))
+
+
+def _join_wrapped_text(lines: list[str]) -> str:
+    merged = lines[0].strip()
+    for raw_line in lines[1:]:
+        current = raw_line.strip()
+        if not current:
+            continue
+        if re.search(r"[\u4e00-\u9fff]$", merged) or re.match(r"^[\u4e00-\u9fff?????????????????]", current):
+            merged += current
+        else:
+            merged += f" {current}"
+    return merged
+
+
+def _rewrap_extracted_prose(text: str) -> str:
+    paragraphs: list[str] = []
+    buffer: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if buffer:
+                paragraphs.append(_join_wrapped_text(buffer))
+                buffer = []
+            if not paragraphs or paragraphs[-1] != "":
+                paragraphs.append("")
+            continue
+        if _is_markdown_block_line(line):
+            if buffer:
+                paragraphs.append(_join_wrapped_text(buffer))
+                buffer = []
+            paragraphs.append(line)
+            continue
+        if _is_markdown_list_line(line) and buffer:
+            paragraphs.append(_join_wrapped_text(buffer))
+            buffer = [line]
+            continue
+        buffer.append(line)
+    if buffer:
+        paragraphs.append(_join_wrapped_text(buffer))
+    return "\n".join(paragraphs).strip()
+
+
+def _normalize_readable_markdown(markdown: str, material_type: str) -> str:
+    cleaned = markdown.strip()
+    if "image" not in material_type:
+        return cleaned
+    lines = cleaned.splitlines()
+    normalized: list[str] = []
+    prose_buffer: list[str] = []
+
+    def flush_prose() -> None:
+        nonlocal prose_buffer
+        if not prose_buffer:
+            return
+        normalized.append(_rewrap_extracted_prose("\n".join(prose_buffer)))
+        prose_buffer = []
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("```"):
+            flush_prose()
+            normalized.append(stripped)
+            continue
+        prose_buffer.append(line)
+    flush_prose()
+    return "\n".join(part for part in normalized if part is not None).strip()
+
+
 def _fallback_readable_document(title: str, raw_text: str, note: str = "") -> dict[str, object]:
-    cleaned = _strip_extraction_wrappers(raw_text)
+    cleaned = _rewrap_extracted_prose(_strip_extraction_wrappers(raw_text))
     heading = title.strip() or "Readable document"
     if not cleaned.startswith("#"):
         markdown = f"# {heading}\n\n{cleaned}"
     else:
-        markdown = cleaned
+        markdown = _normalize_readable_markdown(cleaned, "image")
     return {
         "title": heading,
         "note": note or "Main text was extracted from the source; local parsed text is kept when LLM cleanup is unavailable.",
@@ -868,8 +965,9 @@ def _readable_document_keeps_source_content(markdown: str, raw_text: str) -> boo
 def _readable_document_from_text(title: str, raw_text: str, material_type: str) -> dict[str, object]:
     fallback = _fallback_readable_document(title, raw_text)
     try:
-        cleaned = deepseek_client.clean_readable_document(raw_text, material_type=material_type)
-        cleaned_markdown = cleaned.markdown.strip() or fallback["markdown"]
+        llm_source_text = _rewrap_extracted_prose(raw_text) if "image" in material_type else raw_text
+        cleaned = deepseek_client.clean_readable_document(llm_source_text, material_type=material_type)
+        cleaned_markdown = _normalize_readable_markdown(cleaned.markdown.strip() or fallback["markdown"], material_type)
         if not _readable_document_keeps_source_content(cleaned_markdown, raw_text):
             fallback["note"] = (
                 "LLM cleanup omitted source content, so the locally extracted readable text was kept instead."
@@ -1286,105 +1384,108 @@ def _slice_between_markers(text: str, start_patterns: list[str], end_patterns: l
 
 
 @app.post("/api/materials/readable-document")
-def readable_document(request: ReadableDocumentRequest) -> dict[str, object]:
+def readable_document(request: ReadableDocumentRequest, http_request: Request) -> dict[str, object]:
     if not (request.image_ids or request.file_ids or request.media_ids):
         raise HTTPException(status_code=400, detail="Please select at least one source material")
     parser_mode = request.parser_mode or workbench_settings.load_settings().get("text_extraction_mode") or "ai_vision"
     if parser_mode not in {"local_ocr", "ai_vision"}:
         raise HTTPException(status_code=400, detail="Unsupported parser mode")
 
-    raw_blocks: list[str] = []
-    titles: list[str] = []
-    recovered_history_text = False
     try:
+        with storage.connect() as conn:
+            context = current_context(http_request, conn)
+
+        drafts: list[dict[str, object]] = []
+
+        def append_draft(material_type: str, items: list[api_v2.CollectQueueItem]) -> None:
+            if not items:
+                return
+            draft_request = api_v2.CollectReadableDraftRequest(
+                material_type=material_type,
+                items=items,
+                parser_mode=parser_mode,
+            )
+            result = api_v2._build_readable_draft(draft_request, context=context)
+            if result.get("ok") is False:
+                raise ValueError(str(result.get("error") or "Readable draft extraction failed"))
+            drafts.append(result)
+
+        recovered_text_items: list[api_v2.CollectQueueItem] = []
+        screenshot_items: list[api_v2.CollectQueueItem] = []
         if request.image_ids:
-            screenshots = storage.get_screenshots(request.image_ids)
-            image_paths = []
-            for screenshot in screenshots:
+            for screenshot in storage.get_screenshots(request.image_ids):
                 image_path = storage.resolve_root_path(screenshot.get("image_path"))
-                if not image_path or not image_path.exists():
-                    recovered = _recover_screenshot_text_from_history(screenshot)
-                    if recovered:
-                        title, text = recovered
-                        titles.append(title)
-                        raw_blocks.append(text)
-                        recovered_history_text = True
-                        continue
-                    raise FileNotFoundError(
-                        f"Image file not found and no recoverable OCR/Markdown history is available: {screenshot['id']}"
-                    )
-                image_paths.append(image_path)
-                titles.append(str(screenshot.get("title") or Path(str(screenshot.get("image_path") or "")).name or f"screenshot-{screenshot['id']}"))
-            if image_paths:
-                if parser_mode == "ai_vision":
-                    raw_blocks.append(
-                        deepseek_client.recognize_screenshots_with_ai(
-                            image_paths,
-                            setting=deepseek_client.current_setting(),
-                        )
-                    )
-                else:
-                    try:
-                        raw_blocks.append(ocr_client.recognize_screenshots(image_paths))
-                    except Exception as exc:
-                        logger.warning("Local OCR failed, trying AI vision extraction: %s", exc)
-                        raw_blocks.append(
-                            deepseek_client.recognize_screenshots_with_ai(
-                                image_paths,
-                                setting=deepseek_client.current_setting(),
-                            )
-                        )
+                title = str(screenshot.get("title") or Path(str(screenshot.get("image_path") or "")).name or f"screenshot-{screenshot['id']}")
+                if image_path and image_path.exists():
+                    screenshot_items.append(api_v2.CollectQueueItem(id=int(screenshot["id"]), title=title))
+                    continue
+                recovered = _recover_screenshot_text_from_history(screenshot)
+                if recovered:
+                    recovered_title, recovered_text = recovered
+                    recovered_text_items.append(api_v2.CollectQueueItem(title=recovered_title, content=recovered_text))
+                    continue
+                raise FileNotFoundError(
+                    f"Image file not found and no recoverable OCR/Markdown history is available: {screenshot['id']}"
+                )
+            append_draft("text", recovered_text_items)
+            append_draft("screenshot", screenshot_items)
 
         if request.file_ids:
-            files = storage.get_source_files(request.file_ids)
-            titles.extend(str(item.get("original_name") or item.get("title") or f"file-{item['id']}") for item in files)
-            prefer_visual = parser_mode == "ai_vision"
-            raw_blocks.append(
-                document_parser.recognize_files(
-                    files,
-                    storage.ROOT,
-                    visual_recognizer=lambda image_paths: deepseek_client.recognize_screenshots_with_ai(
-                        image_paths,
-                        setting=deepseek_client.current_setting(),
-                    ),
-                    prefer_visual=prefer_visual,
-                    storage_root=storage.STORAGE_ROOT,
+            file_items = []
+            for item in storage.get_source_files(request.file_ids):
+                file_items.append(
+                    api_v2.CollectQueueItem(
+                        id=int(item["id"]),
+                        title=str(item.get("original_name") or item.get("title") or f"file-{item['id']}"),
+                    )
                 )
-            )
+            append_draft("document", file_items)
 
         if request.media_ids:
+            media_items = []
             for media_id in request.media_ids:
                 item = storage.get_media_source(media_id)
-                transcript, _ = media_parser.ensure_transcript(item)
-                refreshed = storage.get_media_source(media_id)
-                titles.append(str(refreshed.get("title") or refreshed.get("original_name") or f"media-{media_id}"))
-                raw_blocks.append(media_parser.format_media_transcript(refreshed, transcript))
+                media_items.append(
+                    api_v2.CollectQueueItem(
+                        id=int(item["id"]),
+                        title=str(item.get("title") or item.get("original_name") or f"media-{media_id}"),
+                    )
+                )
+            append_draft("media", media_items)
 
-        unique_blocks = []
-        seen_blocks = set()
-        for block in raw_blocks:
-            clean_block = block.strip()
-            if not clean_block:
-                continue
-            fingerprint = re.sub(r"\s+", "", clean_block)[:4000]
-            if fingerprint in seen_blocks:
-                continue
-            seen_blocks.add(fingerprint)
-            unique_blocks.append(clean_block)
-        raw_text = "\n\n---\n\n".join(unique_blocks).strip()
-        if not raw_text:
+        if not drafts:
             raise ValueError("No readable text was extracted")
-        title = titles[0] if len(titles) == 1 else f"{titles[0] if titles else 'Combined material'} and {len(titles) - 1} more"
-        material_types = []
-        if request.image_ids:
-            material_types.append("image")
-        if request.file_ids:
-            material_types.append("file")
-        if request.media_ids:
-            material_types.append("media")
-        if recovered_history_text:
-            return _fallback_readable_document(title, raw_text, note="Recovered from historical Markdown; original OCR wording is preserved.")
-        return _readable_document_from_text(title, raw_text, "+".join(material_types) or "raw")
+
+        if len(drafts) == 1:
+            draft = drafts[0]
+            markdown = str(draft.get("markdown") or "")
+            return {
+                "title": str(draft.get("title") or "Readable document"),
+                "note": str(draft.get("note") or ""),
+                "markdown": markdown,
+                "raw_text": markdown,
+                "cleaned_by": "v2_readable_draft",
+                "errors": draft.get("errors") or [],
+                "polish": draft.get("polish") or {},
+            }
+
+        title = str(drafts[0].get("title") or "Combined material")
+        markdown_parts = []
+        for index, draft in enumerate(drafts, start=1):
+            part_title = str(draft.get("title") or f"Material {index}")
+            draft_markdown = str(draft.get("markdown") or "").strip()
+            markdown_parts.append(f"## {index}. {part_title}\n\n{draft_markdown}")
+        markdown = "\n\n---\n\n".join(markdown_parts).strip()
+        errors = [error for draft in drafts for error in (draft.get("errors") or [])]
+        notes = [str(draft.get("note") or "").strip() for draft in drafts if str(draft.get("note") or "").strip()]
+        return {
+            "title": f"{title} and {len(drafts) - 1} more",
+            "note": " ".join(notes),
+            "markdown": markdown,
+            "raw_text": markdown,
+            "cleaned_by": "v2_readable_draft",
+            "errors": errors,
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -2937,6 +3038,38 @@ def writer_projects(request: Request) -> dict[str, object]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/writer/writing-strategies")
+def writer_writing_strategies() -> dict[str, object]:
+    try:
+        return writer_tools.list_writing_strategies()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/writer/writing-strategies")
+def writer_writing_strategy_save(payload: WriterWritingStrategySaveRequest) -> dict[str, object]:
+    try:
+        item = writer_tools.save_writing_strategy(payload.name, payload.body, payload.id)
+        return {**writer_tools.list_writing_strategies(), "item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/writer/writing-strategies/{strategy_id}")
+def writer_writing_strategy_delete(strategy_id: str) -> dict[str, object]:
+    try:
+        writer_tools.delete_writing_strategy(strategy_id)
+        return writer_tools.list_writing_strategies()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/writer/projects")
 def writer_project_create(payload: WriterProjectCreateRequest, request: Request) -> dict[str, object]:
     try:
@@ -3241,6 +3374,8 @@ def writer_project_generate_images(project_id: str, payload: WriterProjectImages
             workspace,
             cover_prompt=str(cover_prompt) if cover_prompt else None,
             content_prompts=[str(item) for item in content_prompts],
+            cover_aspect_ratio=payload.cover_aspect_ratio,
+            content_aspect_ratio=payload.content_aspect_ratio,
         )
         writer_tools.update_project(
             project_id,
@@ -3273,6 +3408,7 @@ def writer_project_generate_image_item(project_id: str, payload: WriterProjectIm
             payload.kind,
             payload.prompt,
             index=payload.index,
+            aspect_ratio=payload.aspect_ratio,
         )
         writer_tools.update_project(
             project_id,
@@ -3308,12 +3444,40 @@ def writer_project_format(project_id: str, payload: WriterProjectFormatRequest, 
             html_path=result.get("path"),
             html_theme=payload.theme,
             design_strategy=design_strategy,
+            design_intent=result.get("design_intent"),
+            format_sanitize_report=result.get("sanitize_report"),
             design_confirmed=False,
             preflight={},
             publish_result={},
             status="active",
         )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "format": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/writer/projects/{project_id}/publish/sanitize")
+def writer_project_publish_sanitize(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _writer_owner_scope(request)
+        project = _writer_load_project(project_id, owner_user_id=owner_user_id)
+        if not project.get("html_path"):
+            raise HTTPException(status_code=400, detail="请先生成美编 HTML")
+        workspace = _writer_project_workspace(project_id)
+        result = writer_tools.sanitize_publish_html_preview(workspace)
+        writer_tools.update_project(
+            project_id,
+            publish_sanitize=result,
+            publish_inspection=result.get("publish_inspection"),
+            preflight={},
+            publish_result={},
+            status="active",
+        )
+        return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "publish_sanitize": result}
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3355,6 +3519,7 @@ def writer_project_publish_preflight(project_id: str, payload: WriterProjectPubl
         writer_tools.update_project(
             project_id,
             preflight=result,
+            publish_inspection=result.get("publish_inspection"),
             publish_title=title,
             publish_author=payload.author or "Bobo",
             publish_digest=safe_digest,
@@ -3402,7 +3567,13 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
             digest=str(digest or ""),
             cover_path=str(cover_path) if cover_path else None,
         )
-        writer_tools.update_project(project_id, preflight=preflight, publish_result=result, status="published" if result.get("returncode") == 0 else "active")
+        writer_tools.update_project(
+            project_id,
+            preflight=preflight,
+            publish_inspection=preflight.get("publish_inspection"),
+            publish_result=result,
+            status="published" if result.get("returncode") == 0 else "active",
+        )
         return {**_writer_project_payload(project_id, owner_user_id=owner_user_id), "preflight": preflight, "publish": result}
     except HTTPException:
         raise
@@ -3463,6 +3634,8 @@ def writer_project_advance(project_id: str, payload: WriterProjectAdvanceRequest
                 WriterProjectImagesRequest(
                     cover_prompt=payload.cover_prompt,
                     content_image_prompts=payload.content_image_prompts,
+                    cover_aspect_ratio=payload.cover_aspect_ratio,
+                    content_aspect_ratio=payload.content_aspect_ratio,
                 ),
                 request,
             )
@@ -3590,6 +3763,8 @@ def writer_images(payload: WriterImagesRequest, request: Request) -> dict[str, o
             workspace,
             cover_prompt=payload.cover_prompt,
             content_prompts=payload.content_image_prompts,
+            cover_aspect_ratio=payload.cover_aspect_ratio,
+            content_aspect_ratio=payload.content_aspect_ratio,
         )
         return {"workspace": storage.storage_relative(workspace), **result}
     except HTTPException:

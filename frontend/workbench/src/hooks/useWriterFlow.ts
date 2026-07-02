@@ -15,6 +15,7 @@ export type WriterImageRetryTask = {
   kind: "cover" | "content";
   prompt: string;
   index?: number;
+  aspectRatio?: string;
 };
 
 export function useWriterFlow({ language, addActivity, selectWorkspace }: Options) {
@@ -170,23 +171,30 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   );
 
   const generateWriterImages = useCallback(
-    (coverPrompt?: string, contentImagePrompts?: string[], onProgress?: (done: number, total: number) => void) => {
+    (
+      coverPrompt?: string,
+      contentImagePrompts?: string[],
+      onProgress?: (done: number, total: number) => void,
+      aspectRatios?: { cover?: string; content?: string },
+    ) => {
       const project = writerState?.project;
       runWriterAction(language === "zh" ? "生成图片" : "Generate images", async () => {
         const projectId = requireProjectId();
         const cover = (coverPrompt ?? project?.cover_prompt ?? "").trim();
         const prompts = contentImagePrompts ?? project?.content_image_prompts ?? [];
         const tasks: Array<{ kind: "cover" | "content"; prompt: string; index?: number }> = [];
-        if (cover) tasks.push({ kind: "cover", prompt: cover });
+        const coverAspectRatio = aspectRatios?.cover?.trim() || undefined;
+        const contentAspectRatio = aspectRatios?.content?.trim() || undefined;
+        if (cover) tasks.push({ kind: "cover", prompt: cover, aspectRatio: coverAspectRatio });
         prompts.forEach((prompt, index) => {
           const trimmed = prompt.trim();
-          if (trimmed) tasks.push({ kind: "content", prompt: trimmed, index: index + 1 });
+          if (trimmed) tasks.push({ kind: "content", prompt: trimmed, index: index + 1, aspectRatio: contentAspectRatio });
         });
-        if (!tasks.length) return writerApi.generateWriterProjectImages(projectId, cover, prompts);
+        if (!tasks.length) return writerApi.generateWriterProjectImages(projectId, cover, prompts, coverAspectRatio, contentAspectRatio);
         let latest: WriterProjectState | undefined;
         onProgress?.(0, tasks.length);
         for (const [index, task] of tasks.entries()) {
-          latest = await writerApi.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index);
+          latest = await writerApi.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index, task.aspectRatio);
           setWriterState(latest);
           onProgress?.(index + 1, tasks.length);
         }
@@ -207,7 +215,7 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
         let latest: WriterProjectState | undefined;
         onProgress?.(0, runnable.length);
         for (const [index, task] of runnable.entries()) {
-          latest = await writerApi.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index);
+          latest = await writerApi.generateWriterProjectImageItem(projectId, task.kind, task.prompt, task.index, task.aspectRatio);
           setWriterState(latest);
           onProgress?.(index + 1, runnable.length);
         }
@@ -218,17 +226,23 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   );
 
   const formatWriterProject = useCallback(
-    (markdown?: string, designStrategy?: string, writingStrategy?: string) => {
+    (markdown?: string, designStrategy?: string, writingStrategy?: string, theme = "tech") => {
       runWriterAction(language === "zh" ? "美编排版" : "Design article", async () => {
         const projectId = requireProjectId();
         if (writingStrategy !== undefined || designStrategy !== undefined) {
           await writerApi.updateWriterProjectStrategies(projectId, writingStrategy, designStrategy);
         }
-        return writerApi.formatWriterProject(projectId, markdown, designStrategy);
+        return writerApi.formatWriterProject(projectId, markdown, designStrategy, theme);
       });
     },
     [language, requireProjectId, runWriterAction],
   );
+
+  const sanitizeWriterPublishHtml = useCallback(() => {
+    runWriterAction(language === "zh" ? "重新清洗发布版" : "Sanitize publish HTML", () =>
+      writerApi.sanitizeWriterProjectPublishHtml(requireProjectId()),
+    );
+  }, [language, requireProjectId, runWriterAction]);
 
   const confirmWriterDesign = useCallback(() => {
     runWriterAction(language === "zh" ? "确认美编预览" : "Confirm design preview", () => writerApi.confirmWriterProjectDesign(requireProjectId()));
@@ -265,6 +279,7 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     generateWriterImages,
     retryWriterImageItems,
     formatWriterProject,
+    sanitizeWriterPublishHtml,
     confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,

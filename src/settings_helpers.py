@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import tempfile
+import wave
+from pathlib import Path
 from typing import Any, Callable
 
 import api_settings
@@ -88,6 +91,7 @@ def test_asr_setting_payload(
     payload: dict[str, object],
     *,
     transcribe_audio_url_fn: Callable[[str, dict[str, Any]], object],
+    transcribe_audio_fn: Callable[[Path], object] | None = None,
 ) -> dict[str, object]:
     if not payload.get("api_key"):
         payload["api_key"] = asr_settings.load_setting().get("api_key")
@@ -96,9 +100,27 @@ def test_asr_setting_payload(
     if setting.get("provider") == "dashscope":
         sample_url = "https://dashscope.oss-cn-beijing.aliyuncs.com/samples/audio/paraformer/hello_world_female2.wav"
         transcribe_audio_url_fn(sample_url, setting)
+    elif setting.get("provider") == "minimax":
+        if transcribe_audio_fn is None:
+            raise RuntimeError("MiniMax ASR test requires a local audio transcription probe.")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sample_path = Path(temp_dir) / "asr_probe.wav"
+            _write_silent_wav(sample_path)
+            transcribe_audio_fn(sample_path)
     asr_settings.mark_test_result(True, "ASR API verified with a real transcription request.")
     return {
         "ok": True,
         "item": saved,
         "message": "ASR API verified with a real transcription request.",
     }
+
+
+def _write_silent_wav(path: Path) -> None:
+    sample_rate = 16_000
+    duration_seconds = 1
+    frame_count = sample_rate * duration_seconds
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\x00\x00" * frame_count)

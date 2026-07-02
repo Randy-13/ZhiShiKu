@@ -25,6 +25,7 @@ export type SourceMaterial = {
   status: MaterialStatus;
   backendId?: number;
   error?: string;
+  progressMessage?: string;
   note?: string;
   linkType?: string;
   extractionStrategy?: string;
@@ -125,6 +126,21 @@ export type WriterProject = {
   article_markdown?: string;
   html?: string;
   html_path?: string;
+  html_theme?: string;
+  design_intent?: {
+    theme?: string;
+    emphasis_density?: string;
+    decoration_level?: string;
+    paragraph_rhythm?: string;
+    quote_style?: string;
+    divider_style?: string;
+    image_style?: string;
+    components?: string[];
+    [key: string]: unknown;
+  };
+  format_sanitize_report?: Record<string, unknown>;
+  publish_inspection?: Record<string, unknown>;
+  publish_sanitize?: Record<string, unknown>;
   images?: {
     cover?: { path?: string; prompt?: string; index?: number };
     content_images?: Array<{ path?: string; prompt?: string; index?: number }>;
@@ -155,6 +171,15 @@ export type WriterProjectState = {
   status?: Record<string, unknown>;
   step: WriterStep;
   next_action: string;
+};
+
+export type WriterStrategyPreset = {
+  id: string;
+  name: string;
+  body: string;
+  readonly?: boolean;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type KnowledgeDraft = {

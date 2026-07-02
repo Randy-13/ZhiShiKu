@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { collectApi, materialFromUpload } from "../api";
 import type { ReadableDraftInput } from "../api";
 import type { ActivityEvent, KnowledgeItem, Language, MaterialType, SourceMaterial, TextExtractionMode } from "../domain";
@@ -211,19 +212,37 @@ export function useCollectFlow({ language, textExtractionMode, addActivity, refr
       const requestedIds = ids?.length ? ids : selectedMaterial ? [selectedMaterial.id] : [];
       if (!requestedIds.length) return;
       const idSet = new Set(requestedIds);
-      const selectedItems = materials.filter((item) => idSet.has(item.id) && item.status !== "error");
+      const selectedItems = materials.filter((item) => idSet.has(item.id) && canRetryReadableExtraction(item));
       if (!selectedItems.length) return;
 
       setIsCollectingReadable(true);
       setMaterials((current) =>
-        current.map((item) => (idSet.has(item.id) ? { ...item, status: "learning", error: undefined } : item)),
+        current.map((item) =>
+          idSet.has(item.id)
+            ? { ...item, status: "learning", error: undefined, progressMessage: readableProgressMessage(language, 0, selectedItems.length) }
+            : item,
+        ),
       );
 
       try {
-        const draft = await collectApi.createReadableDraft(selectedItems, textExtractionMode);
+        const batchResult =
+          selectedItems.length > 1 && selectedItems.some((item) => item.type === "image")
+            ? await createReadableDraftWithItemProgress({
+                items: selectedItems,
+                parserMode: textExtractionMode,
+                language,
+                setMaterials,
+              })
+            : { draft: await collectApi.createReadableDraft(selectedItems, textExtractionMode), successfulIds: selectedItems.map((item) => item.id) };
+        const draft = batchResult.draft;
         setCollectDraft(draft);
+        const successfulIds = new Set(batchResult.successfulIds);
         setMaterials((current) =>
-          current.map((item) => (idSet.has(item.id) ? { ...item, status: "ready", error: undefined } : item)),
+          current.map((item) =>
+            idSet.has(item.id) && successfulIds.has(item.id)
+              ? { ...item, status: "ready", error: undefined, progressMessage: undefined }
+              : item,
+          ),
         );
         addActivity({
           title: draft.title,
@@ -234,7 +253,7 @@ export function useCollectFlow({ language, textExtractionMode, addActivity, refr
       } catch (error) {
         const detail = error instanceof Error ? error.message : "Readable original generation failed";
         setMaterials((current) =>
-          current.map((item) => (idSet.has(item.id) ? { ...item, status: "error", error: detail } : item)),
+          current.map((item) => (idSet.has(item.id) ? { ...item, status: "error", error: detail, progressMessage: undefined } : item)),
         );
         addActivity({
           title: language === "zh" ? "生成原文失败" : "Generate original failed",
@@ -309,6 +328,84 @@ export function useCollectFlow({ language, textExtractionMode, addActivity, refr
   };
 }
 
+
+type ReadableProgressOptions = {
+  items: SourceMaterial[];
+  parserMode: TextExtractionMode;
+  language: Language;
+  setMaterials: Dispatch<SetStateAction<SourceMaterial[]>>;
+};
+
+async function createReadableDraftWithItemProgress({ items, parserMode, language, setMaterials }: ReadableProgressOptions) {
+  const drafts: ReadableDraftInput[] = [];
+  const successfulIds: string[] = [];
+  const errors: string[] = [];
+
+  for (const [index, item] of items.entries()) {
+    setMaterials((current) =>
+      current.map((currentItem) =>
+        currentItem.id === item.id
+          ? { ...currentItem, status: "learning", error: undefined, progressMessage: readableProgressMessage(language, index + 1, items.length) }
+          : currentItem,
+      ),
+    );
+
+    try {
+      const draft = await collectApi.createReadableDraft([item], parserMode);
+      drafts.push(draft);
+      successfulIds.push(item.id);
+      setMaterials((current) =>
+        current.map((currentItem) =>
+          currentItem.id === item.id
+            ? { ...currentItem, status: "ready", error: undefined, progressMessage: undefined }
+            : currentItem,
+        ),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Readable original generation failed";
+      errors.push(`${item.title}: ${message}`);
+      setMaterials((current) =>
+        current.map((currentItem) =>
+          currentItem.id === item.id
+            ? { ...currentItem, status: "error", error: message, progressMessage: undefined }
+            : currentItem,
+        ),
+      );
+    }
+  }
+
+  if (!drafts.length) {
+    throw new Error(errors[0] || "Readable original generation failed");
+  }
+
+  return { draft: mergeReadableDrafts(drafts, items, errors, language), successfulIds };
+}
+
+function mergeReadableDrafts(drafts: ReadableDraftInput[], items: SourceMaterial[], errors: string[], language: Language): ReadableDraftInput {
+  if (drafts.length === 1) return drafts[0];
+  const title = language === "zh" ? `\u5408\u5e76\u539f\u6587\uff08${drafts.length}\u6761\uff09` : `Merged original ${drafts.length} items`;
+  const failedNote = errors.length ? (language === "zh" ? `\u90e8\u5206\u5931\u8d25\uff1a${errors.join("\uff1b")}` : `Partial failures: ${errors.join("; ")}`) : "";
+  return {
+    title,
+    note: [language === "zh" ? `\u5df2\u5408\u5e76 ${drafts.length} \u6761\u7d20\u6750\u3002` : `Merged ${drafts.length} materials.`, failedNote].filter(Boolean).join(" "),
+    body: drafts.map((draft, index) => `## ${index + 1}. ${draft.title}\n\n${draft.body}`).join("\n\n---\n\n"),
+    sourceIds: drafts.flatMap((draft) => draft.sourceIds),
+    materialType: drafts[0]?.materialType ?? "screenshot",
+    source: items.map((item) => item.source || item.title).filter(Boolean).join("; "),
+  };
+}
+
+function readableProgressMessage(language: Language, current: number, total: number) {
+  if (total <= 1) return language === "zh" ? "\u6b63\u5728\u63d0\u53d6\u539f\u6587..." : "Extracting readable original...";
+  if (current <= 0) return language === "zh" ? `\u7b49\u5f85\u63d0\u53d6\uff0c\u5171 ${total} \u9879` : `Waiting to extract ${total} items`;
+  return language === "zh" ? `\u6b63\u5728\u63d0\u53d6\u7b2c ${current}/${total} \u9879` : `Extracting ${current}/${total}`;
+}
+function canRetryReadableExtraction(item: SourceMaterial) {
+  if (item.type === "text") return true;
+  if (item.type === "link") return true;
+  if (item.type === "media" && item.source) return true;
+  return typeof item.backendId === "number";
+}
 function looksLikeMediaUrl(url: string) {
   return /bilibili|douyin|youtube|youtu\.be|vimeo|xiaohongshu|xhslink|video|mp4|m3u8|audio/i.test(url);
 }

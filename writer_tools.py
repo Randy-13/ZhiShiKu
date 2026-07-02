@@ -11,16 +11,88 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+from dataclasses import dataclass, field
 from subprocess import TimeoutExpired
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
+
+try:
+    from bs4 import BeautifulSoup, Comment
+except ImportError:  # pragma: no cover - production venv normally includes bs4
+    BeautifulSoup = None  # type: ignore[assignment]
+    Comment = None  # type: ignore[assignment]
+
 import api_settings
 import deepseek_client
 import image_api_settings
 import storage
+
+
+WECHAT_ALLOWED_TAGS = {
+    "section", "p", "span", "strong", "em", "blockquote", "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td", "img", "br", "pre", "code",
+    "h1", "h2", "h3", "hr",
+}
+WECHAT_FORBIDDEN_TAGS = {"script", "iframe", "style", "link", "svg", "canvas", "video", "audio", "object", "embed"}
+WECHAT_ALLOWED_STYLE_PROPS = {
+    "background", "background-color", "border", "border-bottom", "border-left", "border-radius",
+    "box-sizing", "color", "display", "font-family", "font-size", "font-style", "font-weight",
+    "height", "letter-spacing", "line-height", "margin", "margin-bottom", "margin-left",
+    "margin-right", "margin-top", "max-width", "min-width", "overflow", "padding",
+    "padding-bottom", "padding-left", "padding-right", "padding-top", "text-align",
+    "vertical-align", "white-space", "width", "word-break",
+}
+WECHAT_HTML_MAX_CHARS = 180000
+
+DESIGN_THEME_PRESETS: dict[str, dict[str, str]] = {
+    "tech": {"accent": "#2f6f5e", "accent_soft": "#e8f2ed", "ink": "#18231e", "muted": "#6d756f", "line": "#d8e3dc", "surface": "#fffdf8", "paper": "#f7f2e8", "warn": "#9a641f", "error": "#a63d32", "marker": "#fff1b8", "divider": "- - -"},
+    "research": {"accent": "#345f8f", "accent_soft": "#e8eef7", "ink": "#172033", "muted": "#687386", "line": "#d8dfec", "surface": "#fbfcff", "paper": "#f3f6fb", "warn": "#8b641d", "error": "#94443d", "marker": "#e9f0ff", "divider": "section"},
+    "column": {"accent": "#7a4c30", "accent_soft": "#f3e8df", "ink": "#271b15", "muted": "#796b60", "line": "#e2d4c7", "surface": "#fffaf4", "paper": "#f6eee5", "warn": "#9a641f", "error": "#a63d32", "marker": "#ffe7c4", "divider": "- - -"},
+    "xiumi": {"accent": "#bd5b73", "accent_soft": "#fde9ef", "ink": "#23191c", "muted": "#7b6870", "line": "#efd0da", "surface": "#fff8fa", "paper": "#f8edf1", "warn": "#a56a21", "error": "#b63d47", "marker": "#ffe1ea", "divider": "star"},
+}
+
+
+@dataclass
+class MarkdownBlock:
+    kind: str
+    text: str = ""
+    level: int = 0
+    ordered: bool = False
+    items: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
+    src: str = ""
+    alt: str = ""
+
+
+@dataclass
+class WechatDesignIntent:
+    theme: str = "tech"
+    emphasis_density: str = "medium"
+    decoration_level: str = "medium"
+    paragraph_rhythm: str = "comfortable"
+    quote_style: str = "card"
+    divider_style: str = "soft"
+    image_style: str = "rounded"
+    components: list[str] = field(default_factory=lambda: [
+        "title_card", "section_divider", "quote_card", "highlight_sentence", "data_card",
+        "step_block", "risk_note", "conclusion_box", "image_caption", "footer_action",
+    ])
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "theme": self.theme,
+            "emphasis_density": self.emphasis_density,
+            "decoration_level": self.decoration_level,
+            "paragraph_rhythm": self.paragraph_rhythm,
+            "quote_style": self.quote_style,
+            "divider_style": self.divider_style,
+            "image_style": self.image_style,
+            "components": list(self.components),
+        }
 
 
 WRITER_DIR = storage.WRITER_DIR
@@ -145,6 +217,120 @@ def dated_workspace(topic: str) -> Path:
 
 def projects_dir() -> Path:
     return writer_dir() / "projects"
+
+
+WRITING_STRATEGY_DEFAULT_ID = "default-wechat-article"
+
+
+def writing_strategies_file() -> Path:
+    return writer_dir() / "writing_strategies.json"
+
+
+def _default_writing_strategy_preset() -> dict[str, Any]:
+    now = "builtin"
+    return {
+        "id": WRITING_STRATEGY_DEFAULT_ID,
+        "name": "微信公众号文章默认写文策略",
+        "body": DEFAULT_WRITING_STRATEGY.strip(),
+        "readonly": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _normalize_writing_strategy_preset(item: dict[str, Any]) -> dict[str, Any]:
+    strategy_id = str(item.get("id") or "").strip() or uuid4().hex
+    readonly = strategy_id == WRITING_STRATEGY_DEFAULT_ID or bool(item.get("readonly"))
+    return {
+        "id": strategy_id,
+        "name": str(item.get("name") or "").strip() or "未命名写文策略",
+        "body": str(item.get("body") or "").strip(),
+        "readonly": readonly,
+        "created_at": str(item.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+        "updated_at": str(item.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
+    }
+
+
+def _read_custom_writing_strategies() -> list[dict[str, Any]]:
+    path = writing_strategies_file()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    raw_items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(raw_items, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        item = _normalize_writing_strategy_preset(raw)
+        if item["id"] == WRITING_STRATEGY_DEFAULT_ID:
+            continue
+        if item["body"]:
+            item["readonly"] = False
+            items.append(item)
+    return items
+
+
+def _write_custom_writing_strategies(items: list[dict[str, Any]]) -> None:
+    path = writing_strategies_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"items": [item for item in items if item.get("id") != WRITING_STRATEGY_DEFAULT_ID]}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_writing_strategies() -> dict[str, Any]:
+    default = _default_writing_strategy_preset()
+    custom = sorted(_read_custom_writing_strategies(), key=lambda item: item.get("updated_at", ""), reverse=True)
+    return {"default_id": WRITING_STRATEGY_DEFAULT_ID, "items": [default, *custom]}
+
+
+def save_writing_strategy(name: str, body: str, strategy_id: str | None = None) -> dict[str, Any]:
+    clean_name = name.strip()
+    clean_body = body.strip()
+    if not clean_name:
+        raise ValueError("写文策略名称不能为空")
+    if not clean_body:
+        raise ValueError("写文策略正文不能为空")
+    if strategy_id == WRITING_STRATEGY_DEFAULT_ID:
+        raise ValueError("默认写文策略不能覆盖")
+
+    now = datetime.now().isoformat(timespec="seconds")
+    items = _read_custom_writing_strategies()
+    target_id = (strategy_id or "").strip() or uuid4().hex
+    saved: dict[str, Any] | None = None
+    for item in items:
+        if item["id"] != target_id:
+            continue
+        item.update({"name": clean_name, "body": clean_body, "readonly": False, "updated_at": now})
+        saved = item
+        break
+    if saved is None:
+        saved = {
+            "id": target_id,
+            "name": clean_name,
+            "body": clean_body,
+            "readonly": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        items.append(saved)
+    _write_custom_writing_strategies(items)
+    return saved
+
+
+def delete_writing_strategy(strategy_id: str) -> None:
+    clean_id = strategy_id.strip()
+    if clean_id == WRITING_STRATEGY_DEFAULT_ID:
+        raise ValueError("默认写文策略不能删除")
+    items = _read_custom_writing_strategies()
+    next_items = [item for item in items if item["id"] != clean_id]
+    if len(next_items) == len(items):
+        raise FileNotFoundError(f"写文策略不存在：{strategy_id}")
+    _write_custom_writing_strategies(next_items)
 
 
 def create_project(
@@ -445,18 +631,258 @@ def redact_appid(appid: str) -> str:
     return appid[:6] + "***" + appid[-3:]
 
 
+def infer_wechat_design_intent(design_strategy: str = "", theme: str = "tech") -> WechatDesignIntent:
+    text = (design_strategy or "").lower()
+    selected = theme if theme in DESIGN_THEME_PRESETS else "tech"
+    if any(key in text for key in ("xiumi", "showy", "decor", "rich", "ornament", "秀米", "装饰", "卡片")):
+        selected = "xiumi"
+    elif any(key in text for key in ("research", "pm", "paper", "evidence", "研究", "证据", "论文")):
+        selected = "research"
+    elif any(key in text for key in ("column", "opinion", "story", "观点", "专栏", "叙事")):
+        selected = "column"
+    density = "high" if any(key in text for key in ("high", "dense", "多", "丰富", "重点")) else "medium"
+    decoration = "high" if selected == "xiumi" or any(key in text for key in ("秀米", "装饰", "丰富")) else "medium"
+    rhythm = "compact" if any(key in text for key in ("compact", "dense", "紧凑", "高密度")) else "comfortable"
+    return WechatDesignIntent(
+        theme=selected,
+        emphasis_density=density,
+        decoration_level=decoration,
+        paragraph_rhythm=rhythm,
+        quote_style="ribbon" if selected == "xiumi" else "card",
+        divider_style="ornament" if selected == "xiumi" else "soft",
+        image_style="framed" if selected in {"xiumi", "column"} else "rounded",
+    )
+
+
+def parse_markdown_article(markdown_text: str) -> tuple[str, list[MarkdownBlock]]:
+    title = ""
+    blocks: list[MarkdownBlock] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    list_ordered = False
+    code_lines: list[str] = []
+    in_code = False
+    table_rows: list[list[str]] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            blocks.append(MarkdownBlock("paragraph", text=" ".join(item.strip() for item in paragraph if item.strip())))
+            paragraph = []
+
+    def flush_list() -> None:
+        nonlocal list_items, list_ordered
+        if list_items:
+            blocks.append(MarkdownBlock("list", ordered=list_ordered, items=list_items))
+            list_items = []
+            list_ordered = False
+
+    def flush_table() -> None:
+        nonlocal table_rows
+        if table_rows:
+            blocks.append(MarkdownBlock("table", rows=table_rows))
+            table_rows = []
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if code_lines:
+            blocks.append(MarkdownBlock("code", text="\n".join(code_lines)))
+            code_lines = []
+
+    for raw in markdown_text.splitlines():
+        line = raw.rstrip()
+        if line.startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                flush_paragraph()
+                flush_list()
+                flush_table()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(raw)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            continue
+        image_match = re.match(r"!\[(.*?)\]\((.*?)\)", stripped)
+        if image_match:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            alt, src = image_match.groups()
+            blocks.append(MarkdownBlock("image", alt=alt.strip(), src=src.strip()))
+            continue
+        if stripped in {"---", "***", "===", "[SEC]"}:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            blocks.append(MarkdownBlock("divider"))
+            continue
+        heading_match = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            level = len(heading_match.group(1))
+            text = heading_match.group(2).strip()
+            if level == 1 and not title:
+                title = text
+            else:
+                blocks.append(MarkdownBlock("heading", text=text, level=level))
+            continue
+        if stripped.startswith(">"):
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            blocks.append(MarkdownBlock("quote", text=stripped.lstrip("> ").strip()))
+            continue
+        unordered = re.match(r"^[-*]\s+(.+)$", stripped)
+        ordered = re.match(r"^\d+(?:[.)]|、)\s*(.+)$", stripped)
+        if unordered or ordered:
+            flush_paragraph()
+            flush_table()
+            is_ordered = bool(ordered)
+            item_text = (ordered or unordered).group(1).strip()  # type: ignore[union-attr]
+            if list_items and list_ordered != is_ordered:
+                flush_list()
+            list_ordered = is_ordered
+            list_items.append(item_text)
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            flush_paragraph()
+            flush_list()
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if not all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells):
+                table_rows.append(cells)
+            continue
+        flush_table()
+        paragraph.append(stripped)
+    flush_paragraph()
+    flush_list()
+    flush_table()
+    if in_code:
+        flush_code()
+    return title, blocks
+
+
+def render_inline_wechat(text: str, palette: dict[str, str]) -> str:
+    escaped = html.escape(text or "")
+    strong_style = f"font-weight:700;color:{palette['ink']};background:linear-gradient(transparent 62%,{palette['marker']} 0);padding:0 2px;"
+    mark_style = f"background:{palette['marker']};color:{palette['ink']};padding:0 4px;border-radius:4px;"
+    blue_style = f"background:{palette['accent_soft']};color:{palette['accent']};padding:0 4px;border-radius:4px;"
+    pink_style = f"background:#fde8ef;color:{palette['error']};padding:0 4px;border-radius:4px;"
+    green_style = f"background:#e7f3eb;color:{palette['accent']};padding:0 4px;border-radius:4px;"
+    replacements = [
+        (r"\*\*(.+?)\*\*", f'<strong style="{strong_style}">\\1</strong>'),
+        (r"==(.+?)==", f'<span style="{mark_style}">\\1</span>'),
+        (r"\+\+(.+?)\+\+", f'<span style="{blue_style}">\\1</span>'),
+        (r"%%(.+?)%%", f'<span style="{pink_style}">\\1</span>'),
+        (r"&amp;&amp;(.+?)&amp;&amp;", f'<span style="{green_style}">\\1</span>'),
+        (r"!!(.+?)!!", f'<strong style="color:{palette["error"]};font-weight:700;">\\1</strong>'),
+        (r"@@(.+?)@@", f'<strong style="color:{palette["accent"]};font-weight:700;">\\1</strong>'),
+    ]
+    for pattern, repl in replacements:
+        escaped = re.sub(pattern, repl, escaped)
+    return escaped
+
+
+def wechat_html_from_markdown(markdown_text: str, design_strategy: str = "", theme: str = "tech") -> dict[str, Any]:
+    title, blocks = parse_markdown_article(markdown_text)
+    intent = infer_wechat_design_intent(design_strategy, theme)
+    palette = DESIGN_THEME_PRESETS[intent.theme]
+    paragraph_margin = "18px 0" if intent.paragraph_rhythm == "comfortable" else "12px 0"
+    parts: list[str] = [
+        "<!doctype html>",
+        '<html lang="zh-CN">',
+        "<head><meta charset=\"utf-8\" /></head>",
+        "<body>",
+        f'<section data-fl-design-theme="{html.escape(intent.theme)}" style="max-width:680px;margin:0 auto;padding:24px 18px;background:{palette["surface"]};color:{palette["ink"]};font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Microsoft YaHei\',sans-serif;line-height:1.85;box-sizing:border-box;">',
+    ]
+    if title:
+        parts.append(
+            f'<section data-fl-component="title_card" style="margin:0 0 28px;padding:22px 18px;border:1px solid {palette["line"]};border-left:5px solid {palette["accent"]};border-radius:12px;background:{palette["paper"]};box-sizing:border-box;">'
+            f'<p style="margin:0 0 8px;color:{palette["accent"]};font-size:13px;font-weight:700;letter-spacing:1px;">FigureLearning</p>'
+            f'<h1 style="margin:0;color:{palette["ink"]};font-size:24px;line-height:1.35;font-weight:800;">{render_inline_wechat(title, palette)}</h1>'
+            "</section>"
+        )
+    section_index = 0
+    paragraph_index = 0
+    for block in blocks:
+        if block.kind == "heading":
+            section_index += 1
+            parts.append(
+                f'<section data-fl-component="section_divider" style="margin:30px 0 16px;padding:0 0 0 12px;border-left:4px solid {palette["accent"]};box-sizing:border-box;">'
+                f'<p style="margin:0 0 4px;color:{palette["muted"]};font-size:12px;">{section_index:02d} / {palette["divider"]}</p>'
+                f'<h2 style="margin:0;color:{palette["ink"]};font-size:20px;line-height:1.45;font-weight:800;">{render_inline_wechat(block.text, palette)}</h2>'
+                "</section>"
+            )
+        elif block.kind == "paragraph":
+            paragraph_index += 1
+            component = "highlight_sentence" if paragraph_index % (2 if intent.emphasis_density == "high" else 4) == 0 else "paragraph"
+            if component == "highlight_sentence":
+                parts.append(
+                    f'<p data-fl-component="highlight_sentence" style="margin:{paragraph_margin};padding:12px 14px;border-radius:10px;background:{palette["accent_soft"]};color:{palette["ink"]};font-size:15.5px;line-height:1.85;">{render_inline_wechat(block.text, palette)}</p>'
+                )
+            else:
+                parts.append(f'<p style="margin:{paragraph_margin};color:{palette["ink"]};font-size:15.5px;line-height:1.85;">{render_inline_wechat(block.text, palette)}</p>')
+        elif block.kind == "quote":
+            parts.append(
+                f'<blockquote data-fl-component="quote_card" style="margin:22px 0;padding:14px 16px;border-left:4px solid {palette["accent"]};background:{palette["accent_soft"]};border-radius:8px;color:{palette["ink"]};box-sizing:border-box;">'
+                f'<p style="margin:0;font-size:15.5px;line-height:1.85;">{render_inline_wechat(block.text, palette)}</p></blockquote>'
+            )
+        elif block.kind == "list":
+            tag = "ol" if block.ordered else "ul"
+            attrs = 'data-fl-component="step_block"' if block.ordered else 'data-fl-component="data_card"'
+            parts.append(f'<{tag} {attrs} style="margin:18px 0;padding:14px 18px 14px 32px;border:1px solid {palette["line"]};border-radius:10px;background:{palette["paper"]};color:{palette["ink"]};line-height:1.85;">')
+            for item in block.items:
+                parts.append(f'<li style="margin:6px 0;padding-left:2px;">{render_inline_wechat(item, palette)}</li>')
+            parts.append(f"</{tag}>")
+        elif block.kind == "image":
+            parts.append(
+                f'<section data-fl-component="image_caption" style="margin:24px 0;text-align:center;">'
+                f'<img src="{html.escape(block.src)}" alt="{html.escape(block.alt)}" style="display:block;max-width:100%;height:auto;margin:0 auto;border-radius:10px;border:1px solid {palette["line"]};box-sizing:border-box;" />'
+                f'<p style="margin:8px 0 0;color:{palette["muted"]};font-size:12px;line-height:1.6;">{html.escape(block.alt or "article image")}</p>'
+                "</section>"
+            )
+        elif block.kind == "table":
+            parts.append(f'<section data-fl-component="data_card" style="margin:22px 0;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:14px;color:{palette["ink"]};">')
+            for row_index, row in enumerate(block.rows):
+                tag = "th" if row_index == 0 else "td"
+                parts.append("<tr>")
+                for cell in row:
+                    parts.append(f'<{tag} style="border:1px solid {palette["line"]};padding:8px 10px;text-align:left;background:{palette["accent_soft"] if row_index == 0 else palette["surface"]};">{render_inline_wechat(cell, palette)}</{tag}>')
+                parts.append("</tr>")
+            parts.append("</table></section>")
+        elif block.kind == "code":
+            parts.append(f'<pre style="margin:20px 0;padding:14px;border-radius:10px;background:#17201c;color:#f8faf8;overflow:auto;"><code>{html.escape(block.text)}</code></pre>')
+        elif block.kind == "divider":
+            parts.append(f'<p data-fl-component="section_divider" style="margin:28px 0;text-align:center;color:{palette["accent"]};font-size:13px;">{palette["divider"]}</p>')
+    parts.append(
+        f'<section data-fl-component="footer_action" style="margin:34px 0 0;padding:16px;border-top:1px solid {palette["line"]};color:{palette["muted"]};font-size:13px;line-height:1.7;">'
+        "全文完。发布前请在公众号草稿箱中二次确认图片、缩进和段落节奏。</section>"
+    )
+    parts.append("</section></body></html>")
+    html_text = "\n".join(parts)
+    sanitized, report = sanitize_wechat_html(html_text)
+    return {
+        "html": sanitized,
+        "intent": intent.as_dict(),
+        "blocks": len(blocks),
+        "sanitize_report": report,
+    }
+
+
 def local_html_images(html_text: str, base_dir: Path) -> list[Path]:
     paths: list[Path] = []
     for src in re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_text or "", flags=re.I):
-        if src.startswith(("http://", "https://", "data:")):
-            continue
-        image_path = Path(src.lstrip("/"))
-        if not image_path.is_absolute():
-            candidate = storage.ROOT / image_path
-            if not candidate.exists():
-                candidate = base_dir / image_path
-            image_path = candidate
-        if image_path.exists():
+        image_path = resolve_html_image_src(src, base_dir)
+        if image_path:
             paths.append(image_path.resolve())
     return paths
 
@@ -467,13 +893,21 @@ def resolve_html_image_src(src: str, base_dir: Path) -> Path | None:
     normalized = src.replace("\\", "/")
     candidates: list[Path] = []
     if normalized.startswith("/"):
+        candidates.append(storage.STORAGE_ROOT / normalized.lstrip("/"))
         candidates.append(storage.ROOT / normalized.lstrip("/"))
     path = Path(normalized)
     if path.is_absolute():
         candidates.append(path)
     else:
         candidates.append(base_dir / path)
+        candidates.append(storage.STORAGE_ROOT / path)
         candidates.append(storage.ROOT / path)
+        content_match = re.fullmatch(r"content_(\d+)(\.[A-Za-z0-9]+)", path.name)
+        if content_match:
+            alias_path = path.with_name(f"content-{content_match.group(1)}{content_match.group(2)}")
+            candidates.append(base_dir / alias_path)
+            candidates.append(storage.STORAGE_ROOT / alias_path)
+            candidates.append(storage.ROOT / alias_path)
     for candidate in candidates:
         if candidate.exists():
             return candidate.resolve()
@@ -489,6 +923,55 @@ def normalize_publish_image_paths(html_text: str, base_dir: Path) -> str:
         return f'<img{before}src="{html.escape(str(image_path))}"{after}>'
 
     return re.sub(r'<img([^>]*?)src=["\']([^"\']+)["\']([^>]*?)>', replace, html_text, flags=re.I)
+
+
+def publish_image_identity(image_path: Path) -> str | None:
+    name = image_path.name.lower()
+    if name.startswith("cover.") and image_path.suffix.lower() in WECHAT_IMAGE_EXTENSIONS:
+        return "cover"
+    match = re.fullmatch(r"content[_-](\d+)(\.[a-z0-9]+)", name)
+    if match:
+        return f"content-{int(match.group(1))}{match.group(2).lower()}"
+    return None
+
+
+def prune_non_article_publish_images(html_text: str, base_dir: Path) -> str:
+    seen_content: set[str] = set()
+    if BeautifulSoup is None:
+        def replace(match: re.Match[str]) -> str:
+            src = match.group(2)
+            image_path = resolve_html_image_src(src, base_dir)
+            if not image_path:
+                return match.group(0)
+            identity = publish_image_identity(image_path)
+            if identity == "cover":
+                return ""
+            if identity and identity in seen_content:
+                return ""
+            if identity:
+                seen_content.add(identity)
+            return match.group(0)
+
+        return re.sub(r'<img([^>]*?)src=["\']([^"\']+)["\']([^>]*?)>', replace, html_text, flags=re.I)
+
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    for img in list(soup.find_all("img")):
+        src = str(img.get("src") or "")
+        image_path = resolve_html_image_src(src, base_dir)
+        if not image_path:
+            continue
+        identity = publish_image_identity(image_path)
+        remove = identity == "cover" or bool(identity and identity in seen_content)
+        if identity and identity != "cover":
+            seen_content.add(identity)
+        if not remove:
+            continue
+        container = img.find_parent(["section", "figure", "p"])
+        if container and len(container.find_all("img")) == 1:
+            container.decompose()
+        else:
+            img.decompose()
+    return str(soup)
 
 
 def style_existing_strong(html_text: str) -> str:
@@ -531,12 +1014,155 @@ def add_publish_emphasis(html_text: str, limit: int = 18) -> str:
     return re.sub(r"<p([^>]*)>(.*?)</p>", emphasize_paragraph, html_text, flags=re.I | re.S)
 
 
+def _clean_wechat_style(style: str) -> str:
+    cleaned: list[str] = []
+    for raw_part in (style or "").split(";"):
+        if ":" not in raw_part:
+            continue
+        key, value = raw_part.split(":", 1)
+        prop = key.strip().lower()
+        val = value.strip()
+        if not prop or prop not in WECHAT_ALLOWED_STYLE_PROPS:
+            continue
+        if "javascript:" in val.lower() or "expression(" in val.lower():
+            continue
+        cleaned.append(f"{prop}:{val}")
+    return ";".join(cleaned)
+
+
+def sanitize_wechat_html(html_text: str) -> tuple[str, dict[str, Any]]:
+    report: dict[str, Any] = {
+        "removed_tags": [],
+        "stripped_attrs": [],
+        "normalized_paragraphs": 0,
+        "image_count": 0,
+        "local_image_count": 0,
+        "remote_image_count": 0,
+        "data_image_count": 0,
+        "empty_image_count": 0,
+        "forbidden_tag_count": 0,
+        "ok": True,
+    }
+    if BeautifulSoup is None:
+        sanitized = re.sub(r"<\s*(script|iframe|style|link|svg|canvas|video|audio|object|embed)\b.*?</\s*\1\s*>", "", html_text, flags=re.I | re.S)
+        sanitized = re.sub(r"\s+on[a-z]+\s*=\s*(['\"]).*?\1", "", sanitized, flags=re.I | re.S)
+        report["ok"] = not bool(re.search(r"<\s*(script|iframe|style|link|svg|canvas|video|audio|object|embed)\b", sanitized, flags=re.I))
+        return sanitized, report
+
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    if Comment is not None:
+        for node in soup.find_all(string=lambda value: isinstance(value, Comment)):
+            node.extract()
+    for tag in list(soup.find_all(True)):
+        name = (tag.name or "").lower()
+        if name in WECHAT_FORBIDDEN_TAGS:
+            report["removed_tags"].append(name)
+            report["forbidden_tag_count"] += 1
+            tag.decompose()
+            continue
+        if name not in WECHAT_ALLOWED_TAGS and name not in {"html", "body", "head", "meta", "title"}:
+            report["removed_tags"].append(name)
+            tag.unwrap()
+            continue
+        for attr in list(tag.attrs):
+            lower = attr.lower()
+            if lower.startswith("on") or lower in {"class", "id"}:
+                report["stripped_attrs"].append(f"{name}.{attr}")
+                del tag.attrs[attr]
+                continue
+            if lower == "style":
+                clean_style = _clean_wechat_style(str(tag.attrs[attr]))
+                if clean_style:
+                    tag.attrs[attr] = clean_style
+                else:
+                    del tag.attrs[attr]
+                continue
+            if name == "img" and lower in {"src", "alt"}:
+                continue
+            if lower.startswith("data-fl-"):
+                continue
+            report["stripped_attrs"].append(f"{name}.{attr}")
+            del tag.attrs[attr]
+        if name == "p":
+            report["normalized_paragraphs"] += 1
+            style = _clean_wechat_style(str(tag.get("style", "")))
+            if "line-height" not in style:
+                style = (style + ";line-height:1.85").strip(";")
+            if "text-indent" in style:
+                style = re.sub(r"(?:^|;)text-indent:[^;]+", "", style).strip(";")
+            tag["style"] = style
+        if name == "img":
+            report["image_count"] += 1
+            src = str(tag.get("src") or "").strip()
+            if not src:
+                report["empty_image_count"] += 1
+            elif src.startswith("data:"):
+                report["data_image_count"] += 1
+            elif src.startswith(("http://", "https://")):
+                report["remote_image_count"] += 1
+            else:
+                report["local_image_count"] += 1
+            style = _clean_wechat_style(str(tag.get("style", "")))
+            if "max-width" not in style:
+                style = (style + ";max-width:100%").strip(";")
+            if "height" not in style:
+                style = (style + ";height:auto").strip(";")
+            tag["style"] = style
+    sanitized = str(soup)
+    report["ok"] = not report["forbidden_tag_count"] and not report["data_image_count"] and not report["empty_image_count"]
+    return sanitized, report
+
+
+def inspect_wechat_html_for_publish(html_text: str, base_dir: Path) -> dict[str, Any]:
+    sanitized, sanitize_report = sanitize_wechat_html(html_text)
+    srcs = re.findall(r'<img[^>]+src=["\']([^"\']*)["\']', sanitized or "", flags=re.I)
+    missing: list[str] = []
+    data_images: list[str] = []
+    remote_images: list[str] = []
+    local_paths: list[str] = []
+    for src in srcs:
+        if not src:
+            missing.append(src)
+            continue
+        if src.startswith("data:"):
+            data_images.append(src[:48])
+            continue
+        if src.startswith(("http://", "https://")):
+            remote_images.append(src)
+            continue
+        resolved = resolve_html_image_src(src, base_dir)
+        if not resolved:
+            missing.append(src)
+            continue
+        local_paths.append(str(resolved))
+    forbidden_found = sorted(set(re.findall(r"<\s*(script|iframe|style|link|svg|canvas|video|audio|object|embed)\b", html_text or "", flags=re.I)))
+    abnormal_indent = bool(re.search(r"text-indent\s*:\s*(?!0\b)[^;\"']+", html_text or "", flags=re.I))
+    return {
+        "sanitized_html": sanitized,
+        "sanitize_report": sanitize_report,
+        "image_src_count": len(srcs),
+        "local_image_paths": sorted(set(local_paths)),
+        "remote_images": remote_images,
+        "missing_images": missing,
+        "data_images": data_images,
+        "forbidden_tags": forbidden_found,
+        "abnormal_indent": abnormal_indent,
+        "html_chars": len(sanitized),
+        "ok": not missing and not data_images and not forbidden_found and not abnormal_indent and len(sanitized) <= WECHAT_HTML_MAX_CHARS,
+    }
+
+
 def prepare_html_for_publish(workspace: Path, html_path: Path) -> Path:
     html_text = html_path.read_text(encoding="utf-8")
     html_text = normalize_publish_image_paths(html_text, html_path.parent)
-    html_text = add_publish_emphasis(html_text)
+    html_text = prune_non_article_publish_images(html_text, html_path.parent)
+    html_text, sanitize_report = sanitize_wechat_html(add_publish_emphasis(html_text))
     output_path = workspace / "publish_ready.html"
     output_path.write_text(html_text, encoding="utf-8")
+    (workspace / "publish_ready_sanitize_report.json").write_text(
+        json.dumps(sanitize_report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return output_path
 
 
@@ -638,6 +1264,10 @@ def _replace_local_images_with_wechat_urls(html_text: str, base_dir: Path, acces
         image_path = resolve_html_image_src(src, base_dir)
         if not image_path:
             return match.group(0)
+        if image_path.suffix.lower() not in WECHAT_IMAGE_EXTENSIONS:
+            raise RuntimeError(f"Unsupported WeChat content image type: {image_path}")
+        if image_path.stat().st_size > WECHAT_IMAGE_MAX_BYTES:
+            raise RuntimeError(f"WeChat content image exceeds 10MB: {image_path}")
         image_url = _wechat_upload_content_image(access_token, image_path)
         uploaded.append({"path": str(image_path), "url": image_url})
         return f'<img{before}src="{html.escape(image_url)}"{after}>'
@@ -652,10 +1282,64 @@ def prepare_publish_html_with_wechat_images(
     access_token: str,
 ) -> tuple[Path, str, list[dict[str, str]]]:
     publish_html_path = prepare_html_for_publish(workspace, html_path)
+    source_html = html_path.read_text(encoding="utf-8")
+    (workspace / "publish_source_html_snapshot.html").write_text(source_html, encoding="utf-8")
     html_text = publish_html_path.read_text(encoding="utf-8")
+    before_report = inspect_wechat_html_for_publish(html_text, publish_html_path.parent)
+    expected_local_count = len(before_report.get("local_image_paths") or [])
     html_text, uploaded_images = _replace_local_images_with_wechat_urls(html_text, publish_html_path.parent, access_token)
+    html_text, sanitize_report = sanitize_wechat_html(html_text)
     publish_html_path.write_text(html_text, encoding="utf-8")
+    after_report = inspect_wechat_html_for_publish(html_text, publish_html_path.parent)
+    mapping_report = {
+        "source_content_path": _relative(html_path),
+        "publish_content_path": _relative(publish_html_path),
+        "expected_local_image_count": expected_local_count,
+        "uploaded_image_count": len(uploaded_images),
+        "replacement_count": len(uploaded_images),
+        "uploaded_images": uploaded_images,
+        "before": {key: value for key, value in before_report.items() if key != "sanitized_html"},
+        "after": {key: value for key, value in after_report.items() if key != "sanitized_html"},
+        "sanitize_after_upload": sanitize_report,
+        "ok": expected_local_count == len(uploaded_images) and not after_report.get("missing_images") and not after_report.get("data_images"),
+    }
+    (workspace / "publish_image_uploads.json").write_text(
+        json.dumps(mapping_report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return publish_html_path, html_text, uploaded_images
+
+
+def publish_image_upload_report(workspace: Path) -> dict[str, Any]:
+    report_path = workspace / "publish_image_uploads.json"
+    if not report_path.exists():
+        return {}
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ok": False, "path": _relative(report_path), "error": "publish_image_uploads.json is not readable"}
+    if isinstance(data, dict):
+        data["path"] = _relative(report_path)
+        return data
+    return {"ok": False, "path": _relative(report_path), "error": "publish_image_uploads.json is not an object"}
+
+
+def attach_publish_image_warning(result: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    report = publish_image_upload_report(workspace)
+    if not report:
+        return result
+    expected = int(report.get("expected_local_image_count") or 0)
+    uploaded = int(report.get("uploaded_image_count") or 0)
+    replaced = int(report.get("replacement_count") or 0)
+    result["image_upload_report"] = report
+    result["uploaded_content_image_count"] = uploaded
+    result["replaced_content_image_count"] = replaced
+    if expected != uploaded or uploaded != replaced or not report.get("ok", False):
+        result["warning"] = (
+            f"Content image upload mismatch: expected {expected}, uploaded {uploaded}, replaced {replaced}. "
+            "Open publish_image_uploads.json for the exact mapping."
+        )
+    return result
 
 
 def publish_draft_builtin(
@@ -712,6 +1396,7 @@ def publish_draft_builtin(
         "uploaded_content_images": uploaded_images,
         "publisher": "builtin",
     }
+    attach_publish_image_warning(result, workspace)
     result_path = workspace / "publish_result.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     result["path"] = _relative(result_path)
@@ -752,7 +1437,18 @@ def publish_preflight(
             token_cache = {}
     config_ready = bool(config.get("appid") and config.get("appsecret"))
     wechat_api_check: dict[str, Any] | None = refresh_wechat_access_token() if config_ready else None
-    content_image_paths = sorted({str(path) for path in local_html_images(html_text, html_path.parent)})
+    publish_inspection = inspect_wechat_html_for_publish(html_text, html_path.parent) if html_path.exists() else {
+        "ok": False,
+        "local_image_paths": [],
+        "missing_images": [],
+        "data_images": [],
+        "remote_images": [],
+        "forbidden_tags": [],
+        "abnormal_indent": False,
+        "html_chars": 0,
+        "sanitize_report": {},
+    }
+    content_image_paths = sorted({str(path) for path in publish_inspection.get("local_image_paths", [])})
     checks = [
         {
             "key": "wechat_config",
@@ -820,6 +1516,40 @@ def publish_preflight(
             "detail": f"{len(content_image_paths)} 张，将在发布时上传为微信图片 URL",
         },
         {
+            "key": "missing_images",
+            "label": "正文图片路径可解析",
+            "ok": not publish_inspection.get("missing_images"),
+            "detail": "全部图片路径可解析" if not publish_inspection.get("missing_images") else "无法解析：" + ", ".join(map(str, publish_inspection.get("missing_images", [])[:5])),
+        },
+        {
+            "key": "data_images",
+            "label": "正文图片不使用 data URI",
+            "ok": not publish_inspection.get("data_images"),
+            "detail": "未发现 data: 图片" if not publish_inspection.get("data_images") else f"{len(publish_inspection.get('data_images', []))} 张 data: 图片无法写入草稿箱",
+        },
+        {
+            "key": "remote_images",
+            "label": "正文图片不依赖外链",
+            "ok": not publish_inspection.get("remote_images"),
+            "detail": "未发现外链图片" if not publish_inspection.get("remote_images") else f"{len(publish_inspection.get('remote_images', []))} 张外链图片建议先转存到微信",
+        },
+        {
+            "key": "wechat_html_sanitize",
+            "label": "HTML 标签与段落兼容性",
+            "ok": not publish_inspection.get("forbidden_tags") and not publish_inspection.get("abnormal_indent"),
+            "detail": (
+                "未发现禁用标签或异常首行缩进"
+                if not publish_inspection.get("forbidden_tags") and not publish_inspection.get("abnormal_indent")
+                else f"禁用标签：{publish_inspection.get('forbidden_tags')}; 异常缩进：{publish_inspection.get('abnormal_indent')}"
+            ),
+        },
+        {
+            "key": "html_size",
+            "label": "HTML 内容大小",
+            "ok": int(publish_inspection.get("html_chars") or 0) <= WECHAT_HTML_MAX_CHARS,
+            "detail": f"{publish_inspection.get('html_chars', 0)} 字符 / {WECHAT_HTML_MAX_CHARS} 上限",
+        },
+        {
             "key": "token_cache",
             "label": "access_token 缓存",
             "ok": bool(token_cache.get("access_token")),
@@ -845,7 +1575,7 @@ def publish_preflight(
         },
     ]
     blocking = [item for item in checks if not item.get("ok") and not item.get("optional")]
-    return {
+    result = {
         "ok": not blocking,
         "checks": checks,
         "blocking": blocking,
@@ -853,6 +1583,7 @@ def publish_preflight(
         "digest_original_bytes": utf8_len(original_digest),
         "digest_bytes": utf8_len(safe_digest),
         "digest_truncated": digest_was_truncated,
+        "publish_inspection": {key: value for key, value in publish_inspection.items() if key != "sanitized_html"},
         "flow": [
             "1. 获取 access_token：GET /cgi-bin/token?grant_type=client_credential",
             "2. 上传封面永久素材：POST /cgi-bin/material/add_material?type=image，得到 thumb_media_id",
@@ -861,6 +1592,35 @@ def publish_preflight(
             "5. 保存 publish_result.json，便于目录中断点续跑",
         ],
     }
+    (workspace / "publish_preflight_report.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return result
+
+
+def sanitize_publish_html_preview(workspace: Path) -> dict[str, Any]:
+    html_path = workspace / "formatted_wechat.html"
+    if not html_path.exists():
+        html_path = workspace / "formatted.html"
+    if not html_path.exists():
+        raise FileNotFoundError("formatted.html 不存在，请先执行美编排版")
+    publish_html_path = prepare_html_for_publish(workspace, html_path)
+    html_text = publish_html_path.read_text(encoding="utf-8")
+    inspection = inspect_wechat_html_for_publish(html_text, publish_html_path.parent)
+    result = {
+        "ok": bool(inspection.get("ok")),
+        "content_path": _relative(publish_html_path),
+        "source_content_path": _relative(html_path),
+        "html_chars": len(html_text),
+        "publish_inspection": {key: value for key, value in inspection.items() if key != "sanitized_html"},
+        "message": "Prepared sanitized publish_ready.html without uploading images.",
+    }
+    (workspace / "publish_sanitize_report.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return result
 
 
 def refresh_wechat_access_token(timeout: float = 20) -> dict[str, Any]:
@@ -983,11 +1743,60 @@ def _compact_image_prompt(prompt: str, max_chars: int = IMAGE_PROMPT_RETRY_MAX_C
     text = re.sub(r"\s+", " ", (prompt or "").strip())
     if len(text) <= max_chars:
         return text
-    keep = max_chars - 72
+    suffix = "。主题明确，构图简洁，少量简体中文，适合公众号配图。"
+    keep = max(12, max_chars - len(suffix))
     return (
         text[:keep].rstrip()
-        + "。画面保持主题明确、元素克制、少量简体中文文字，适合微信公众号配图。"
+        + suffix
     )
+
+
+def _is_disconnect_or_transient_image_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return 500 <= exc.code < 600
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "remotedisconnected" in text
+        or "remote end closed connection" in text
+        or "stream disconnected" in text
+        or "connection reset" in text
+        or "proxyerror" in text
+    )
+
+
+def _image_bypass_env_proxy(setting: dict[str, Any]) -> bool:
+    provider = str(setting.get("provider") or "").strip().lower()
+    base_url = str(setting.get("base_url") or "").strip().lower()
+    return provider == "onefake" or "onefaka.com" in base_url
+
+
+def _post_image_json(
+    endpoint: str,
+    payload: dict[str, Any],
+    setting: dict[str, Any],
+    timeout: float,
+) -> dict[str, Any]:
+    request_payload = {key: value for key, value in payload.items() if key != "_protocol"}
+    body = json.dumps(request_payload, ensure_ascii=True).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {setting['api_key']}",
+        "Content-Type": "application/json",
+    }
+    if _image_bypass_env_proxy(setting):
+        with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(30.0, timeout)), trust_env=False) as client:
+            response = client.post(endpoint, content=body, headers=headers)
+        if response.status_code >= 400:
+            raise RuntimeError(f"图片 API 返回错误 {response.status_code}: {response.text[:1000]}")
+        return response.json()
+
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
 
 
 def _image_request_summary(endpoint: str, payload: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -1045,31 +1854,22 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
     timeout = float(resolved.get("timeout") or 120)
 
     def request_once(current_payload: dict[str, Any]) -> dict[str, Any]:
-        request_payload = {key: value for key, value in current_payload.items() if key != "_protocol"}
-        request = urllib.request.Request(
-            endpoint,
-            data=json.dumps(request_payload, ensure_ascii=True).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {resolved['api_key']}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8", "replace"))
+        return _post_image_json(endpoint, current_payload, resolved, timeout)
 
     retry_used = False
     try:
         try:
             data = request_once(payload)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            should_retry = 500 <= exc.code < 600 and len(prompt) > IMAGE_PROMPT_RETRY_MAX_CHARS
+        except Exception as exc:
+            should_retry = isinstance(exc, urllib.error.HTTPError) and 500 <= exc.code < 600 and len(prompt) > IMAGE_PROMPT_RETRY_MAX_CHARS
             if not should_retry:
                 summary = _image_request_summary(endpoint, payload, prompt)
-                raise RuntimeError(
-                    f"图片 API 返回错误 {exc.code}: {detail}; request={json.dumps(summary, ensure_ascii=False)}"
-                ) from exc
+                if isinstance(exc, urllib.error.HTTPError):
+                    detail = exc.read().decode("utf-8", "replace")
+                    raise RuntimeError(
+                        f"图片 API 返回错误 {exc.code}: {detail}; request={json.dumps(summary, ensure_ascii=False)}"
+                    ) from exc
+                raise
             retry_prompt = _compact_image_prompt(prompt)
             retry_payload = _image_payload(resolved, retry_prompt)
             retry_payload["_protocol"] = _image_protocol(resolved)
@@ -1078,12 +1878,18 @@ def generate_image(prompt: str, output_path: Path, setting: dict[str, Any] | Non
                 prompt = retry_prompt
                 payload = retry_payload
                 retry_used = True
-            except urllib.error.HTTPError as retry_exc:
-                retry_detail = retry_exc.read().decode("utf-8", "replace")
+            except Exception as retry_exc:
                 summary = _image_request_summary(endpoint, retry_payload, retry_prompt)
+                if isinstance(retry_exc, urllib.error.HTTPError):
+                    retry_detail = retry_exc.read().decode("utf-8", "replace")
+                    raise RuntimeError(
+                        "图片 API 返回错误 "
+                        f"{retry_exc.code}: {retry_detail}; 已因上游连接异常自动改用精简提示词重试；"
+                        f"request={json.dumps(summary, ensure_ascii=False)}"
+                    ) from retry_exc
                 raise RuntimeError(
-                    "图片 API 返回错误 "
-                    f"{retry_exc.code}: {retry_detail}; 已因上游 {exc.code} 自动改用精简提示词重试；"
+                    "图片 API 调用失败："
+                    f"{retry_exc}; 已因上游连接异常自动改用精简提示词重试；"
                     f"request={json.dumps(summary, ensure_ascii=False)}"
                 ) from retry_exc
     except RuntimeError:
@@ -1192,6 +1998,7 @@ def generate_writer_image_item(
     kind: str,
     prompt: str,
     index: int | None = None,
+    aspect_ratio: str | None = None,
 ) -> dict[str, Any]:
     prompt = (prompt or "").strip()
     if not prompt:
@@ -1217,7 +2024,11 @@ def generate_writer_image_item(
     item = _existing_image_item(image_path, prompt) if _metadata_prompt_matches(metadata, kind, prompt, index) else None
     if item is None:
         try:
-            item = generate_image(prompt, image_path)
+            setting = None
+            clean_aspect_ratio = str(aspect_ratio or "").strip()
+            if clean_aspect_ratio:
+                setting = {**image_api_settings.active_setting(), "aspect_ratio": clean_aspect_ratio}
+            item = generate_image(prompt, image_path, setting=setting)
         except Exception as exc:
             message = f"生成封面图失败：{exc}" if kind == "cover" else f"生成正文配图 {index} 失败：{exc}"
             metadata["errors"].append({"kind": kind, "index": index, "message": message})
@@ -1242,12 +2053,14 @@ def generate_writer_images(
     workspace: Path,
     cover_prompt: str | None = None,
     content_prompts: list[str] | None = None,
+    cover_aspect_ratio: str | None = None,
+    content_aspect_ratio: str | None = None,
 ) -> dict[str, Any]:
     if cover_prompt:
-        generate_writer_image_item(workspace, "cover", cover_prompt)
+        generate_writer_image_item(workspace, "cover", cover_prompt, aspect_ratio=cover_aspect_ratio)
     for index, prompt in enumerate(content_prompts or [], start=1):
         if prompt.strip():
-            generate_writer_image_item(workspace, "content", prompt, index=index)
+            generate_writer_image_item(workspace, "content", prompt, index=index, aspect_ratio=content_aspect_ratio)
     return load_writer_image_metadata(workspace)
 
 
@@ -1312,6 +2125,8 @@ def image_prompt_keywords(prompt: str) -> list[str]:
 
 def strip_existing_content_images(markdown_text: str) -> str:
     text = re.sub(r"\n*!\[内容配图\d*\]\([^\)]*content-\d+\.[^\)]*\)\n*", "\n", markdown_text or "")
+    text = re.sub(r"\n*!\[[^\]]*\]\([^\)]*content[_-]\d+\.[^\)]*\)\n*", "\n", text)
+    text = re.sub(r"\n*!\[[^\]]*\]\((?:[^\)]*[\\/])?cover\.(?:png|jpe?g|webp|bmp)[^\)]*\)\n*", "\n", text, flags=re.I)
     text = re.sub(r"\n*## 内容配图\s*\n+(?=(## |\Z))", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip() + "\n"
@@ -1503,6 +2318,37 @@ def format_article(
 
     html_path = workspace / "formatted.html"
     ai_error = ""
+    try:
+        rendered = wechat_html_from_markdown(
+            article_path.read_text(encoding="utf-8"),
+            design_strategy=design_strategy or DEFAULT_DESIGN_STRATEGY,
+            theme=theme,
+        )
+        html_text = str(rendered["html"])
+        html_path.write_text(html_text, encoding="utf-8")
+        (workspace / "design_intent.json").write_text(
+            json.dumps(rendered.get("intent") or {}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (workspace / "format_sanitize_report.json").write_text(
+            json.dumps(rendered.get("sanitize_report") or {}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "path": _relative(html_path),
+            "absolute_path": str(html_path),
+            "html": html_text,
+            "stdout": "generated by controlled WeChat template renderer",
+            "stderr": "",
+            "fallback": False,
+            "ai_formatted": False,
+            "template_formatted": True,
+            "design_intent": rendered.get("intent"),
+            "sanitize_report": rendered.get("sanitize_report"),
+            "message": "已使用受控模板渲染器生成微信兼容 HTML。",
+        }
+    except Exception as exc:
+        ai_error = str(exc)
     if use_ai and design_strategy.strip():
         try:
             html_text = deepseek_client.design_wechat_article_html(
@@ -1636,6 +2482,7 @@ def publish_draft(
             "timeout_seconds": exc.timeout,
             "command": [str(sys.executable), *command],
         }
+        attach_publish_image_warning(result, workspace)
         result_path = workspace / "publish_result.json"
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError(
@@ -1653,6 +2500,7 @@ def publish_draft(
         "cover_path": _relative(cover) if cover.exists() else str(cover),
         "uploaded_content_images": uploaded_images,
     }
+    attach_publish_image_warning(result, workspace)
     media_ids = re.findall(r"media_id[:：]\s*([A-Za-z0-9_\-]+)", completed.stdout + "\n" + completed.stderr)
     if media_ids:
         result["media_id"] = media_ids[-1]

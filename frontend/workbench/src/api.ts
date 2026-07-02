@@ -245,42 +245,6 @@ function normalizeClipboardImage(file: File, index: number) {
   return new File([file], name, { type, lastModified: file.lastModified || Date.now() });
 }
 
-function localReadableDocument(materials: SourceMaterial[]): KnowledgeItem {
-  if (materials.length === 1) {
-    const material = materials[0];
-    const title = material.title.trim() || "未命名原文";
-    const body = material.source.trim()
-      ? `# ${title}\n\n${material.source.trim()}`
-      : `# ${title}\n\n${material.note ?? ""}`;
-    return {
-      id: `readable-${Date.now()}`,
-      title,
-      note: "本地文本原文草稿",
-      body,
-      sourceIds: [material.id],
-      status: "draft",
-      confidence: "medium",
-    };
-  }
-
-  const title = `${materials[0]?.title || "组合素材"} 等 ${materials.length} 个原文文档`;
-  const body = materials
-    .map((material, index) => {
-      const heading = material.title.trim() || `素材 ${index + 1}`;
-      return `## ${index + 1}. ${heading}\n\n${material.source.trim() || material.note || ""}`;
-    })
-    .join("\n\n---\n\n");
-
-  return {
-    id: `readable-${Date.now()}`,
-    title,
-    note: "多素材本地原文草稿",
-    body,
-    sourceIds: materials.map((item) => item.id),
-    status: "draft",
-    confidence: "medium",
-  };
-}
 
 export type UploadedItem = Record<string, unknown> & {
   id?: number;
@@ -387,6 +351,25 @@ export type BilibiliCookieLoginResult = {
   ok?: boolean;
   message?: string;
   script?: string;
+};
+
+export type HtmlGrabCheckItem = {
+  key?: string;
+  label?: string;
+  ok?: boolean;
+  message?: string;
+  authorization_required?: boolean;
+  auth?: string;
+};
+
+export type HtmlGrabCheckStatus = {
+  ok?: boolean;
+  target_url?: string;
+  message?: string;
+  authorization_required?: boolean;
+  browser_connection?: string;
+  checks?: HtmlGrabCheckItem[];
+  error?: string;
 };
 
 export type MediaDependencyItem = {
@@ -822,8 +805,12 @@ export const api = {
     return writerApi.generateWriterProjectImageItem(projectId, kind, prompt, index);
   },
 
-  formatWriterProject(projectId: string, markdown?: string, designStrategy?: string) {
-    return writerApi.formatWriterProject(projectId, markdown, designStrategy);
+  formatWriterProject(projectId: string, markdown?: string, designStrategy?: string, theme = "tech") {
+    return writerApi.formatWriterProject(projectId, markdown, designStrategy, theme);
+  },
+
+  sanitizeWriterProjectPublishHtml(projectId: string) {
+    return writerApi.sanitizeWriterProjectPublishHtml(projectId);
   },
 
   preflightWriterProject(projectId: string, title: string, digest?: string, coverPath?: string) {

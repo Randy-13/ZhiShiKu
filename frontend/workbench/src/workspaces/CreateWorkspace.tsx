@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import type { LibraryKind, WriterLibraryFileInput } from "../api";
 import { writerApi } from "../apiWriter";
 import type { WriterImageRetryTask } from "../hooks/useWriterFlow";
-import type { KnowledgeItem, WriterProject, WriterProjectState, WriterStep } from "../domain";
+import type { KnowledgeItem, WriterProject, WriterProjectState, WriterStep, WriterStrategyPreset } from "../domain";
 import type { Translator } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
 import { Stepper } from "../components/Stepper";
@@ -43,6 +43,13 @@ const designStrategyPresets = [
   },
 ];
 
+const designThemeOptions = [
+  { id: "tech", zh: "科技长文", en: "Tech longform" },
+  { id: "research", zh: "研究笔记", en: "Research note" },
+  { id: "column", zh: "观点专栏", en: "Opinion column" },
+  { id: "xiumi", zh: "秀米装饰增强", en: "Xiumi-like rich" },
+];
+
 const imageStylePresets = [
   {
     id: "tech_clean",
@@ -70,28 +77,24 @@ const imageStylePresets = [
   },
 ];
 
-const steps: Array<{ id: WriterStep; zh: string; en: string }> = [
-  { id: "created", zh: "项目", en: "Project" },
-  { id: "knowledge_confirmed", zh: "知识", en: "Knowledge" },
-  { id: "topics", zh: "选题", en: "Topics" },
-  { id: "topic", zh: "确认", en: "Confirm" },
+type WorkflowStage = "project" | "topic" | "draft" | "images" | "design" | "publish";
+
+const workflowStages: Array<{ id: WorkflowStage; zh: string; en: string }> = [
+  { id: "project", zh: "项目创建", en: "Project" },
+  { id: "topic", zh: "选题", en: "Topic" },
   { id: "draft", zh: "初稿", en: "Draft" },
   { id: "images", zh: "配图", en: "Images" },
-  { id: "designed", zh: "美编", en: "Design" },
-  { id: "publish_check", zh: "预检", en: "Preflight" },
-  { id: "published", zh: "发布", en: "Publish" },
+  { id: "design", zh: "美编", en: "Design" },
+  { id: "publish", zh: "发布", en: "Publish" },
 ];
 
-const stepIndex: Record<WriterStep, number> = {
-  created: 0,
-  knowledge_confirmed: 1,
-  topics: 2,
-  topic: 3,
-  draft: 4,
-  images: 5,
-  designed: 6,
-  publish_check: 7,
-  published: 8,
+const workflowStageIndex: Record<WorkflowStage, number> = {
+  project: 0,
+  topic: 1,
+  draft: 2,
+  images: 3,
+  design: 4,
+  publish: 5,
 };
 
 type Props = {
@@ -118,9 +121,15 @@ type Props = {
   onGenerateDraft: (writingStrategy?: string, designStrategy?: string) => void;
   onRevise: (instruction: string, markdown?: string) => void;
   onSuggestImages: (markdown?: string, contentImageCount?: number, imageStylePreset?: string) => void;
-  onGenerateImages: (coverPrompt?: string, contentPrompts?: string[], onProgress?: (done: number, total: number) => void) => void;
+  onGenerateImages: (
+    coverPrompt?: string,
+    contentPrompts?: string[],
+    onProgress?: (done: number, total: number) => void,
+    aspectRatios?: { cover?: string; content?: string },
+  ) => void;
   onRetryImageItems: (tasks: WriterImageRetryTask[], onProgress?: (done: number, total: number) => void) => void;
-  onFormat: (markdown?: string, designStrategy?: string, writingStrategy?: string) => void;
+  onFormat: (markdown?: string, designStrategy?: string, writingStrategy?: string, theme?: string) => void;
+  onSanitizePublishHtml: () => void;
   onConfirmDesign: () => void;
   onPreflight: () => void;
   onPublish: () => void;
@@ -189,6 +198,7 @@ export function CreateWorkspace({
   onGenerateImages,
   onRetryImageItems,
   onFormat,
+  onSanitizePublishHtml,
   onConfirmDesign,
   onPreflight,
   onPublish,
@@ -198,77 +208,126 @@ export function CreateWorkspace({
   const [createMode, setCreateMode] = useState(!writerState?.project);
   const [writingStrategy, setWritingStrategy] = useState("");
   const [designStrategy, setDesignStrategy] = useState("");
+  const [designTheme, setDesignTheme] = useState("tech");
   const [revision, setRevision] = useState("");
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [coverPrompt, setCoverPrompt] = useState("");
   const [contentPromptsText, setContentPromptsText] = useState("");
   const [contentImageCount, setContentImageCount] = useState(1);
   const [imageStylePreset, setImageStylePreset] = useState(imageStylePresets[0].prompt);
+  const [coverImageAspectRatio, setCoverImageAspectRatio] = useState("2.35:1");
+  const [contentImageAspectRatio, setContentImageAspectRatio] = useState("");
   const [imageProgress, setImageProgress] = useState<ImageProgress>(null);
+  const [imagePromptsTouched, setImagePromptsTouched] = useState(false);
+  const [imageSuggestionsVisible, setImageSuggestionsVisible] = useState(false);
+  const [imagesConfirmedProjectId, setImagesConfirmedProjectId] = useState("");
   const [pendingTopic, setPendingTopic] = useState<Record<string, unknown> | null>(null);
-  const [reviewStep, setReviewStep] = useState<WriterStep | null>(null);
+  const [reviewStage, setReviewStage] = useState<WorkflowStage | null>(null);
+  const [draftConfirmedProjectId, setDraftConfirmedProjectId] = useState("");
+  const [writingStrategyPresets, setWritingStrategyPresets] = useState<WriterStrategyPreset[]>([]);
+  const [defaultWritingStrategyId, setDefaultWritingStrategyId] = useState("");
+  const [writingStrategyLibraryError, setWritingStrategyLibraryError] = useState("");
 
   const project = normalizeWriterProject(writerState?.project);
   const step = writerState?.step ?? "created";
   const nextAction = writerState?.next_action ?? "";
   const actualVisibleStep = visibleWriterStep(step, nextAction);
-  const actualStepIndex = stepIndex[actualVisibleStep] ?? 0;
-  const visibleStep = reviewStep && (stepIndex[reviewStep] ?? 0) <= actualStepIndex ? reviewStep : actualVisibleStep;
+  const draftConfirmed = Boolean(project?.id && project.article_markdown && draftConfirmedProjectId === project.id);
   const articleMarkdown = markdownDraft || project?.article_markdown || "";
+  const images = imageItems(project);
+  const imagePromptDirty =
+    imagePromptsTouched &&
+    (coverPrompt !== (project?.cover_prompt ?? "") ||
+      contentPromptsText !== (project?.content_image_prompts ?? []).join("\n"));
+  const imagesConfirmed = Boolean(project?.id && images.length && imagesConfirmedProjectId === project.id && !imagePromptDirty);
+  const actualStage = workflowStageForStep(actualVisibleStep, nextAction, draftConfirmed, imagesConfirmed);
+  const actualStageIndex = workflowStageIndex[actualStage] ?? 0;
+  const visibleStage = reviewStage && (workflowStageIndex[reviewStage] ?? 0) <= actualStageIndex ? reviewStage : actualStage;
+  const visibleStep = stepForWorkflowStage(visibleStage, actualVisibleStep, nextAction, project);
   const strategyDirty =
     writingStrategy !== (project?.writing_strategy ?? "") || designStrategy !== (project?.design_strategy ?? "");
-  const imagePromptDirty =
-    coverPrompt !== (project?.cover_prompt ?? "") ||
-    contentPromptsText !== (project?.content_image_prompts ?? []).join("\n");
-  const viewNextAction = nextActionForVisibleStep(visibleStep, actualVisibleStep, nextAction, project, imagePromptDirty);
-  const labels = steps.map((item) => (language === "zh" ? item.zh : item.en));
+  const hasImageSuggestions = Boolean(
+    imageSuggestionsVisible ||
+      project?.image_suggestion_rationale ||
+      project?.cover_prompt ||
+      project?.content_image_prompts?.length ||
+      images.length,
+  );
+  const viewNextAction = nextActionForVisibleStep(visibleStep, actualVisibleStep, nextAction, project, imagePromptDirty, hasImageSuggestions);
+  const labels = workflowStages.map((item) => (language === "zh" ? item.zh : item.en));
   const selectedLibraryFiles = useMemo(() => toWriterLibraryFiles(selectedKnowledgeFiles), [selectedKnowledgeFiles]);
-  const images = imageItems(project);
   const guide = guideForState(language, project, visibleStep, viewNextAction);
-  const primary = primaryAction(language, project, visibleStep, viewNextAction, isRunning);
-  const clearReviewStep = () => setReviewStep(null);
-  const runRetryFailedImages = (tasks = imageRetryTasks(project, coverPrompt, contentPromptsText, contentImageCount)) => {
-    clearReviewStep();
+  const primary = primaryAction(language, project, visibleStep, viewNextAction, isRunning, selectedLibraryFiles.length, pendingTopic);
+  const clearReviewStage = () => setReviewStage(null);
+  const runRetryFailedImages = (
+    tasks = imageRetryTasks(project, coverPrompt, contentPromptsText, contentImageCount, {
+      cover: coverImageAspectRatio,
+      content: contentImageAspectRatio,
+    }),
+  ) => {
+    clearReviewStage();
     if (!tasks.length) return;
     setImageProgress({ done: 0, total: tasks.length });
     onRetryImageItems(tasks, (done, total) => setImageProgress({ done, total }));
   };
   const runPrimaryAction = () =>
     runPrimary(visibleStep, viewNextAction, {
+      onImportKnowledge: () => {
+        clearReviewStage();
+        onImportKnowledge(selectedLibraryFiles);
+      },
       onGenerateTopics: () => {
-        clearReviewStep();
+        clearReviewStage();
         onGenerateTopics();
       },
+      onConfirmTopic: () => {
+        if (!pendingTopic) return;
+        clearReviewStage();
+        onSelectTopic(pendingTopic);
+        setPendingTopic(null);
+      },
+      onConfirmDraft: () => {
+        if (!project?.id || !articleMarkdown.trim()) return;
+        setDraftConfirmedProjectId(project.id);
+        setReviewStage(null);
+      },
       onGenerateDraft: () => {
-        clearReviewStep();
+        clearReviewStage();
         onGenerateDraft(writingStrategy, designStrategy);
       },
       onSuggestImages: () => {
-        clearReviewStep();
+        clearReviewStage();
         onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
       },
       onGenerateImages: () => {
-        clearReviewStep();
+        clearReviewStage();
+        setImagesConfirmedProjectId("");
         setImageProgress({ done: 0, total: Math.max(1, 1 + promptLines(contentPromptsText).length) });
         onGenerateImages(coverPrompt || project?.cover_prompt, promptLines(contentPromptsText), (done, total) =>
           setImageProgress({ done, total }),
+          { cover: coverImageAspectRatio, content: contentImageAspectRatio },
         );
       },
       onRetryFailedImages: () => runRetryFailedImages(),
+      onConfirmImages: () => {
+        if (!project?.id) return;
+        setImagesConfirmedProjectId(project.id);
+        setReviewStage(null);
+      },
       onFormat: () => {
-        clearReviewStep();
-        onFormat(articleMarkdown, designStrategy, writingStrategy);
+        clearReviewStage();
+        onFormat(articleMarkdown, designStrategy, writingStrategy, designTheme);
       },
       onConfirmDesign: () => {
-        clearReviewStep();
+        clearReviewStage();
         onConfirmDesign();
       },
       onPreflight: () => {
-        clearReviewStep();
+        clearReviewStage();
         onPreflight();
       },
       onPublish: () => {
-        clearReviewStep();
+        clearReviewStage();
         onPublish();
       },
     });
@@ -277,24 +336,67 @@ export function CreateWorkspace({
     setMarkdownDraft("");
     setRevision("");
     setImageProgress(null);
+    setImagePromptsTouched(false);
     setPendingTopic(null);
-    setReviewStep(null);
+    setReviewStage(null);
+    setDraftConfirmedProjectId("");
+    setImagesConfirmedProjectId("");
   }, [project?.id, project?.article_markdown]);
 
   useEffect(() => {
-    if (reviewStep && (stepIndex[reviewStep] ?? 0) > actualStepIndex) setReviewStep(null);
-  }, [actualStepIndex, reviewStep]);
+    if (reviewStage && (workflowStageIndex[reviewStage] ?? 0) > actualStageIndex) setReviewStage(null);
+  }, [actualStageIndex, reviewStage]);
 
   useEffect(() => {
     if (project?.id) setCreateMode(false);
+  }, [project?.id]);
+
+  useEffect(() => {
+    let active = true;
+    writerApi
+      .writerWritingStrategies()
+      .then((payload) => {
+        if (!active) return;
+        setWritingStrategyPresets(payload.items ?? []);
+        setDefaultWritingStrategyId(payload.default_id ?? "");
+        setWritingStrategyLibraryError("");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setWritingStrategyLibraryError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const projectContentPromptsKey = (project?.content_image_prompts ?? []).join("\n");
+
+  useEffect(() => {
     setWritingStrategy(project?.writing_strategy ?? "");
     setDesignStrategy(project?.design_strategy ?? "");
+    setDesignTheme(project?.html_theme ?? project?.design_intent?.theme ?? "tech");
     setCoverPrompt(project?.cover_prompt ?? "");
-    setContentPromptsText((project?.content_image_prompts ?? []).join("\n"));
+    setContentPromptsText(projectContentPromptsKey);
     setImageStylePreset(project?.image_style_preset ?? imageStylePresets[0].prompt);
+    setImageSuggestionsVisible(false);
+    const promptCount = project?.content_image_prompts?.length ?? 0;
+    setContentImageCount(promptCount >= 1 && promptCount <= 3 ? promptCount : 1);
+  }, [project?.id]);
+
+  useEffect(() => {
+    setCoverPrompt(project?.cover_prompt ?? "");
+    setContentPromptsText(projectContentPromptsKey);
+    setImagePromptsTouched(false);
     const promptCount = project?.content_image_prompts?.length ?? 0;
     if (promptCount >= 1 && promptCount <= 3) setContentImageCount(promptCount);
-  }, [project?.id, project?.writing_strategy, project?.design_strategy, project?.cover_prompt, project?.content_image_prompts, project?.image_style_preset]);
+  }, [project?.cover_prompt, projectContentPromptsKey]);
+
+  useEffect(() => {
+    setWritingStrategy(project?.writing_strategy ?? "");
+    setDesignStrategy(project?.design_strategy ?? "");
+    setDesignTheme(project?.html_theme ?? project?.design_intent?.theme ?? "tech");
+  }, [project?.writing_strategy, project?.design_strategy, project?.html_theme, project?.design_intent?.theme]);
 
   return (
     <section className="create-project-layout">
@@ -334,18 +436,14 @@ export function CreateWorkspace({
             language={language}
             name={projectName}
             projectType={projectType}
-            writingStrategy={writingStrategy}
-            designStrategy={designStrategy}
             selectedFiles={selectedLibraryFiles}
             isRunning={isRunning}
             hasOpenProject={Boolean(project)}
             onNameChange={setProjectName}
             onTypeChange={setProjectType}
-            onWritingStrategyChange={setWritingStrategy}
-            onDesignStrategyChange={setDesignStrategy}
             onCancel={() => setCreateMode(false)}
             onCreate={() => {
-              onCreateProject(projectName.trim(), projectType, selectedLibraryFiles, writingStrategy, designStrategy);
+              onCreateProject(projectName.trim(), projectType, selectedLibraryFiles, "", "");
               setProjectName("");
             }}
           />
@@ -361,50 +459,9 @@ export function CreateWorkspace({
                 </div>
                 <div className="project-status-card">
                   <span>{language === "zh" ? "当前步骤" : "Current step"}</span>
-                  <strong>{stageLabel(actualVisibleStep, language)}</strong>
+                  <strong>{workflowStageLabel(actualStage, language)}</strong>
                 </div>
               </div>
-            }
-            action={primary.label}
-            disabled={primary.disabled}
-            disabledReason={primary.reason}
-            onAction={() =>
-              runPrimary(visibleStep, viewNextAction, {
-                onGenerateTopics: () => {
-                  clearReviewStep();
-                  onGenerateTopics();
-                },
-                onGenerateDraft: () => {
-                  clearReviewStep();
-                  onGenerateDraft(writingStrategy, designStrategy);
-                },
-                onSuggestImages: () => {
-                  clearReviewStep();
-                  onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
-                },
-                onGenerateImages: () => {
-                  clearReviewStep();
-                  setImageProgress({ done: 0, total: Math.max(1, 1 + promptLines(contentPromptsText).length) });
-                  onGenerateImages(coverPrompt || project.cover_prompt, promptLines(contentPromptsText), (done, total) => setImageProgress({ done, total }));
-                },
-                onRetryFailedImages: () => runRetryFailedImages(),
-                onFormat: () => {
-                  clearReviewStep();
-                  onFormat(articleMarkdown, designStrategy, writingStrategy);
-                },
-                onConfirmDesign: () => {
-                  clearReviewStep();
-                  onConfirmDesign();
-                },
-                onPreflight: () => {
-                  clearReviewStep();
-                  onPreflight();
-                },
-                onPublish: () => {
-                  clearReviewStep();
-                  onPublish();
-                },
-              })
             }
           />
         )}
@@ -413,11 +470,11 @@ export function CreateWorkspace({
           <div className="create-stepper-wrap">
             <Stepper
               steps={labels}
-              activeIndex={stepIndex[visibleStep] ?? 0}
-              progressIndex={actualStepIndex}
-              maxSelectableIndex={actualStepIndex}
+              activeIndex={workflowStageIndex[visibleStage] ?? 0}
+              progressIndex={actualStageIndex}
+              maxSelectableIndex={actualStageIndex}
               activeLabel={guide.checkpoints?.[0]}
-              onSelect={(index) => setReviewStep(steps[index]?.id ?? null)}
+              onSelect={(index) => setReviewStage(workflowStages[index]?.id ?? null)}
             />
           </div>
         ) : null}
@@ -431,32 +488,42 @@ export function CreateWorkspace({
           <ProjectStageWorkspace
               language={language}
               project={project}
-              step={step}
+              visibleStage={visibleStage}
+              actualStage={actualStage}
               visibleStep={visibleStep}
-              actualVisibleStep={actualVisibleStep}
               nextAction={viewNextAction}
               backendNextAction={nextAction}
-              isReviewingStep={visibleStep !== actualVisibleStep}
+              isReviewingStep={visibleStage !== actualStage}
               strategyDirty={strategyDirty}
               selectedLibraryFiles={selectedLibraryFiles}
               isRunning={isRunning}
               writingStrategy={writingStrategy}
               designStrategy={designStrategy}
+              designTheme={designTheme}
               articleMarkdown={articleMarkdown}
               revision={revision}
               coverPrompt={coverPrompt}
-              contentPromptsText={contentPromptsText}
-              contentImageCount={contentImageCount}
-              imageStylePreset={imageStylePreset}
-              imageProgress={imageProgress}
+                contentPromptsText={contentPromptsText}
+                contentImageCount={contentImageCount}
+                imageStylePreset={imageStylePreset}
+                coverImageAspectRatio={coverImageAspectRatio}
+                contentImageAspectRatio={contentImageAspectRatio}
+                imageProgress={imageProgress}
               images={images}
               imageErrors={project.images?.errors ?? []}
+              hasSuggestions={hasImageSuggestions}
               pendingTopic={pendingTopic}
               primaryAction={primary}
               guideTitle={guide.title}
               onPendingTopicChange={setPendingTopic}
               onPrimaryAction={runPrimaryAction}
-              onContinueFormat={() => onFormat(articleMarkdown, designStrategy, writingStrategy)}
+              onSuggestImages={() => {
+                clearReviewStage();
+                setImageSuggestionsVisible(true);
+                onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
+              }}
+              onContinueFormat={() => onFormat(articleMarkdown, designStrategy, writingStrategy, designTheme)}
+              onSanitizePublishHtml={onSanitizePublishHtml}
               onRetryImageTasks={runRetryFailedImages}
               onImportKnowledge={() => onImportKnowledge(selectedLibraryFiles)}
               onSaveStrategies={onSaveStrategies}
@@ -470,12 +537,25 @@ export function CreateWorkspace({
                 onRevise(revision, articleMarkdown);
                 setRevision("");
               }}
-              onCoverPromptChange={setCoverPrompt}
-              onContentPromptsTextChange={setContentPromptsText}
-              onContentImageCountChange={setContentImageCount}
-              onImageStylePresetChange={setImageStylePreset}
-              onWritingStrategyChange={setWritingStrategy}
+              onCoverPromptChange={(value) => {
+                setImagePromptsTouched(true);
+                setCoverPrompt(value);
+              }}
+                onContentPromptsTextChange={(value) => {
+                  setImagePromptsTouched(true);
+                  setContentPromptsText(value);
+                }}
+                onContentImageCountChange={setContentImageCount}
+                onImageStylePresetChange={setImageStylePreset}
+                onCoverImageAspectRatioChange={setCoverImageAspectRatio}
+                onContentImageAspectRatioChange={setContentImageAspectRatio}
+                onWritingStrategyChange={setWritingStrategy}
               onDesignStrategyChange={setDesignStrategy}
+              onDesignThemeChange={setDesignTheme}
+              writingStrategyPresets={writingStrategyPresets}
+              defaultWritingStrategyId={defaultWritingStrategyId}
+              writingStrategyLibraryError={writingStrategyLibraryError}
+              onWritingStrategyPresetsChange={setWritingStrategyPresets}
             />
           )}
         </section>
@@ -489,9 +569,9 @@ export function CreateWorkspace({
 function ProjectStageWorkspace({
   language,
   project,
-  step,
+  visibleStage,
+  actualStage,
   visibleStep,
-  actualVisibleStep,
   nextAction,
   backendNextAction,
   isReviewingStep,
@@ -500,21 +580,27 @@ function ProjectStageWorkspace({
   isRunning,
   writingStrategy,
   designStrategy,
+  designTheme,
   articleMarkdown,
   revision,
   coverPrompt,
   contentPromptsText,
   contentImageCount,
   imageStylePreset,
+  coverImageAspectRatio,
+  contentImageAspectRatio,
   imageProgress,
   images,
   imageErrors,
+  hasSuggestions,
   pendingTopic,
   primaryAction,
   guideTitle,
   onPendingTopicChange,
   onPrimaryAction,
+  onSuggestImages,
   onContinueFormat,
+  onSanitizePublishHtml,
   onRetryImageTasks,
   onImportKnowledge,
   onSaveStrategies,
@@ -526,14 +612,21 @@ function ProjectStageWorkspace({
   onContentPromptsTextChange,
   onContentImageCountChange,
   onImageStylePresetChange,
+  onCoverImageAspectRatioChange,
+  onContentImageAspectRatioChange,
   onWritingStrategyChange,
   onDesignStrategyChange,
+  onDesignThemeChange,
+  writingStrategyPresets,
+  defaultWritingStrategyId,
+  writingStrategyLibraryError,
+  onWritingStrategyPresetsChange,
 }: {
   language: "zh" | "en";
   project: WriterProject;
-  step: WriterStep;
+  visibleStage: WorkflowStage;
+  actualStage: WorkflowStage;
   visibleStep: WriterStep;
-  actualVisibleStep: WriterStep;
   nextAction: string;
   backendNextAction: string;
   isReviewingStep: boolean;
@@ -542,21 +635,27 @@ function ProjectStageWorkspace({
   isRunning: boolean;
   writingStrategy: string;
   designStrategy: string;
+  designTheme: string;
   articleMarkdown: string;
   revision: string;
   coverPrompt: string;
   contentPromptsText: string;
   contentImageCount: number;
   imageStylePreset: string;
+  coverImageAspectRatio: string;
+  contentImageAspectRatio: string;
   imageProgress: ImageProgress;
   images: Array<{ path?: string; prompt?: string }>;
   imageErrors: Array<{ kind?: string; index?: number; message?: string }>;
+  hasSuggestions: boolean;
   pendingTopic: Record<string, unknown> | null;
   primaryAction: { label: string; disabled: boolean; reason?: string };
   guideTitle: string;
   onPendingTopicChange: (topic: Record<string, unknown> | null) => void;
   onPrimaryAction: () => void;
+  onSuggestImages: () => void;
   onContinueFormat: () => void;
+  onSanitizePublishHtml: () => void;
   onRetryImageTasks: (tasks?: WriterImageRetryTask[]) => void;
   onImportKnowledge: () => void;
   onSaveStrategies: (writingStrategy: string, designStrategy: string) => void;
@@ -568,10 +667,17 @@ function ProjectStageWorkspace({
   onContentPromptsTextChange: (value: string) => void;
   onContentImageCountChange: (value: number) => void;
   onImageStylePresetChange: (value: string) => void;
+  onCoverImageAspectRatioChange: (value: string) => void;
+  onContentImageAspectRatioChange: (value: string) => void;
   onWritingStrategyChange: (value: string) => void;
   onDesignStrategyChange: (value: string) => void;
+  onDesignThemeChange: (value: string) => void;
+  writingStrategyPresets: WriterStrategyPreset[];
+  defaultWritingStrategyId: string;
+  writingStrategyLibraryError: string;
+  onWritingStrategyPresetsChange: (items: WriterStrategyPreset[]) => void;
 }) {
-  const stageTitle = stageLabel(visibleStep, language);
+  const stageTitle = workflowStageLabel(visibleStage, language);
   return (
     <div className="stage-workspace">
       <div className="stage-panel-heading">
@@ -581,15 +687,12 @@ function ProjectStageWorkspace({
           {isReviewingStep ? (
             <small className="stage-review-note">
               {language === "zh"
-                ? `正在回看：真实进度在「${stageLabel(actualVisibleStep, language)}」。如果在这里继续，将从此步骤重新生成后续流程。`
-                : `Reviewing this step. The real progress is ${stageLabel(actualVisibleStep, language)}. Continuing here will regenerate the downstream flow.`}
+                ? `正在回看：真实进度在「${workflowStageLabel(actualStage, language)}」。如果在这里继续，将从此阶段重新生成后续流程。`
+                : `Reviewing this stage. The real progress is ${workflowStageLabel(actualStage, language)}. Continuing here will regenerate the downstream flow.`}
             </small>
           ) : null}
         </div>
         <div className="stage-heading-tools">
-          {visibleStep === "designed" ? (
-            <DesignStrategySelect language={language} value={designStrategy} onChange={onDesignStrategyChange} />
-          ) : null}
           <button
             className="primary-cta stage-primary-action"
             type="button"
@@ -600,7 +703,7 @@ function ProjectStageWorkspace({
             <Sparkles size={16} />
             <strong>{primaryAction.label}</strong>
           </button>
-          {visibleStep === actualVisibleStep && visibleStep === "images" && backendNextAction === "retry_failed_images" ? (
+          {visibleStage === actualStage && visibleStep === "images" && backendNextAction === "retry_failed_images" ? (
             <button className="secondary-button" type="button" disabled={isRunning} onClick={onContinueFormat}>
               {language === "zh" ? "继续美编" : "Continue to HTML"}
             </button>
@@ -611,23 +714,36 @@ function ProjectStageWorkspace({
         </div>
       </div>
 
-      <ProjectStrategyPanel
-        language={language}
-        writingStrategy={writingStrategy}
-        designStrategy={designStrategy}
-        onWritingStrategyChange={onWritingStrategyChange}
-        onDesignStrategyChange={onDesignStrategyChange}
-        onSave={onSaveStrategies}
-        saveDisabled={isRunning}
-        saveLabel={strategyDirty ? (language === "zh" ? "保存并应用到项目" : "Save to project") : (language === "zh" ? "当前策略已生效" : "Strategies are up to date")}
-        hint={
-          language === "zh"
-            ? "写文策略会用于生成初稿，美编策略会用于生成 HTML。保存后会立刻成为当前项目的默认策略。"
-            : "Writing strategy drives draft generation, and design strategy drives HTML formatting. Save to make them the project's active defaults."
-        }
-      />
+      {visibleStage === "draft" || visibleStage === "design" ? (
+          <ProjectStrategyPanel
+            language={language}
+            kind={visibleStage === "draft" ? "writing" : "design"}
+            writingStrategy={writingStrategy}
+            designStrategy={designStrategy}
+            designTheme={designTheme}
+            onWritingStrategyChange={onWritingStrategyChange}
+            onDesignStrategyChange={onDesignStrategyChange}
+            onDesignThemeChange={onDesignThemeChange}
+          onSave={onSaveStrategies}
+          saveDisabled={isRunning}
+          writingStrategyPresets={writingStrategyPresets}
+          defaultWritingStrategyId={defaultWritingStrategyId}
+          writingStrategyLibraryError={writingStrategyLibraryError}
+          onWritingStrategyPresetsChange={onWritingStrategyPresetsChange}
+          saveLabel={strategyDirty ? (language === "zh" ? "保存并应用到项目" : "Save to project") : (language === "zh" ? "当前策略已生效" : "Strategies are up to date")}
+          hint={
+            visibleStage === "draft"
+              ? language === "zh"
+                ? "写文策略只用于生成初稿。保存后会立刻成为当前项目默认写文策略。"
+                : "Writing strategy only drives draft generation. Save to make it the active project default."
+              : language === "zh"
+                ? "美编策略只用于生成 HTML。保存后会立刻成为当前项目默认美编策略。"
+                : "Design strategy only drives HTML formatting. Save to make it the active project default."
+          }
+        />
+      ) : null}
 
-      {visibleStep === "created" ? (
+      {visibleStage === "project" ? (
         <ProjectKnowledge
           language={language}
           files={project.library_files ?? []}
@@ -637,15 +753,10 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {visibleStep === "knowledge_confirmed" ? (
-        <ReferenceReadyPanel language={language} project={project} />
-      ) : null}
-
-      {visibleStep === "topics" ? (
-        <TopicCards
+      {visibleStage === "topic" ? (
+        <TopicStagePanel
           language={language}
-          topics={project.topics ?? []}
-          selected={project.topic}
+          project={project}
           pendingTopic={pendingTopic}
           disabled={isRunning}
           onPendingTopicChange={onPendingTopicChange}
@@ -653,9 +764,7 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {visibleStep === "topic" ? <TopicSummaryPanel language={language} topic={project.topic} /> : null}
-
-      {visibleStep === "draft" ? (
+      {visibleStage === "draft" ? (
         <ArticleEditor
           language={language}
           title={project.title}
@@ -669,26 +778,37 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {visibleStep === "draft" && nextAction === "suggest_images" ? (
+      {visibleStage === "images" ? (
         <ImageSuggestionOptions
           language={language}
           value={contentImageCount}
           imageStylePreset={imageStylePreset}
+          coverAspectRatio={coverImageAspectRatio}
+          contentAspectRatio={contentImageAspectRatio}
+          isRunning={isRunning}
+          hasSuggestions={hasSuggestions}
           onChange={onContentImageCountChange}
           onImageStylePresetChange={onImageStylePresetChange}
+          onCoverAspectRatioChange={onCoverImageAspectRatioChange}
+          onContentAspectRatioChange={onContentImageAspectRatioChange}
+          onSuggest={onSuggestImages}
         />
       ) : null}
 
-      {visibleStep === "images" ? (
+      {visibleStage === "images" && hasSuggestions ? (
         <ImageSection
           language={language}
           coverPrompt={coverPrompt}
           contentPromptsText={contentPromptsText}
           contentImageCount={contentImageCount}
+          coverAspectRatio={coverImageAspectRatio}
+          contentAspectRatio={contentImageAspectRatio}
+          rationale={project.image_suggestion_rationale ?? ""}
           progress={imageProgress}
           imageState={project.images}
           images={images}
           errors={imageErrors}
+          hasSuggestions={hasSuggestions}
           isRunning={isRunning}
           onCoverPromptChange={onCoverPromptChange}
           onContentPromptsTextChange={onContentPromptsTextChange}
@@ -696,18 +816,23 @@ function ProjectStageWorkspace({
         />
       ) : null}
 
-      {visibleStep === "designed" ? (
+      {visibleStage === "design" && project.html_path ? (
         <div className="stage-stack">
           <DesignStagePanel
             language={language}
             project={project}
             nextAction={nextAction}
+            designTheme={designTheme}
+            onDesignThemeChange={onDesignThemeChange}
+            onReformat={() => onContinueFormat()}
+            onSanitizePublishHtml={onSanitizePublishHtml}
+            disabled={isRunning}
           />
         </div>
       ) : null}
 
-      {visibleStep === "publish_check" || visibleStep === "published" ? (
-        <PublishSection language={language} project={project} />
+      {visibleStage === "publish" ? (
+        <PublishSection language={language} project={project} onSanitizePublishHtml={onSanitizePublishHtml} disabled={isRunning} />
       ) : null}
     </div>
   );
@@ -751,33 +876,53 @@ function TopicSummaryPanel({ language, topic }: { language: "zh" | "en"; topic?:
   );
 }
 
-function DesignStrategySelect({
+function TopicStagePanel({
   language,
-  value,
-  onChange,
+  project,
+  pendingTopic,
+  disabled,
+  onPendingTopicChange,
+  onSelectTopic,
 }: {
   language: "zh" | "en";
-  value: string;
-  onChange: (value: string) => void;
+  project: WriterProject;
+  pendingTopic: Record<string, unknown> | null;
+  disabled: boolean;
+  onPendingTopicChange: (topic: Record<string, unknown> | null) => void;
+  onSelectTopic: (topic: Record<string, unknown>) => void;
 }) {
-  const selectedId = designStrategyPresets.find((preset) => preset.value === value)?.id ?? designStrategyPresets[0].id;
+  const hasTopics = Boolean(project.topics?.length);
   return (
-    <label className="design-strategy-select">
-      <span>{language === "zh" ? "美编策略" : "Design strategy"}</span>
-      <select
-        value={selectedId}
-        onChange={(event) => {
-          const preset = designStrategyPresets.find((item) => item.id === event.target.value);
-          if (preset) onChange(preset.value);
-        }}
-      >
-        {designStrategyPresets.map((preset) => (
-          <option key={preset.id} value={preset.id}>
-            {language === "zh" ? preset.zh : preset.en}
-          </option>
-        ))}
-      </select>
-    </label>
+    <div className="stage-stack topic-stage-stack">
+      <ReferenceReadyPanel language={language} project={project} />
+      <section className="project-section stage-focus-panel topic-strategy-strip">
+        <div className="section-heading">
+          <h2>{language === "zh" ? "选题策略" : "Topic strategy"}</h2>
+          <span>{language === "zh" ? "真实生成规则" : "Real generation rule"}</span>
+        </div>
+        <p className="hint">
+          {language === "zh"
+            ? "选题会严格基于已导入知识生成，不引入未选中的历史内容或外部事实。需要调整方向时，先回到项目创建阶段更换导入文件。"
+            : "Topics are generated strictly from imported knowledge. To change direction, return to the project stage and adjust imported files."}
+        </p>
+      </section>
+      {hasTopics ? (
+        <TopicCards
+          language={language}
+          topics={project.topics ?? []}
+          selected={project.topic}
+          pendingTopic={pendingTopic}
+          disabled={disabled}
+          onPendingTopicChange={onPendingTopicChange}
+          onSelectTopic={onSelectTopic}
+        />
+      ) : (
+        <section className="project-section stage-focus-panel">
+          <EmptyState title={language === "zh" ? "还没有选题建议" : "No topic suggestions yet"} />
+        </section>
+      )}
+      {project.topic ? <TopicSummaryPanel language={language} topic={project.topic} /> : null}
+    </div>
   );
 }
 
@@ -785,10 +930,20 @@ function DesignStagePanel({
   language,
   project,
   nextAction,
+  designTheme,
+  onDesignThemeChange,
+  onReformat,
+  onSanitizePublishHtml,
+  disabled,
 }: {
   language: "zh" | "en";
   project: WriterProject;
   nextAction: string;
+  designTheme: string;
+  onDesignThemeChange: (value: string) => void;
+  onReformat: () => void;
+  onSanitizePublishHtml: () => void;
+  disabled?: boolean;
 }) {
   return (
     <section className="project-section design-stage-panel">
@@ -808,9 +963,32 @@ function DesignStagePanel({
               : "Pending"}
         </span>
       </div>
+      <div className="design-theme-picker" role="group" aria-label={language === "zh" ? "美编主题" : "Design theme"}>
+        {designThemeOptions.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={designTheme === item.id ? "theme-chip active" : "theme-chip"}
+            disabled={disabled}
+            onClick={() => onDesignThemeChange(item.id)}
+          >
+            {language === "zh" ? item.zh : item.en}
+          </button>
+        ))}
+      </div>
       {project.html_path ? (
         <>
           <HtmlPreviewControls language={language} htmlPath={project.html_path} />
+          <DesignCompatibilityPanel language={language} project={project} />
+          <div className="design-action-row">
+            <button className="secondary-button" type="button" disabled={disabled} onClick={onReformat}>
+              <Sparkles size={16} />
+              {language === "zh" ? "重新美编但保留图片位置" : "Reformat, keep images"}
+            </button>
+            <button className="secondary-button" type="button" disabled={disabled} onClick={onSanitizePublishHtml}>
+              {language === "zh" ? "只重新清洗发布版" : "Sanitize publish HTML"}
+            </button>
+          </div>
         </>
       ) : (
         <EmptyState title={language === "zh" ? "还没有生成 HTML" : "No HTML yet"} />
@@ -819,34 +997,85 @@ function DesignStagePanel({
   );
 }
 
+function DesignCompatibilityPanel({ language, project }: { language: "zh" | "en"; project: WriterProject }) {
+  const checks = project.preflight?.checks ?? [];
+  const intent = project.design_intent ?? {};
+  const inspection = (project.publish_inspection ?? project.publish_sanitize?.publish_inspection ?? {}) as Record<string, unknown>;
+  const sanitizeReport = project.format_sanitize_report ?? {};
+  const compactChecks = checks.length
+    ? checks.filter((item) => ["content_images", "missing_images", "data_images", "remote_images", "wechat_html_sanitize", "html_size", "digest", "cover"].includes(String(item.key)))
+    : [
+        {
+          key: "images",
+          label: language === "zh" ? "图片" : "Images",
+          ok: !inspection.missing_images && !inspection.data_images && !inspection.remote_images,
+          detail: language === "zh" ? "等待预检或清洗报告" : "Waiting for sanitize or preflight report",
+          optional: true,
+        },
+        {
+          key: "sanitize",
+          label: language === "zh" ? "禁用标签" : "Forbidden tags",
+          ok: !inspection.forbidden_tags && !sanitizeReport.removed_forbidden_tags,
+          detail: language === "zh" ? "模板渲染器会在发布前清洗" : "The renderer sanitizes before publishing",
+          optional: true,
+        },
+      ];
+  const intentItems = [
+    ["theme", language === "zh" ? "主题" : "Theme"],
+    ["emphasis_density", language === "zh" ? "强调密度" : "Emphasis"],
+    ["decoration_level", language === "zh" ? "装饰强度" : "Decoration"],
+    ["paragraph_rhythm", language === "zh" ? "段落节奏" : "Rhythm"],
+    ["quote_style", language === "zh" ? "引用样式" : "Quote"],
+    ["image_style", language === "zh" ? "图片样式" : "Images"],
+  ] as const;
+  const components = Array.isArray(intent.components) ? intent.components.map(String) : [];
+  return (
+    <div className="design-compatibility-panel">
+      <div className="compatibility-header">
+        <strong>{language === "zh" ? "发布兼容性状态" : "Publish compatibility"}</strong>
+        <span>{project.preflight?.ok ? (language === "zh" ? "预检通过" : "Preflight passed") : language === "zh" ? "待预检" : "Pending preflight"}</span>
+      </div>
+      <div className="compatibility-grid">
+        {compactChecks.map((item) => (
+          <article key={item.key || item.label} className={item.ok ? "compatibility-item ok" : item.optional ? "compatibility-item warn" : "compatibility-item failed"}>
+            <strong>{item.label || item.key}</strong>
+            <span>{item.detail}</span>
+          </article>
+        ))}
+      </div>
+      <div className="design-intent-grid">
+        {intentItems.map(([key, label]) => (
+          <span key={key}>
+            <b>{label}</b>
+            {String(intent[key] ?? "-")}
+          </span>
+        ))}
+      </div>
+      {components.length ? <p className="design-components">{components.slice(0, 10).join(" / ")}</p> : null}
+    </div>
+  );
+}
+
 function ProjectSetup({
   language,
   name,
   projectType,
-  writingStrategy,
-  designStrategy,
   selectedFiles,
   isRunning,
   hasOpenProject,
   onNameChange,
   onTypeChange,
-  onWritingStrategyChange,
-  onDesignStrategyChange,
   onCancel,
   onCreate,
 }: {
   language: "zh" | "en";
   name: string;
   projectType: string;
-  writingStrategy: string;
-  designStrategy: string;
   selectedFiles: WriterLibraryFileInput[];
   isRunning: boolean;
   hasOpenProject: boolean;
   onNameChange: (value: string) => void;
   onTypeChange: (value: string) => void;
-  onWritingStrategyChange: (value: string) => void;
-  onDesignStrategyChange: (value: string) => void;
   onCancel: () => void;
   onCreate: () => void;
 }) {
@@ -878,13 +1107,24 @@ function ProjectSetup({
           {language === "zh" ? "目前先实现公众号文章项目，其他类型会保留为后续扩展。" : "Only WeChat article projects are implemented first; other types are reserved."}
         </p>
       ) : null}
-      <ProjectStrategyPanel
-        language={language}
-        writingStrategy={writingStrategy}
-        designStrategy={designStrategy}
-        onWritingStrategyChange={onWritingStrategyChange}
-        onDesignStrategyChange={onDesignStrategyChange}
-      />
+      <section className="project-section setup-selected-files">
+        <div className="section-heading">
+          <h2>{language === "zh" ? "选中文件列表" : "Selected files"}</h2>
+          <span>{selectedFiles.length}</span>
+        </div>
+        {selectedFiles.length ? (
+          <div className="reference-list compact">
+            {selectedFiles.map((item) => (
+              <article key={`${item.library}-${item.markdown_path}`} className="reference-row">
+                <strong>{item.title || item.markdown_path}</strong>
+                <span>{libraryLabel(item.library, language)} · {item.markdown_path}</span>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title={language === "zh" ? "右侧勾选文件后会显示在这里" : "Checked library files appear here"} />
+        )}
+      </section>
       <div className="setup-actions">
         <button className="primary-cta" type="button" disabled={isRunning || !name.trim() || unsupported} onClick={onCreate}>
           <strong>{language === "zh" ? "创建并进入工作流" : "Create and start"}</strong>
@@ -901,51 +1141,207 @@ function ProjectSetup({
 
 function ProjectStrategyPanel({
   language,
+  kind,
   writingStrategy,
   designStrategy,
+  designTheme = "tech",
   onWritingStrategyChange,
   onDesignStrategyChange,
+  onDesignThemeChange,
   onSave,
   saveDisabled,
+  writingStrategyPresets,
+  defaultWritingStrategyId,
+  writingStrategyLibraryError,
+  onWritingStrategyPresetsChange,
   saveLabel,
   hint,
 }: {
   language: "zh" | "en";
+  kind: "writing" | "design";
   writingStrategy: string;
   designStrategy: string;
+  designTheme?: string;
   onWritingStrategyChange: (value: string) => void;
   onDesignStrategyChange: (value: string) => void;
+  onDesignThemeChange?: (value: string) => void;
   onSave?: (writingStrategy: string, designStrategy: string) => void;
   saveDisabled?: boolean;
+  writingStrategyPresets?: WriterStrategyPreset[];
+  defaultWritingStrategyId?: string;
+  writingStrategyLibraryError?: string;
+  onWritingStrategyPresetsChange?: (items: WriterStrategyPreset[]) => void;
   saveLabel?: string;
   hint?: string;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [draftWritingStrategy, setDraftWritingStrategy] = useState(writingStrategy);
   const [draftDesignStrategy, setDraftDesignStrategy] = useState(designStrategy);
+  const [selectedWritingPresetId, setSelectedWritingPresetId] = useState("");
+  const [draftWritingPresetName, setDraftWritingPresetName] = useState("");
+  const [strategyLibraryError, setStrategyLibraryError] = useState("");
+  const [strategyLibrarySaving, setStrategyLibrarySaving] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
       setDraftWritingStrategy(writingStrategy);
       setDraftDesignStrategy(designStrategy);
+      setStrategyLibraryError("");
     }
   }, [writingStrategy, designStrategy, isOpen]);
 
-  const dirty = draftWritingStrategy !== writingStrategy || draftDesignStrategy !== designStrategy;
-  const writingSummary = summarizeStrategy(writingStrategy, language, "writing");
-  const designSummary = summarizeStrategy(designStrategy, language, "design");
+  useEffect(() => {
+    if (!isOpen || kind !== "writing") return;
+    const presets = writingStrategyPresets ?? [];
+    const matched = presets.find((item) => item.body.trim() === writingStrategy.trim());
+    const fallback = matched ?? presets.find((item) => item.id === defaultWritingStrategyId) ?? presets[0];
+    setSelectedWritingPresetId(fallback?.id ?? "");
+    setDraftWritingPresetName(matched ? matched.name : fallback?.name ?? "");
+    setDraftWritingStrategy(writingStrategy.trim() ? writingStrategy : fallback?.body ?? "");
+  }, [defaultWritingStrategyId, isOpen, kind, writingStrategy, writingStrategyPresets]);
+
+  const currentStrategy = kind === "writing" ? writingStrategy : designStrategy;
+  const currentDraftStrategy = kind === "writing" ? draftWritingStrategy : draftDesignStrategy;
+  const dirty = currentDraftStrategy !== currentStrategy;
+  const summary = summarizeStrategy(currentStrategy, language, kind);
+  const writingPresets = writingStrategyPresets ?? [];
+  const selectedWritingPreset = writingPresets.find((item) => item.id === selectedWritingPresetId);
+  const selectedWritingPresetReadonly = Boolean(selectedWritingPreset?.readonly);
+  const cleanWritingPresetName = draftWritingPresetName.trim();
+  const cleanWritingPresetBody = draftWritingStrategy.trim();
+  const canSaveWritingPreset = kind === "writing" && Boolean(cleanWritingPresetName && cleanWritingPresetBody && !selectedWritingPresetReadonly && !strategyLibrarySaving);
+  const canDeleteWritingPreset = kind === "writing" && Boolean(selectedWritingPreset && !selectedWritingPresetReadonly && !strategyLibrarySaving);
+  const applyDisabledReason =
+    kind === "writing" && !cleanWritingPresetBody
+      ? language === "zh"
+        ? "写文策略正文不能为空"
+        : "Writing strategy body is required"
+      : "";
+  const strategyTitle =
+    kind === "writing"
+      ? language === "zh"
+        ? "写文策略"
+        : "Writing strategy"
+      : language === "zh"
+        ? "美编策略"
+        : "Design strategy";
+  const strategyEditorTitle =
+    kind === "writing"
+      ? language === "zh"
+        ? "编辑写文策略"
+        : "Edit writing strategy"
+      : language === "zh"
+        ? "编辑美编策略"
+        : "Edit design strategy";
+  const strategyToolbarTitle =
+    kind === "writing"
+      ? language === "zh"
+        ? "只调整初稿生成策略"
+        : "Only tune draft generation"
+      : language === "zh"
+        ? "只调整 HTML 美编策略"
+        : "Only tune HTML design";
 
   const closePanel = () => {
     setDraftWritingStrategy(writingStrategy);
     setDraftDesignStrategy(designStrategy);
+    setStrategyLibraryError("");
     setIsOpen(false);
   };
 
   const applyStrategies = () => {
-    onWritingStrategyChange(draftWritingStrategy);
-    onDesignStrategyChange(draftDesignStrategy);
-    onSave?.(draftWritingStrategy, draftDesignStrategy);
+    const nextWritingStrategy = kind === "writing" ? draftWritingStrategy : writingStrategy;
+    const nextDesignStrategy = kind === "design" ? draftDesignStrategy : designStrategy;
+    if (kind === "writing" && !nextWritingStrategy.trim()) {
+      setStrategyLibraryError(applyDisabledReason);
+      return;
+    }
+    onWritingStrategyChange(nextWritingStrategy);
+    onDesignStrategyChange(nextDesignStrategy);
+    onSave?.(nextWritingStrategy, nextDesignStrategy);
     setIsOpen(false);
+  };
+
+  const selectWritingPreset = (presetId: string) => {
+    const preset = writingPresets.find((item) => item.id === presetId);
+    setSelectedWritingPresetId(presetId);
+    setDraftWritingPresetName(preset?.name ?? "");
+    setDraftWritingStrategy(preset?.body ?? "");
+    setStrategyLibraryError("");
+  };
+
+  const newWritingPreset = () => {
+    setSelectedWritingPresetId("");
+    setDraftWritingPresetName(nextWritingPresetName(writingPresets, language));
+    setDraftWritingStrategy("");
+    setStrategyLibraryError("");
+  };
+
+  const copyWritingPreset = () => {
+    setSelectedWritingPresetId("");
+    setDraftWritingPresetName(
+      cleanWritingPresetName
+        ? language === "zh"
+          ? `${cleanWritingPresetName}副本`
+          : `${cleanWritingPresetName} copy`
+        : language === "zh"
+          ? "新写文策略"
+          : "New writing strategy",
+    );
+    setStrategyLibraryError("");
+  };
+
+  const saveWritingPreset = async () => {
+    if (!cleanWritingPresetName) {
+      setStrategyLibraryError(language === "zh" ? "策略名称不能为空" : "Strategy name is required");
+      return;
+    }
+    if (!cleanWritingPresetBody) {
+      setStrategyLibraryError(language === "zh" ? "策略正文不能为空" : "Strategy body is required");
+      return;
+    }
+    if (selectedWritingPresetReadonly) {
+      setStrategyLibraryError(language === "zh" ? "默认策略不能覆盖，请先复制为新策略" : "The default strategy is read-only. Copy it first.");
+      return;
+    }
+    setStrategyLibrarySaving(true);
+    setStrategyLibraryError("");
+    try {
+      const payload = await writerApi.saveWriterWritingStrategy(
+        cleanWritingPresetName,
+        cleanWritingPresetBody,
+        selectedWritingPresetId || undefined,
+      );
+      onWritingStrategyPresetsChange?.(payload.items ?? []);
+      setSelectedWritingPresetId(payload.item.id);
+      setDraftWritingPresetName(payload.item.name);
+      setDraftWritingStrategy(payload.item.body);
+    } catch (error) {
+      setStrategyLibraryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStrategyLibrarySaving(false);
+    }
+  };
+
+  const deleteWritingPreset = async () => {
+    if (!selectedWritingPreset || selectedWritingPresetReadonly) {
+      setStrategyLibraryError(language === "zh" ? "默认策略不能删除" : "The default strategy cannot be deleted");
+      return;
+    }
+    setStrategyLibrarySaving(true);
+    setStrategyLibraryError("");
+    try {
+      const payload = await writerApi.deleteWriterWritingStrategy(selectedWritingPreset.id);
+      onWritingStrategyPresetsChange?.(payload.items ?? []);
+      const fallback = payload.items.find((item) => item.id === payload.default_id) ?? payload.items[0];
+      setSelectedWritingPresetId(fallback?.id ?? "");
+      setDraftWritingPresetName(fallback?.name ?? "");
+      setDraftWritingStrategy(fallback?.body ?? "");
+    } catch (error) {
+      setStrategyLibraryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStrategyLibrarySaving(false);
+    }
   };
 
   return (
@@ -953,7 +1349,7 @@ function ProjectStrategyPanel({
       <div className="strategy-panel-toolbar">
         <div>
           <span>{language === "zh" ? "策略面板" : "Strategy panel"}</span>
-          <strong>{language === "zh" ? "主页面先看摘要，需要时再进入编辑" : "Keep the page focused, edit only when needed"}</strong>
+          <strong>{strategyToolbarTitle}</strong>
         </div>
         <button className="secondary-button" type="button" disabled={saveDisabled} onClick={() => setIsOpen(true)}>
           <Sparkles size={16} />
@@ -962,16 +1358,25 @@ function ProjectStrategyPanel({
       </div>
       <div className="strategy-summary-grid">
         <article className="strategy-summary-card">
-          <span>{language === "zh" ? "写文策略" : "Writing strategy"}</span>
-          <strong>{writingStrategy.trim() ? (language === "zh" ? "已自定义" : "Custom strategy") : (language === "zh" ? "系统默认" : "System default")}</strong>
-          <p>{writingSummary}</p>
-        </article>
-        <article className="strategy-summary-card">
-          <span>{language === "zh" ? "美编策略" : "Design strategy"}</span>
-          <strong>{designStrategy.trim() ? (language === "zh" ? "已自定义" : "Custom strategy") : (language === "zh" ? "系统默认" : "System default")}</strong>
-          <p>{designSummary}</p>
+          <span>{strategyTitle}</span>
+          <strong>{currentStrategy.trim() ? (language === "zh" ? "已自定义" : "Custom strategy") : (language === "zh" ? "系统默认" : "System default")}</strong>
+          <p>{summary}</p>
         </article>
       </div>
+      {kind === "design" ? (
+        <div className="design-theme-picker" role="group" aria-label={language === "zh" ? "美编主题" : "Design theme"}>
+          {designThemeOptions.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={designTheme === item.id ? "theme-chip active" : "theme-chip"}
+              onClick={() => onDesignThemeChange?.(item.id)}
+            >
+              {language === "zh" ? item.zh : item.en}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {hint ? <p className="hint strategy-panel-hint">{hint}</p> : null}
       {isOpen ? (
         <div className="modal-backdrop" onClick={closePanel}>
@@ -979,95 +1384,118 @@ function ProjectStrategyPanel({
             <div className="modal-title-row">
               <div>
                 <span>{language === "zh" ? "策略编辑" : "Strategy editor"}</span>
-                <h2>{language === "zh" ? "集中编辑写文与美编策略" : "Edit writing and design strategies"}</h2>
+                <h2>{strategyEditorTitle}</h2>
               </div>
               <button className="secondary-button" type="button" onClick={closePanel}>
                 {language === "zh" ? "关闭" : "Close"}
               </button>
             </div>
             <div className="strategy-grid">
-              <label>
-                <span>{language === "zh" ? "写文策略" : "Writing strategy"}</span>
-                <textarea
-                  value={draftWritingStrategy}
-                  onChange={(event) => setDraftWritingStrategy(event.target.value)}
-                  placeholder={language === "zh" ? "留空则使用系统默认写文策略" : "Leave empty to use the default writing strategy"}
-                />
-              </label>
-              <label>
-                <span>{language === "zh" ? "美编策略" : "Design strategy"}</span>
-                <div className="strategy-preset-row">
-                  {designStrategyPresets.map((preset) => (
-                    <button
-                      key={preset.id}
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => setDraftDesignStrategy(preset.value)}
-                    >
-                      {language === "zh" ? preset.zh : preset.en}
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  value={draftDesignStrategy}
-                  onChange={(event) => setDraftDesignStrategy(event.target.value)}
-                  placeholder={language === "zh" ? "留空则使用系统默认美编策略" : "Leave empty to use the default design strategy"}
-                />
-              </label>
+              {kind === "writing" ? (
+                <>
+                  <div className="strategy-library-layout">
+                    <aside className="strategy-library-list" aria-label={language === "zh" ? "写文策略库" : "Writing strategy library"}>
+                      {writingPresets.length ? (
+                        writingPresets.map((preset) => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            className={preset.id === selectedWritingPresetId ? "strategy-library-item selected" : "strategy-library-item"}
+                            onClick={() => selectWritingPreset(preset.id)}
+                          >
+                            <strong>{preset.name}</strong>
+                            <span>{preset.readonly ? (language === "zh" ? "默认只读" : "Default") : language === "zh" ? "自定义" : "Custom"}</span>
+                          </button>
+                        ))
+                      ) : (
+                        <p className="hint">{language === "zh" ? "策略库加载中或暂无策略。" : "Strategy library is loading or empty."}</p>
+                      )}
+                    </aside>
+                    <div className="strategy-library-editor">
+                      <label>
+                        <span>{language === "zh" ? "策略名称" : "Strategy name"}</span>
+                        <input
+                          value={draftWritingPresetName}
+                          disabled={selectedWritingPresetReadonly}
+                          onChange={(event) => setDraftWritingPresetName(event.target.value)}
+                          placeholder={language === "zh" ? "例如：证据优先写法" : "For example: Evidence-first style"}
+                        />
+                      </label>
+                      <div className="strategy-library-actions">
+                        <button className="secondary-button" type="button" disabled={strategyLibrarySaving} onClick={newWritingPreset}>
+                          {language === "zh" ? "新建" : "New"}
+                        </button>
+                        <button className="secondary-button" type="button" disabled={strategyLibrarySaving || !cleanWritingPresetBody} onClick={copyWritingPreset}>
+                          {language === "zh" ? "复制为新策略" : "Copy as new"}
+                        </button>
+                        <button className="secondary-button" type="button" disabled={!canSaveWritingPreset} onClick={saveWritingPreset}>
+                          <Save size={16} />
+                          {language === "zh" ? "保存策略" : "Save strategy"}
+                        </button>
+                        <button
+                          className="secondary-button danger"
+                          type="button"
+                          disabled={!canDeleteWritingPreset}
+                          title={selectedWritingPresetReadonly ? (language === "zh" ? "默认策略不能删除" : "The default strategy cannot be deleted") : ""}
+                          onClick={deleteWritingPreset}
+                        >
+                          {language === "zh" ? "删除" : "Delete"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                <label>
+                  <span>{strategyTitle}</span>
+                  <textarea
+                    value={draftWritingStrategy}
+                    onChange={(event) => setDraftWritingStrategy(event.target.value)}
+                    placeholder={language === "zh" ? "留空则使用系统默认写文策略" : "Leave empty to use the default writing strategy"}
+                  />
+                </label>
+                </>
+              ) : (
+                <label>
+                  <span>{strategyTitle}</span>
+                  <div className="strategy-preset-row">
+                    {designStrategyPresets.map((preset) => (
+                      <button
+                        key={preset.id}
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => setDraftDesignStrategy(preset.value)}
+                      >
+                        {language === "zh" ? preset.zh : preset.en}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea
+                    value={draftDesignStrategy}
+                    onChange={(event) => setDraftDesignStrategy(event.target.value)}
+                    placeholder={language === "zh" ? "留空则使用系统默认美编策略" : "Leave empty to use the default design strategy"}
+                  />
+                </label>
+              )}
             </div>
+            {kind === "writing" && (writingStrategyLibraryError || strategyLibraryError) ? (
+              <p className="disabled-reason">{strategyLibraryError || writingStrategyLibraryError}</p>
+            ) : null}
             {hint ? <p className="hint strategy-panel-hint">{hint}</p> : null}
             <div className="strategy-modal-actions">
               <button className="secondary-button" type="button" onClick={closePanel}>
                 {language === "zh" ? "取消" : "Cancel"}
               </button>
-              <button className="primary-cta" type="button" disabled={saveDisabled || !dirty} onClick={applyStrategies}>
+              <button
+                className="primary-cta"
+                type="button"
+                disabled={saveDisabled || (kind === "writing" ? !cleanWritingPresetBody : !dirty)}
+                title={applyDisabledReason}
+                onClick={applyStrategies}
+              >
                 <Save size={16} />
                 {onSave ? (language === "zh" ? "保存并应用到项目" : "Save to project") : (language === "zh" ? "应用到当前创建" : "Apply to setup")}
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
-    </section>
-  );
-
-  return (
-    <section className="project-section strategy-grid">
-      <label>
-        <span>{language === "zh" ? "写文策略" : "Writing strategy"}</span>
-        <textarea
-          value={writingStrategy}
-          onChange={(event) => onWritingStrategyChange(event.target.value)}
-          placeholder={language === "zh" ? "留空则使用系统默认写文策略" : "Leave empty to use the default writing strategy"}
-        />
-      </label>
-      <label>
-        <span>{language === "zh" ? "美编策略" : "Design strategy"}</span>
-        <div className="strategy-preset-row">
-          {designStrategyPresets.map((preset) => (
-            <button
-              key={preset.id}
-              className="secondary-button"
-              type="button"
-              onClick={() => onDesignStrategyChange(preset.value)}
-            >
-              {language === "zh" ? preset.zh : preset.en}
-            </button>
-          ))}
-        </div>
-        <textarea
-          value={designStrategy}
-          onChange={(event) => onDesignStrategyChange(event.target.value)}
-          placeholder={language === "zh" ? "留空则使用系统默认美编策略" : "Leave empty to use the default design strategy"}
-        />
-      </label>
-      {hint ? <p className="hint strategy-panel-hint">{hint}</p> : null}
-      {onSave ? (
-        <div className="library-editor-actions">
-          <button className="secondary-button" type="button" disabled={saveDisabled} onClick={onSave}>
-            <Save size={16} />
-            {saveLabel ?? (language === "zh" ? "保存策略" : "Save strategies")}
-          </button>
         </div>
       ) : null}
     </section>
@@ -1162,17 +1590,6 @@ function TopicCards({
       ) : (
         <EmptyState title={language === "zh" ? "还没有选题建议" : "No topic suggestions"} />
       )}
-      {topics.length ? (
-        <div className="topic-confirm-bar">
-          <div>
-            <strong>{pendingTitle || (language === "zh" ? "尚未选择候选题" : "No candidate selected")}</strong>
-            <span>{language === "zh" ? "点击候选题只是预选，确认后才会进入初稿阶段。" : "Clicking a card only previews it. Confirm to continue."}</span>
-          </div>
-          <button className="primary-cta" type="button" disabled={disabled || !pendingTopic} onClick={() => pendingTopic && onSelectTopic(pendingTopic)}>
-            {language === "zh" ? "确认选题" : "Confirm topic"}
-          </button>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -1227,43 +1644,62 @@ function ImageSuggestionOptions({
   language,
   value,
   imageStylePreset,
+  coverAspectRatio,
+  contentAspectRatio,
+  isRunning,
+  hasSuggestions,
   onChange,
   onImageStylePresetChange,
+  onCoverAspectRatioChange,
+  onContentAspectRatioChange,
+  onSuggest,
 }: {
   language: "zh" | "en";
   value: number;
   imageStylePreset: string;
+  coverAspectRatio: string;
+  contentAspectRatio: string;
+  isRunning: boolean;
+  hasSuggestions: boolean;
   onChange: (value: number) => void;
   onImageStylePresetChange: (value: string) => void;
+  onCoverAspectRatioChange: (value: string) => void;
+  onContentAspectRatioChange: (value: string) => void;
+  onSuggest: () => void;
 }) {
   return (
     <section className="project-section image-options-panel">
       <div className="section-heading">
         <h2>{language === "zh" ? "配图建议设置" : "Image suggestion settings"}</h2>
-        <span>{language === "zh" ? "生成前确认" : "Before suggestions"}</span>
+        <span>{language === "zh" ? "生成前" : "Before suggestions"}</span>
       </div>
       <div className="image-options-layout">
         <article className="image-options-copy">
-          <strong>{language === "zh" ? "先确认这轮想生成几张正文图" : "Choose how many content images you want first"}</strong>
+          <strong>{language === "zh" ? "先选择正文图片数量" : "Choose how many content images you want first"}</strong>
           <p>
             {language === "zh"
-              ? "这会直接影响后续生成的配图建议数量。先把数量定下来，后面的提示词和生成节奏会更稳定。"
+              ? "这里会决定下一步生成多少条正文配图建议；确认建议后再规划配图任务。"
               : "This directly controls how many content image prompts will be suggested next."}
           </p>
         </article>
-        <ImageCountSelect language={language} value={value} onChange={onChange} />
+        <ImageCountSelect language={language} value={value} disabled={isRunning} onChange={onChange} />
       </div>
       <label className="image-style-select">
         <div className="image-count-copy">
-          <span>{language === "zh" ? "配图风格预设" : "Image style preset"}</span>
+          <span>{language === "zh" ? "配图风格" : "Image style preset"}</span>
           <small>
             {language === "zh"
-              ? "这里的风格会直接进入配图建议提示词，不是只改界面样子。"
+              ? "风格会写入真实配图建议提示词。"
               : "This style is injected into the real image suggestion prompts."}
           </small>
         </div>
         <div className="image-count-control">
-          <select value={imageStylePreset} onChange={(event) => onImageStylePresetChange(event.target.value)}>
+          <select
+            value={imageStylePreset}
+            disabled={isRunning}
+            aria-label={language === "zh" ? "配图风格" : "Image style preset"}
+            onChange={(event) => onImageStylePresetChange(event.target.value)}
+          >
             {imageStylePresets.map((preset) => (
               <option key={preset.id} value={preset.prompt}>
                 {language === "zh" ? preset.zh : preset.en}
@@ -1272,6 +1708,43 @@ function ImageSuggestionOptions({
           </select>
         </div>
       </label>
+        <div className="image-ratio-grid">
+          <label className="image-ratio-field">
+            <span>{language === "zh" ? "封面图比例" : "Cover ratio"}</span>
+            <input
+              value={coverAspectRatio}
+              disabled={isRunning}
+              placeholder="2.35:1"
+              aria-label={language === "zh" ? "封面图比例" : "Cover image aspect ratio"}
+              onChange={(event) => onCoverAspectRatioChange(event.target.value)}
+            />
+          </label>
+          <label className="image-ratio-field">
+            <span>{language === "zh" ? "正文图比例" : "Content ratio"}</span>
+            <input
+              value={contentAspectRatio}
+              disabled={isRunning}
+              placeholder={language === "zh" ? "留空沿用建议" : "Auto"}
+              aria-label={language === "zh" ? "正文图比例" : "Content image aspect ratio"}
+              onChange={(event) => onContentAspectRatioChange(event.target.value)}
+            />
+          </label>
+        </div>
+        <p className="hint image-ratio-hint">
+          {language === "zh" ? "封面默认 2.35:1；正文留空时按当前图片 API 设置或配图建议适配。" : "Cover defaults to 2.35:1; leave content blank to use the current image API setting."}
+        </p>
+        <div className="image-options-actions">
+        <button className="secondary-button" type="button" disabled={isRunning} onClick={onSuggest}>
+          <Sparkles size={16} />
+          {hasSuggestions
+            ? language === "zh"
+              ? "重新生成建议"
+              : "Refresh image suggestions"
+            : language === "zh"
+              ? "生成配图建议"
+              : "Suggest images"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -1279,10 +1752,12 @@ function ImageSuggestionOptions({
 function ImageCountSelect({
   language,
   value,
+  disabled,
   onChange,
 }: {
   language: "zh" | "en";
   value: number;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
@@ -1291,12 +1766,17 @@ function ImageCountSelect({
         <span>{language === "zh" ? "正文图片数量" : "Content image count"}</span>
         <small>
           {language === "zh"
-            ? "默认先少量生成，便于快速确认版式和节奏。"
+            ? "建议先少量生成，便于确认节奏。"
             : "Start small so layout and pacing are easier to confirm."}
         </small>
       </div>
       <div className="image-count-control">
-        <select value={value} onChange={(event) => onChange(Number(event.target.value))}>
+        <select
+          value={value}
+          disabled={disabled}
+          aria-label={language === "zh" ? "正文图片数量" : "Content image count"}
+          onChange={(event) => onChange(Number(event.target.value))}
+        >
           {[1, 2, 3].map((count) => (
             <option key={count} value={count}>
               {language === "zh" ? `${count} 张` : `${count} image${count > 1 ? "s" : ""}`}
@@ -1306,98 +1786,6 @@ function ImageCountSelect({
       </div>
     </label>
   );
-
-  return (
-    <label className="image-count-select">
-      <span>{language === "zh" ? "正文图片数量" : "Content image count"}</span>
-      <select value={value} onChange={(event) => onChange(Number(event.target.value))}>
-        {[1, 2, 3].map((count) => (
-          <option key={count} value={count}>
-            {language === "zh" ? `${count} 张` : `${count} image${count > 1 ? "s" : ""}`}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function LegacyImageSection({
-  language,
-  coverPrompt,
-  contentPromptsText,
-  contentImageCount,
-  progress,
-  images,
-  errors,
-  onCoverPromptChange,
-  onContentPromptsTextChange,
-  onContentImageCountChange,
-}: {
-  language: "zh" | "en";
-  coverPrompt: string;
-  contentPromptsText: string;
-  contentImageCount: number;
-  progress: ImageProgress;
-  images: Array<{ path?: string; prompt?: string }>;
-  errors?: Array<{ kind?: string; index?: number; message?: string }>;
-  onCoverPromptChange: (value: string) => void;
-  onContentPromptsTextChange: (value: string) => void;
-  onContentImageCountChange: (value: number) => void;
-}) {
-  return (
-    <section className="project-section image-stage-panel">
-      <div className="section-heading">
-        <h2>{language === "zh" ? "配图" : "Images"}</h2>
-        <span>{images.length}</span>
-      </div>
-      <div className="image-stage-toolbar">
-        <ImageCountSelect language={language} value={contentImageCount} onChange={onContentImageCountChange} />
-        <p className="hint">
-          {language === "zh"
-            ? "先看建议数量，再分别整理封面图和正文图提示词。"
-            : "Confirm the count first, then refine cover and content prompts."}
-        </p>
-      </div>
-      <div className="prompt-grid">
-        <label>
-          <span>{language === "zh" ? "封面图提示词" : "Cover prompt"}</span>
-          <textarea value={coverPrompt} onChange={(event) => onCoverPromptChange(event.target.value)} placeholder={language === "zh" ? "先生成配图建议，也可以手动编辑" : "Generate suggestions first, or edit manually"} />
-        </label>
-        <label>
-          <span>{language === "zh" ? "正文配图提示词" : "Content prompts"}</span>
-          <textarea value={contentPromptsText} onChange={(event) => onContentPromptsTextChange(event.target.value)} placeholder={language === "zh" ? "每行一条提示词" : "One prompt per line"} />
-        </label>
-      </div>
-      {progress ? (
-        <div className="image-progress">
-          <span>{language === "zh" ? "生成进度" : "Generation progress"}</span>
-          <strong>{progress.done} / {progress.total}</strong>
-        </div>
-      ) : null}
-      {images.length ? (
-        <div className="generated-image-grid">
-          {images.map((item, index) => (
-            <article key={`${item.path}-${index}`} className="generated-image-card">
-            {item.path ? <img src={writerApi.writerFileUrl(item.path)} alt={item.prompt || `image-${index + 1}`} /> : <ImageIcon />}
-              <span>{item.prompt}</span>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <EmptyState title={language === "zh" ? "还没有图片" : "No images yet"} />
-      )}
-      {errors?.length ? (
-        <div className="image-error-list">
-          {errors.map((item, index) => (
-            <article key={`${item.kind || "image"}-${item.index || index}`} className="preflight-row failed">
-              <strong>{item.kind === "cover" ? (language === "zh" ? "封面图失败" : "Cover failed") : language === "zh" ? `正文配图 ${item.index || index + 1} 失败` : `Content image ${item.index || index + 1} failed`}</strong>
-              <span>{item.message || (language === "zh" ? "图片 API 未返回可用图片" : "Image API returned no usable image.")}</span>
-            </article>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
 }
 
 function ImageSection({
@@ -1405,10 +1793,14 @@ function ImageSection({
   coverPrompt,
   contentPromptsText,
   contentImageCount,
+  coverAspectRatio,
+  contentAspectRatio,
+  rationale,
   progress,
   imageState,
   images,
   errors,
+  hasSuggestions,
   isRunning,
   onCoverPromptChange,
   onContentPromptsTextChange,
@@ -1418,10 +1810,14 @@ function ImageSection({
   coverPrompt: string;
   contentPromptsText: string;
   contentImageCount: number;
+  coverAspectRatio: string;
+  contentAspectRatio: string;
+  rationale: string;
   progress: ImageProgress;
   imageState?: WriterProject["images"];
   images: Array<{ path?: string; prompt?: string; index?: number }>;
   errors?: Array<{ kind?: string; index?: number; message?: string }>;
+  hasSuggestions: boolean;
   isRunning: boolean;
   onCoverPromptChange: (value: string) => void;
   onContentPromptsTextChange: (value: string) => void;
@@ -1466,6 +1862,16 @@ function ImageSection({
           ? "这里展示配图建议生成后的任务清单。失败后可只重试失败图片，不会抹掉已成功图片。"
           : "This shows the task list after image suggestions. Failed items can be retried without removing successful images."}
       </p>
+
+      {hasSuggestions && rationale.trim() ? (
+        <article className="image-rationale-panel">
+          <div className="image-rationale-heading">
+            <strong>{language === "zh" ? "配图建议" : "Detailed image direction"}</strong>
+            <span>{language === "zh" ? "建议" : "Suggestion"}</span>
+          </div>
+          <p>{rationale}</p>
+        </article>
+      ) : null}
 
       <div className="prompt-grid">
         <label>
@@ -1515,7 +1921,12 @@ function ImageSection({
             </div>
             <div className="image-task-actions">
               {task.status === "failed" ? (
-                <button className="secondary-button" type="button" disabled={isRunning || !task.prompt.trim()} onClick={() => onRetryTasks([taskToRetryInput(task)])}>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={isRunning || !task.prompt.trim()}
+                    onClick={() => onRetryTasks([taskToRetryInput(task, { cover: coverAspectRatio, content: contentAspectRatio })])}
+                  >
                   {language === "zh" ? "重试这张" : "Retry"}
                 </button>
               ) : null}
@@ -1527,7 +1938,17 @@ function ImageSection({
   );
 }
 
-function PublishSection({ language, project }: { language: "zh" | "en"; project: WriterProject }) {
+function PublishSection({
+  language,
+  project,
+  onSanitizePublishHtml,
+  disabled,
+}: {
+  language: "zh" | "en";
+  project: WriterProject;
+  onSanitizePublishHtml: () => void;
+  disabled?: boolean;
+}) {
   const checks = project.preflight?.checks ?? [];
   return (
     <section className="project-section">
@@ -1536,6 +1957,13 @@ function PublishSection({ language, project }: { language: "zh" | "en"; project:
         <span>{project.preflight?.ok ? (language === "zh" ? "预检通过" : "Passed") : language === "zh" ? "待检查" : "Pending"}</span>
       </div>
       {project.html_path ? <HtmlPreviewControls language={language} htmlPath={project.html_path} /> : null}
+      {project.html_path ? (
+        <div className="design-action-row">
+          <button className="secondary-button" type="button" disabled={disabled} onClick={onSanitizePublishHtml}>
+            {language === "zh" ? "只重新清洗发布版" : "Sanitize publish HTML"}
+          </button>
+        </div>
+      ) : null}
       {checks.length ? (
         <div className="preflight-list">
           {checks.map((item) => (
@@ -1588,6 +2016,20 @@ function guideForState(language: "zh" | "en", project: WriterProject | undefined
       ],
     };
   }
+  if (step === "draft" && nextAction === "suggest_images") {
+    return {
+      title: language === "zh" ? "确认初稿" : "Confirm draft",
+      body: language === "zh" ? "先检查正文是否已经能进入配图阶段。确认后不会立刻生成配图建议。" : "Review the article before moving to image planning. Confirmation will not generate suggestions yet.",
+      checkpoints: [language === "zh" ? "检查标题和正文" : "Review title and body", language === "zh" ? "必要时智能修订" : "Revise if needed", language === "zh" ? "确认初稿" : "Confirm draft"],
+    };
+  }
+  if (step === "images" && nextAction === "suggest_images") {
+    return {
+      title: language === "zh" ? "生成配图建议" : "Suggest images",
+      body: language === "zh" ? "确认正文图片数量和配图风格后，再生成封面图与正文配图提示词。" : "Choose the image count and style before generating cover and content image prompts.",
+      checkpoints: [language === "zh" ? "确认图片数量" : "Confirm image count", language === "zh" ? "选择配图风格" : "Choose image style", language === "zh" ? "生成配图建议" : "Suggest images"],
+    };
+  }
   const map: Record<WriterStep, ReturnType<typeof guideForState>> = {
     created: {
       title: language === "zh" ? "导入项目知识" : "Import project knowledge",
@@ -1638,19 +2080,9 @@ function guideForState(language: "zh" | "en", project: WriterProject | undefined
   return map[step];
 }
 
-function stageLabel(step: WriterStep, language: "zh" | "en") {
-  const labels: Record<WriterStep, { zh: string; en: string }> = {
-    created: { zh: "知识导入", en: "Knowledge import" },
-    knowledge_confirmed: { zh: "选题生成", en: "Topic generation" },
-    topics: { zh: "选题确认", en: "Topic selection" },
-    topic: { zh: "初稿生成", en: "Draft generation" },
-    draft: { zh: "文章编辑", en: "Draft editing" },
-    images: { zh: "配图建议与生成", en: "Image suggestions" },
-    designed: { zh: "美编生成", en: "Design output" },
-    publish_check: { zh: "发布确认", en: "Publish confirmation" },
-    published: { zh: "发布结果", en: "Publish result" },
-  };
-  return language === "zh" ? labels[step].zh : labels[step].en;
+function workflowStageLabel(stage: WorkflowStage, language: "zh" | "en") {
+  const match = workflowStages.find((item) => item.id === stage);
+  return match ? (language === "zh" ? match.zh : match.en) : stage;
 }
 
 function visibleWriterStep(step: WriterStep, nextAction: string): WriterStep {
@@ -1659,30 +2091,81 @@ function visibleWriterStep(step: WriterStep, nextAction: string): WriterStep {
   return step;
 }
 
+function workflowStageForStep(step: WriterStep, nextAction: string, draftConfirmed = false, imagesConfirmed = false): WorkflowStage {
+  if (step === "created") return "project";
+  if (step === "knowledge_confirmed" || step === "topics") return "topic";
+  if (step === "topic") return "draft";
+  if (step === "draft" && nextAction === "generate_images") return "images";
+  if (step === "draft" && nextAction === "suggest_images" && draftConfirmed) return "images";
+  if (step === "draft") return "draft";
+  if (step === "images") return imagesConfirmed ? "design" : "images";
+  if (step === "designed") return "design";
+  return "publish";
+}
+
+function stepForWorkflowStage(
+  stage: WorkflowStage,
+  actualStep: WriterStep,
+  nextAction: string,
+  project: WriterProject | undefined,
+): WriterStep {
+  if (stage === "project") return "created";
+  if (stage === "topic") {
+    if (project?.topics?.length) return "topics";
+    return "knowledge_confirmed";
+  }
+  if (stage === "draft") {
+    if (project?.article_markdown) return "draft";
+    return "topic";
+  }
+  if (stage === "images") {
+    if (actualStep === "images" || (actualStep === "draft" && nextAction === "generate_images")) return "images";
+    if (actualStep === "draft" && nextAction === "suggest_images" && project?.article_markdown) return "images";
+    return project?.image_suggestion_rationale || project?.cover_prompt || project?.content_image_prompts?.length ? "images" : "draft";
+  }
+  if (stage === "design") return "designed";
+  if (stage === "publish") return actualStep === "published" ? "published" : "publish_check";
+  return actualStep;
+}
+
 function nextActionForVisibleStep(
   visibleStep: WriterStep,
   actualVisibleStep: WriterStep,
   backendNextAction: string,
   project: WriterProject | undefined,
   imagePromptDirty: boolean,
+  hasSuggestions = false,
 ) {
+  if (visibleStep === "images" && !hasSuggestions) return "suggest_images";
+  if (visibleStep === "images") {
+    if (!project?.image_suggestion_rationale && !project?.cover_prompt && !project?.content_image_prompts?.length) return "suggest_images";
+    if (imagePromptDirty || !hasGeneratedProjectImages(project)) return "generate_images";
+    return "confirm_images";
+  }
   if (visibleStep === actualVisibleStep) return backendNextAction;
   if (visibleStep === "created") return "confirm_knowledge";
   if (visibleStep === "knowledge_confirmed") return "generate_topics";
   if (visibleStep === "topics") return "select_topic";
   if (visibleStep === "topic") return "generate_draft";
   if (visibleStep === "draft") return "suggest_images";
-  if (visibleStep === "images") {
-    if (imagePromptDirty || !project?.images?.items?.length) return "generate_images";
-    return "format_article";
+  if (visibleStep === "designed") {
+    if (!project?.html_path) return "format_article";
+    return project.design_confirmed ? "run_preflight" : "confirm_design";
   }
-  if (visibleStep === "designed") return project?.design_confirmed ? "run_preflight" : "confirm_design";
   if (visibleStep === "publish_check") return "run_preflight";
   if (visibleStep === "published") return "publish";
   return backendNextAction;
 }
 
-function primaryAction(language: "zh" | "en", project: WriterProject | undefined, step: WriterStep, nextAction: string, isRunning: boolean) {
+function primaryAction(
+  language: "zh" | "en",
+  project: WriterProject | undefined,
+  step: WriterStep,
+  nextAction: string,
+  isRunning: boolean,
+  selectedFileCount = 0,
+  pendingTopic: Record<string, unknown> | null = null,
+) {
   if (isRunning) return { label: language === "zh" ? "处理中..." : "Working...", disabled: true, reason: "" };
   if (!project) return { label: language === "zh" ? "先创建项目" : "Create project first", disabled: true, reason: "" };
   if (project.type && project.type !== "article") {
@@ -1694,9 +2177,9 @@ function primaryAction(language: "zh" | "en", project: WriterProject | undefined
   }
   if (step === "created") {
     return {
-      label: language === "zh" ? "先导入知识" : "Import knowledge first",
-      disabled: true,
-      reason: language === "zh" ? "请在下方导入右侧三库勾选文件。" : "Import checked library files below first.",
+      label: language === "zh" ? "导入勾选文件" : "Import checked files",
+      disabled: selectedFileCount === 0,
+      reason: selectedFileCount === 0 ? (language === "zh" ? "请先在右侧三库勾选文件。" : "Check files in the right library rail first.") : "",
     };
   }
   if (step === "images" && nextAction === "retry_failed_images") {
@@ -1706,20 +2189,35 @@ function primaryAction(language: "zh" | "en", project: WriterProject | undefined
       reason: "",
     };
   }
+  if (step === "draft" && nextAction === "suggest_images") {
+    return { label: language === "zh" ? "确认初稿" : "Confirm draft", disabled: false, reason: "" };
+  }
+  if (step === "images" && nextAction === "suggest_images") {
+    return { label: language === "zh" ? "生成配图建议" : "Suggest images", disabled: false, reason: "" };
+  }
+  if (step === "images" && nextAction === "generate_images") {
+    return { label: language === "zh" ? "生成图片" : "Generate images", disabled: false, reason: "" };
+  }
+  if (step === "images" && nextAction === "confirm_images") {
+    return { label: language === "zh" ? "\u786e\u8ba4\u914d\u56fe" : "Confirm images", disabled: false, reason: "" };
+  }
+  if (step === "designed" && nextAction === "format_article") {
+    return { label: language === "zh" ? "\u751f\u6210\u7f8e\u7f16 HTML" : "Generate designed HTML", disabled: false, reason: "" };
+  }
   const labelMap: Partial<Record<WriterStep, string>> = {
     knowledge_confirmed: language === "zh" ? "生成选题" : "Generate topics",
-    topics: language === "zh" ? "请选择一个选题" : "Pick a topic",
+    topics: language === "zh" ? "确认选题" : "Confirm topic",
     topic: language === "zh" ? "生成初稿" : "Generate draft",
-    draft: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "生成配图建议" : "Suggest images"),
-    images: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "美编生成 HTML" : "Generate HTML"),
-    designed: nextAction === "confirm_design" ? (language === "zh" ? "确认并进入预检" : "Confirm and continue") : (language === "zh" ? "执行预检" : "Run preflight"),
-    publish_check: nextAction === "publish" ? (language === "zh" ? "发布" : "Publish") : (language === "zh" ? "重新预检" : "Run preflight again"),
+    draft: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "确认初稿并生成配图建议" : "Confirm draft and suggest images"),
+    images: nextAction === "generate_images" ? (language === "zh" ? "生成图片" : "Generate images") : (language === "zh" ? "确认配图" : "Confirm images"),
+    designed: nextAction === "format_article" ? (language === "zh" ? "\u751f\u6210\u7f8e\u7f16 HTML" : "Generate designed HTML") : nextAction === "confirm_design" ? (language === "zh" ? "\u786e\u8ba4\u7f8e\u7f16" : "Confirm design") : (language === "zh" ? "\u6267\u884c\u9884\u68c0" : "Run preflight"),
+    publish_check: nextAction === "publish" ? (language === "zh" ? "发布" : "Publish") : (language === "zh" ? "执行预检" : "Run preflight"),
     published: language === "zh" ? "已发布" : "Published",
   };
   return {
     label: labelMap[step] ?? (language === "zh" ? "继续" : "Continue"),
-    disabled: step === "topics" || step === "published",
-    reason: step === "topics" ? (language === "zh" ? "请先点击下方一个选题卡片确认。" : "Click one topic card below first.") : "",
+    disabled: (step === "topics" && !pendingTopic) || step === "published",
+    reason: step === "topics" && !pendingTopic ? (language === "zh" ? "请先点击下方一个选题卡片。" : "Click one topic card below first.") : "",
   };
 }
 
@@ -1727,24 +2225,34 @@ function runPrimary(
   step: WriterStep,
   nextAction: string,
   actions: {
+    onImportKnowledge: () => void;
     onGenerateTopics: () => void;
+    onConfirmTopic: () => void;
+    onConfirmDraft: () => void;
     onGenerateDraft: () => void;
     onSuggestImages: () => void;
     onGenerateImages: () => void;
     onRetryFailedImages: () => void;
+    onConfirmImages: () => void;
     onFormat: () => void;
     onConfirmDesign: () => void;
     onPreflight: () => void;
     onPublish: () => void;
   },
 ) {
-  if (step === "knowledge_confirmed") actions.onGenerateTopics();
+  if (step === "created") actions.onImportKnowledge();
+  else if (step === "knowledge_confirmed") actions.onGenerateTopics();
+  else if (step === "topics") actions.onConfirmTopic();
   else if (step === "topic") actions.onGenerateDraft();
+  else if (step === "draft" && nextAction === "suggest_images") actions.onConfirmDraft();
   else if (step === "draft" && nextAction === "generate_images") actions.onGenerateImages();
-  else if (step === "draft") actions.onSuggestImages();
+  else if (step === "draft") actions.onConfirmDraft();
+  else if (step === "images" && nextAction === "suggest_images") actions.onSuggestImages();
   else if (step === "images" && nextAction === "generate_images") actions.onGenerateImages();
   else if (step === "images" && nextAction === "retry_failed_images") actions.onRetryFailedImages();
+  else if (step === "images" && nextAction === "confirm_images") actions.onConfirmImages();
   else if (step === "images") actions.onFormat();
+  else if (step === "designed" && nextAction === "format_article") actions.onFormat();
   else if (step === "designed" && nextAction === "confirm_design") actions.onConfirmDesign();
   else if (step === "designed") actions.onPreflight();
   else if (step === "publish_check" && nextAction === "publish") actions.onPublish();
@@ -1823,19 +2331,26 @@ function imageTaskList(
   return tasks;
 }
 
-function imageRetryTasks(project: WriterProject | undefined, coverPrompt: string, contentPromptsText: string, contentImageCount: number): WriterImageRetryTask[] {
+function imageRetryTasks(
+  project: WriterProject | undefined,
+  coverPrompt: string,
+  contentPromptsText: string,
+  contentImageCount: number,
+  aspectRatios: { cover?: string; content?: string } = {},
+): WriterImageRetryTask[] {
   if (!project) return [];
   return imageTaskList("zh", coverPrompt, contentPromptsText, contentImageCount, project.images, project.images?.errors ?? [])
     .filter((task) => task.status === "failed" || task.status === "pending")
-    .map(taskToRetryInput)
+    .map((task) => taskToRetryInput(task, aspectRatios))
     .filter((task) => task.prompt.trim());
 }
 
-function taskToRetryInput(task: ImageTask): WriterImageRetryTask {
+function taskToRetryInput(task: ImageTask, aspectRatios: { cover?: string; content?: string } = {}): WriterImageRetryTask {
   return {
     kind: task.kind,
     index: task.index,
     prompt: task.prompt,
+    aspectRatio: task.kind === "cover" ? aspectRatios.cover : aspectRatios.content,
   };
 }
 
@@ -1855,6 +2370,16 @@ function imageItems(project?: WriterProject): Array<{ path?: string; prompt?: st
   });
 }
 
+function hasGeneratedProjectImages(project?: WriterProject) {
+  if (!project?.images) return false;
+  return Boolean(
+    project.images.cover?.path ||
+      project.images.content_images?.some((item) => item.path) ||
+      project.images.items?.some((item) => item.path),
+  );
+}
+
+
 function promptLines(value: string) {
   return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
@@ -1869,6 +2394,17 @@ function summarizeStrategy(value: string, language: "zh" | "en", kind: "writing"
     return language === "zh" ? "留空时会使用系统默认写文策略。" : "If left empty, the default writing strategy will be used.";
   }
   return language === "zh" ? "留空时会使用系统默认美编策略。" : "If left empty, the default design strategy will be used.";
+}
+
+function nextWritingPresetName(presets: WriterStrategyPreset[], language: "zh" | "en") {
+  const base = language === "zh" ? "新写文策略" : "New writing strategy";
+  const existingNames = new Set(presets.map((item) => item.name.trim()).filter(Boolean));
+  if (!existingNames.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!existingNames.has(candidate)) return candidate;
+  }
+  return `${base} ${Date.now()}`;
 }
 
 function text(...values: unknown[]) {

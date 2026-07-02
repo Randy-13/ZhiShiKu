@@ -1,5 +1,6 @@
 import base64
 import json
+import subprocess
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -1385,6 +1386,43 @@ def test_v2_asr_test_route_runs_real_dashscope_verification_and_reuses_saved_key
     assert captured["setting"]["model"] == "paraformer-v2"
 
 
+def test_v2_asr_test_route_supports_minimax_local_audio_probe(monkeypatch):
+    client = TestClient(create_app())
+    captured = {}
+
+    def fake_transcribe_audio(path: Path):
+        captured["path"] = path
+        captured["setting"] = dict(api_v2.asr_settings.active_setting())
+        return "ok"
+
+    def fail_transcribe_url(url, setting):
+        raise AssertionError("MiniMax ASR must not use DashScope URL transcription")
+
+    monkeypatch.setattr(api_v2, "transcribe_audio", fake_transcribe_audio)
+    monkeypatch.setattr(api_v2, "transcribe_audio_url", fail_transcribe_url)
+
+    tested = client.post(
+        "/api/v2/settings/asr/test",
+        json={
+            "provider": "minimax",
+            "base_url": "https://api.minimaxi.com/v1",
+            "model": "Speech-2.8-HD",
+            "api_key": "minimax-secret",
+            "timeout": 30,
+        },
+    )
+
+    assert tested.status_code == 200
+    payload = tested.json()["data"]
+    assert payload["ok"] is True
+    assert payload["item"]["provider"] == "minimax"
+    assert payload["item"]["model"] == "Speech-2.8-HD"
+    assert "minimax-secret" not in str(payload)
+    assert captured["path"].suffix == ".wav"
+    assert captured["setting"]["provider"] == "minimax"
+    assert captured["setting"]["base_url"] == "https://api.minimaxi.com/v1"
+
+
 def test_v2_create_article_project_uses_library_files_and_writer_flow(monkeypatch):
     monkeypatch.setattr(api_v2.api_settings, "active_setting", lambda: {"api_key": "test-key", "model": "test-model"})
 
@@ -2735,3 +2773,17 @@ def test_v2_collect_raw_markdown_imports_douyin_detail_for_media_queue(monkeypat
     assert calls == {"ensure": 2, "import": 1}
     assert item["title"] == "media queue douyin transcript"
     assert "media queue douyin transcript" in text
+
+
+def test_agent_browser_connection_timeout_falls_back_to_project_edge(monkeypatch):
+    launched = []
+
+    def fake_run(command, **kwargs):
+        assert command == ["agent-browser", "--auto-connect", "get", "url"]
+        raise subprocess.TimeoutExpired(command, timeout=15)
+
+    monkeypatch.setattr(api_v2.subprocess, "run", fake_run)
+    monkeypatch.setattr(api_v2, "_launch_edge_remote_debugging", lambda: launched.append(True))
+
+    assert api_v2._agent_browser_connection_args("agent-browser") == ["--cdp", "9222"]
+    assert launched == [True]

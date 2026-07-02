@@ -24,6 +24,7 @@ import type {
   AsrSettingTemplate,
   AuthContext,
   BilibiliCookieStatus,
+  HtmlGrabCheckStatus,
   ImageApiSettingInput,
   ImageApiSettingItem,
   ImageApiSettingsPayload,
@@ -203,6 +204,9 @@ export function SettingsWorkspace({
   const [dependencyStatus, setDependencyStatus] = useState<MediaDependencyStatus>();
   const [dependencyLoading, setDependencyLoading] = useState(false);
   const [dependencyMessage, setDependencyMessage] = useState("");
+  const [htmlGrabStatus, setHtmlGrabStatus] = useState<HtmlGrabCheckStatus>();
+  const [htmlGrabLoading, setHtmlGrabLoading] = useState(false);
+  const [htmlGrabMessage, setHtmlGrabMessage] = useState("");
   const [storageLocations, setStorageLocations] = useState<StorageLocations>({});
   const [storageDraft, setStorageDraft] = useState<StorageLocations>({});
   const [storageLoading, setStorageLoading] = useState(false);
@@ -249,6 +253,31 @@ export function SettingsWorkspace({
       setQuotaStatus(await quotaApi.me());
     } catch (error) {
       setQuotaMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function refreshHtmlGrabStatus() {
+    setHtmlGrabLoading(true);
+    setHtmlGrabMessage("");
+    try {
+      setHtmlGrabStatus(await settingsApi.htmlGrabCheck());
+    } catch (error) {
+      setHtmlGrabStatus({ ok: false, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setHtmlGrabLoading(false);
+    }
+  }
+
+  async function openHtmlGrabAuthorize() {
+    setHtmlGrabLoading(true);
+    setHtmlGrabMessage("");
+    try {
+      const result = await settingsApi.htmlGrabAuthorize();
+      setHtmlGrabMessage(result.message || (language === "zh" ? "已打开 Edge 授权页。" : "Opened Edge dev session window."));
+    } catch (error) {
+      setHtmlGrabMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHtmlGrabLoading(false);
     }
   }
 
@@ -345,6 +374,7 @@ export function SettingsWorkspace({
         refreshCookieStatus();
         refreshQuotaStatus();
         refreshDependencyStatus();
+        refreshHtmlGrabStatus();
         if (canSeeLocalDiagnostics) {
           refreshStorageLocations();
           refreshTrashStatus();
@@ -354,6 +384,7 @@ export function SettingsWorkspace({
         refreshCookieStatus();
         refreshQuotaStatus();
         refreshDependencyStatus();
+        refreshHtmlGrabStatus();
       });
   }, []);
 
@@ -547,6 +578,33 @@ export function SettingsWorkspace({
               </div>
             </div>
           </div>
+
+          <div>
+            <h2>{language === "zh" ? "HTML 抓取检查" : "HTML grabbing"}</h2>
+            <div className="dependency-check-row compact">
+              <div className="dependency-check-title">
+                <CheckCircle2 size={17} />
+                <strong>{language === "zh" ? "网页原文提取状态" : "Web article extraction status"}</strong>
+                <StatusBadge tone={htmlGrabStatus?.ok ? "done" : "error"}>
+                  {htmlGrabStatus?.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed"}
+                </StatusBadge>
+              </div>
+              <p className="hint">{htmlGrabMessage || htmlGrabStatus?.message}</p>
+              {htmlGrabStatus?.target_url ? <small className="dependency-path">{htmlGrabStatus.target_url}</small> : null}
+              <div className="dependency-actions">
+                <button className="secondary-button" type="button" onClick={refreshHtmlGrabStatus} disabled={htmlGrabLoading}>
+                  <RefreshCw size={16} />
+                  {language === "zh" ? "重新检查" : "Recheck"}
+                </button>
+                {localDiagnosticsVisible ? (
+                  <button className="secondary-button" type="button" onClick={openHtmlGrabAuthorize} disabled={htmlGrabLoading}>
+                    <ExternalLink size={16} />
+                    {language === "zh" ? "打开 Edge 授权页" : "Open Edge session"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
         </section>
 
         {localDiagnosticsVisible ? (
@@ -582,6 +640,9 @@ export function SettingsWorkspace({
           cookieStatus={cookieStatus}
           cookieLoading={cookieLoading}
           cookieActionMessage={cookieActionMessage}
+          htmlGrabStatus={htmlGrabStatus}
+          htmlGrabLoading={htmlGrabLoading}
+          htmlGrabMessage={htmlGrabMessage}
           dependencyStatus={dependencyStatus}
           dependencyLoading={dependencyLoading}
           dependencyMessage={dependencyMessage}
@@ -589,7 +650,9 @@ export function SettingsWorkspace({
           onClose={() => setDependencyModalOpen(false)}
           onRefreshDependencies={refreshDependencyStatus}
           onRefreshCookies={refreshCookieStatus}
+          onRefreshHtmlGrab={refreshHtmlGrabStatus}
           onOpenCookieLogin={localDiagnosticsVisible ? openCookieLogin : undefined}
+          onOpenHtmlGrabAuthorize={localDiagnosticsVisible ? openHtmlGrabAuthorize : undefined}
         />
       ) : null}
 
@@ -647,6 +710,9 @@ function DependencyStatusModal({
   cookieStatus,
   cookieLoading,
   cookieActionMessage,
+  htmlGrabStatus,
+  htmlGrabLoading,
+  htmlGrabMessage,
   dependencyStatus,
   dependencyLoading,
   dependencyMessage,
@@ -654,12 +720,17 @@ function DependencyStatusModal({
   onClose,
   onRefreshDependencies,
   onRefreshCookies,
+  onRefreshHtmlGrab,
   onOpenCookieLogin,
+  onOpenHtmlGrabAuthorize,
 }: {
   language: Language;
   cookieStatus?: BilibiliCookieStatus;
   cookieLoading: boolean;
   cookieActionMessage: string;
+  htmlGrabStatus?: HtmlGrabCheckStatus;
+  htmlGrabLoading: boolean;
+  htmlGrabMessage: string;
   dependencyStatus?: MediaDependencyStatus;
   dependencyLoading: boolean;
   dependencyMessage: string;
@@ -667,7 +738,9 @@ function DependencyStatusModal({
   onClose: () => void;
   onRefreshDependencies: () => Promise<void>;
   onRefreshCookies: () => Promise<void>;
+  onRefreshHtmlGrab: () => Promise<void>;
   onOpenCookieLogin?: () => Promise<void>;
+  onOpenHtmlGrabAuthorize?: () => Promise<void>;
 }) {
   const items = Object.entries(dependencyStatus ?? {});
 
@@ -702,6 +775,38 @@ function DependencyStatusModal({
         </div>
 
         <div className="dependency-summary-list">
+          <div className="dependency-check-row compact">
+            <div className="dependency-check-title">
+              <CheckCircle2 size={17} />
+              <strong>{language === "zh" ? "HTML 抓取检查" : "HTML grabbing"}</strong>
+              <StatusBadge tone={htmlGrabStatus?.ok ? "done" : "error"}>
+                {htmlGrabStatus?.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed"}
+              </StatusBadge>
+            </div>
+            <p className="hint">{htmlGrabMessage || htmlGrabStatus?.message}</p>
+            {htmlGrabStatus?.target_url ? <small className="dependency-path">{htmlGrabStatus.target_url}</small> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshHtmlGrab} disabled={htmlGrabLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "重新检查 HTML 抓取" : "Refresh web extraction"}
+              </button>
+              {onOpenHtmlGrabAuthorize ? (
+                <button className="secondary-button" type="button" onClick={onOpenHtmlGrabAuthorize} disabled={htmlGrabLoading}>
+                  <ExternalLink size={16} />
+                  {language === "zh" ? "打开 Edge 授权页" : "Open Edge session"}
+                </button>
+              ) : null}
+            </div>
+            {(htmlGrabStatus?.checks ?? []).map((item) => (
+              <DependencyItemCard key={item.key || item.label} language={language} name={item.key || "html_grab"} item={{
+                label: item.label,
+                available: item.ok,
+                auth: item.auth,
+                message: item.message,
+              }} />
+            ))}
+          </div>
+
           <div className="dependency-check-row compact">
             <div className="dependency-check-title">
               <Cookie size={17} />
@@ -921,11 +1026,27 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   const [isTesting, setIsTesting] = useState(false);
   const [message, setMessage] = useState("");
   const [testResult, setTestResult] = useState<ApiTestResult>();
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
 
   const items = mode === "chat" ? chatPayload.items ?? [] : imagePayload.items ?? [];
   const templates = mode === "chat" ? chatPayload.templates ?? [] : mode === "image" ? imagePayload.templates ?? [] : [];
   const activeId = mode === "chat" ? chatPayload.active_id : imagePayload.active_id;
   const selectedItem = useMemo(() => items.find((item) => item.id === form.id), [form.id, items]);
+  const isCreating = mode !== "audio" && !form.id;
+  const formModeTitle = isCreating
+    ? language === "zh"
+      ? "\u65b0\u5efa\u914d\u7f6e"
+      : "New setting"
+    : language === "zh"
+      ? "\u7f16\u8f91\u914d\u7f6e"
+      : "Edit setting";
+  const formModeHint = isCreating
+    ? language === "zh"
+      ? "\u5f53\u524d\u662f\u4e00\u4efd\u65b0\u8349\u7a3f\uff0c\u4fdd\u5b58\u540e\u624d\u4f1a\u51fa\u73b0\u5728\u5de6\u4fa7\u5df2\u6709\u914d\u7f6e\u5217\u8868\u4e2d\u3002"
+      : "This is a new draft. It appears in the saved list after you create it."
+    : language === "zh"
+      ? `\u6b63\u5728\u4fee\u6539\uff1a${selectedItem?.name || form.name}`
+      : `Editing: ${selectedItem?.name || form.name}`;
 
   useEffect(() => {
     let alive = true;
@@ -954,6 +1075,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   useEffect(() => {
     setMessage("");
     setTestResult(undefined);
+    setSelectedTemplateId("");
     if (mode === "audio") {
       setAsrForm(formFromAsrItem(asrPayload.item));
       return;
@@ -962,17 +1084,19 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], mode));
   }, [asrPayload.item, chatPayload, imagePayload, mode]);
 
-  async function refresh(nextMode = mode) {
+  async function refresh(nextMode = mode, selectedId?: string) {
     if (nextMode === "audio") {
       const payload = await settingsApi.asrSettings();
       setAsrPayload(payload);
       setAsrForm(formFromAsrItem(payload.item));
-      return;
+      return payload;
     }
     const payload = nextMode === "chat" ? await settingsApi.apiSettings() : await settingsApi.imageApiSettings();
     if (nextMode === "chat") setChatPayload(payload);
     else setImagePayload(payload);
-    setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], nextMode));
+    const selected = payload.items?.find((item) => item.id === selectedId) ?? payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0];
+    setForm(formFromItem(selected, nextMode));
+    return payload;
   }
 
   async function save() {
@@ -983,18 +1107,20 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
         const payload = await settingsApi.saveAsrSetting(toAsrInput(asrForm));
         setAsrPayload(payload);
         setAsrForm(formFromAsrItem(payload.item));
-        setMessage(payload.message || (language === "zh" ? "音频 API 配置已保存。" : "Audio API setting saved."));
+        setMessage(payload.message || (language === "zh" ? "\u97f3\u9891 API \u914d\u7f6e\u5df2\u4fdd\u5b58\u3002" : "Audio API setting saved."));
         return;
       }
       const payload =
         mode === "chat"
           ? await settingsApi.saveApiSetting(toChatInput(form))
           : await settingsApi.saveImageApiSetting(toImageInput(form));
+      const saved = payload.item ?? payload.items?.find((item) => item.id === payload.active_id);
+      const savedId = saved?.id;
       if (mode === "chat") setChatPayload(payload);
       else setImagePayload(payload);
-      const saved = payload.item ?? payload.items?.find((item) => item.id === payload.active_id);
       setForm(formFromItem(saved, mode));
-      setMessage(language === "zh" ? "API 配置已保存。" : "API setting saved.");
+      await refresh(mode, savedId);
+      setMessage(language === "zh" ? "API \u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u5217\u8868\u5df2\u66f4\u65b0\u3002" : "API setting saved and list refreshed.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1019,7 +1145,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
           last_test_at: payload.item?.last_test_at ?? "",
         };
         setTestResult(result);
-        setMessage(payload.message || payload.error || (payload.ok ? (language === "zh" ? "测试通过。" : "Test passed.") : ""));
+        setMessage(payload.message || payload.error || (payload.ok ? (language === "zh" ? "\u6d4b\u8bd5\u901a\u8fc7\u3002" : "Test passed.") : ""));
         return;
       }
       const result =
@@ -1027,12 +1153,37 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
           ? await settingsApi.testApiSetting(toChatInput(form))
           : await settingsApi.testImageApiSetting(toImageInput(form), { realTest: form.real_image_test });
       setTestResult(result);
-      setMessage(isTestOk(result) ? (language === "zh" ? "测试通过。" : "Test passed.") : resultMessage(result));
+      if (form.id) await refresh(mode, form.id);
+      setMessage(isTestOk(result) ? (language === "zh" ? "\u6d4b\u8bd5\u901a\u8fc7\uff0c\u914d\u7f6e\u5217\u8868\u5df2\u68c0\u67e5\u3002" : "Test passed and settings list checked.") : resultMessage(result));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setIsTesting(false);
     }
+  }
+
+  function startNewSetting() {
+    setMessage("");
+    setTestResult(undefined);
+    setSelectedTemplateId("");
+    setForm(defaultForm(mode));
+  }
+
+  function selectExistingSetting(item: ApiSettingItem | ImageApiSettingItem) {
+    setMessage("");
+    setTestResult(undefined);
+    setSelectedTemplateId("");
+    setForm(formFromItem(item, mode));
+  }
+
+  function chooseTemplate(templateId: string) {
+    setSelectedTemplateId(templateId);
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) {
+      setForm(defaultForm(mode));
+      return;
+    }
+    applyTemplate(template);
   }
 
   async function activate(id: string) {
@@ -1072,6 +1223,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
       return;
     }
     const typedTemplate = template as ApiSettingTemplate;
+    setSelectedTemplateId(typedTemplate.id);
     setForm((current) => ({
       ...current,
       id: undefined,
@@ -1231,8 +1383,8 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
               {items.length ? (
                 <div className="api-setting-rows">
                   {items.map((item) => (
-                    <article key={item.id} className={item.id === form.id ? "api-setting-row selected" : "api-setting-row"}>
-                      <button type="button" onClick={() => setForm(formFromItem(item, mode))}>
+                    <article key={item.id} className={!isCreating && item.id === form.id ? "api-setting-row selected" : "api-setting-row"}>
+                      <button type="button" onClick={() => selectExistingSetting(item)}>
                         <strong>{item.name}</strong>
                         <span>{item.model}</span>
                         <small>{item.api_key_masked || (language === "zh" ? "未显示 Key" : "Key hidden")}</small>
@@ -1257,26 +1409,38 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
                 <p className="hint">{language === "zh" ? "还没有保存的配置。" : "No saved settings yet."}</p>
               )}
 
-              <div className="api-template-list">
-                <h3>{language === "zh" ? "模板" : "Templates"}</h3>
-                {templates.map((template) => (
-                  <button key={template.id} className="api-template-button" type="button" onClick={() => applyTemplate(template)}>
-                    <strong>{template.name}</strong>
-                    <span>{template.base_url}</span>
-                  </button>
-                ))}
-              </div>
             </aside>
 
             <form className="api-settings-form" onSubmit={(event) => event.preventDefault()}>
-              <div className="section-heading">
-                <h3>{selectedItem ? (language === "zh" ? "编辑配置" : "Edit setting") : language === "zh" ? "新建配置" : "New setting"}</h3>
+              <div className="section-heading api-form-heading">
+                <div>
+                  <h3>{formModeTitle}</h3>
+                  <p className="api-form-mode-hint">{formModeHint}</p>
+                </div>
                 <label className="inline-check">
                   <input type="checkbox" checked={form.make_active} onChange={(event) => setForm({ ...form, make_active: event.target.checked })} />
-                  {language === "zh" ? "保存后启用" : "Activate after save"}
+                  {language === "zh" ? "\u4fdd\u5b58\u540e\u542f\u7528" : "Activate after save"}
                 </label>
               </div>
               <div className="api-form-grid">
+                {isCreating ? (
+                  <label className="wide-field api-template-select">
+                    <span>{language === "zh" ? "\u65b0\u5efa\u76ee\u6807" : "New setting target"}</span>
+                    <select value={selectedTemplateId} onChange={(event) => chooseTemplate(event.target.value)}>
+                      <option value="">{language === "zh" ? "\u81ea\u5b9a\u4e49\u914d\u7f6e" : "Custom setting"}</option>
+                      {templates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name} - {template.base_url}
+                        </option>
+                      ))}
+                    </select>
+                    <small className="field-hint">
+                      {language === "zh"
+                        ? "\u9009\u62e9\u76ee\u6807\u540e\u4f1a\u81ea\u52a8\u9884\u586b\u670d\u52a1\u5546\u3001Base URL \u548c\u6a21\u578b\uff0cAPI Key \u4ecd\u9700\u81ea\u5df1\u586b\u5199\u3002"
+                        : "Choosing a target pre-fills provider, Base URL, and model. You still need to enter your API key."}
+                    </small>
+                  </label>
+                ) : null}
                 <label>
                   <span>{language === "zh" ? "配置名称" : "Name"}</span>
                   <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
@@ -1395,7 +1559,19 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
                   {isTesting ? (language === "zh" ? "测试中..." : "Testing...") : language === "zh" ? "测试" : "Test"}
                 </button>
                 <button className="primary-cta" type="button" disabled={isSaving} onClick={save}>
-                  <strong>{isSaving ? (language === "zh" ? "保存中..." : "Saving...") : language === "zh" ? "保存配置" : "Save setting"}</strong>
+                  <strong>
+                    {isSaving
+                      ? language === "zh"
+                        ? "\u4fdd\u5b58\u4e2d..."
+                        : "Saving..."
+                      : isCreating
+                        ? language === "zh"
+                          ? "\u521b\u5efa\u914d\u7f6e"
+                          : "Create setting"
+                        : language === "zh"
+                          ? "\u4fdd\u5b58\u4fee\u6539"
+                          : "Save changes"}
+                  </strong>
                   <Save size={17} />
                 </button>
                 <button className="secondary-button" type="button" onClick={() => refresh()}>

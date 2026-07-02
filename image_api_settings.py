@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -168,9 +169,27 @@ def load_data() -> dict[str, Any]:
 
 def save_data(data: dict[str, Any]) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = SETTINGS_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(SETTINGS_PATH)
+    serialized = json.dumps(data, ensure_ascii=False, indent=2)
+    last_error: OSError | None = None
+    for attempt in range(6):
+        tmp_path = SETTINGS_PATH.with_name(f".{SETTINGS_PATH.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(serialized, encoding="utf-8")
+            tmp_path.replace(SETTINGS_PATH)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            try:
+                SETTINGS_PATH.write_text(serialized, encoding="utf-8")
+                tmp_path.unlink(missing_ok=True)
+                return
+            except PermissionError as direct_exc:
+                last_error = direct_exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        time.sleep(0.05 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _with_defaults(setting: dict[str, Any]) -> dict[str, Any]:

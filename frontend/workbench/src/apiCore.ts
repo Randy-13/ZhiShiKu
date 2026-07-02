@@ -5,7 +5,11 @@ export type V2Payload<T> = {
   meta?: Record<string, unknown>;
 };
 
-export async function requestJson<T>(path: string, init?: RequestInit, options?: { timeoutMs?: number }): Promise<T> {
+export async function requestJson<T>(
+  path: string,
+  init?: RequestInit,
+  options?: { timeoutMs?: number; timeoutMessage?: string },
+): Promise<T> {
   const timeoutMs = options?.timeoutMs;
   const controller = timeoutMs ? new AbortController() : undefined;
   const timeoutId = controller
@@ -21,7 +25,7 @@ export async function requestJson<T>(path: string, init?: RequestInit, options?:
     return response.json() as Promise<T>;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Readable original generation timed out. For Douyin links, upload the local video/subtitle or configure ASR, then try again.");
+      throw new Error(options?.timeoutMessage || "Request timed out. Process fewer items at once, then try again.");
     }
     throw error;
   } finally {

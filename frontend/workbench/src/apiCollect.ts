@@ -11,7 +11,8 @@ import type {
 } from "./api";
 import type { KnowledgeItem, MaterialType, SourceMaterial, TextExtractionMode } from "./domain";
 
-const READABLE_DRAFT_TIMEOUT_MS = 120_000;
+const READABLE_DRAFT_TIMEOUT_MS = 180_000;
+const READABLE_DRAFT_PER_ITEM_TIMEOUT_MS = 180_000;
 const DRAFT_META_TIMEOUT_MS = 30_000;
 
 type ReadableDraftPayload = {
@@ -153,45 +154,44 @@ export const collectApi = {
 
   async createReadableDraft(materials: SourceMaterial[], parserMode: TextExtractionMode): Promise<ReadableDraftInput> {
     if (!materials.length) throw new Error("No material selected for readable draft.");
-    let readable: KnowledgeItem;
-    const textOnly = materials.every((material) => material.type === "text" && !material.backendId);
+    materials = await this.normalizeUrlTextMaterials(materials);
     const backendReady = materials.every(
       (material) => material.type === "text" || material.type === "link" || typeof material.backendId === "number",
     );
-    if (textOnly) {
-      readable = localReadableDocument(materials);
-    } else if (backendReady) {
-      const payload = await requestJson<V2Payload<ReadableDraftPayload>>("/api/v2/collect/readable-draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          material_type: rawMaterialType(materials),
-          title: materials.length === 1 ? materials[0]?.title ?? "" : "",
-          parser_mode: parserMode,
-          items: materials.map((material) => ({
-            id: material.backendId,
-            content: material.type === "text" ? material.source : "",
-            url: material.type === "link" || material.type === "media" ? material.source : "",
-            title: material.title,
-            link_type: material.linkType ?? "",
-            extraction_strategy: material.extractionStrategy ?? "",
-            access_status: material.accessStatus ?? material.status,
-          })),
-        }),
-      }, { timeoutMs: READABLE_DRAFT_TIMEOUT_MS });
-      const data = assertV2Ok(payload);
-      readable = {
-        id: `readable-${Date.now()}`,
-        title: firstString(data.title, materials[0]?.title, "Readable document"),
-        note: firstString(data.note),
-        body: firstString(data.markdown),
-        sourceIds: materials.map((material) => material.id),
-        status: "draft",
-        confidence: "needsReview",
-      };
-    } else {
-      readable = await this.readableDocument(materials, parserMode);
+    if (!backendReady) {
+      throw new Error("Selected materials do not have backend records for readable extraction.");
     }
+    const payload = await requestJson<V2Payload<ReadableDraftPayload>>("/api/v2/collect/readable-draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        material_type: rawMaterialType(materials),
+        title: materials.length === 1 ? materials[0]?.title ?? "" : "",
+        parser_mode: parserMode,
+        items: materials.map((material) => ({
+          id: material.backendId,
+          content: material.type === "text" ? material.source : "",
+          url: material.type === "link" || material.type === "media" ? material.source : "",
+          title: material.title,
+          link_type: material.linkType ?? "",
+          extraction_strategy: material.extractionStrategy ?? "",
+          access_status: material.accessStatus ?? material.status,
+        })),
+      }),
+    }, {
+      timeoutMs: readableDraftTimeoutMs(materials, parserMode),
+      timeoutMessage: "Readable original extraction timed out. Process fewer items at once, then try again.",
+    });
+    const data = assertV2Ok(payload);
+    const readable: KnowledgeItem = {
+      id: `readable-${Date.now()}`,
+      title: firstString(data.title, materials[0]?.title, "Readable document"),
+      note: firstString(data.note),
+      body: firstString(data.markdown),
+      sourceIds: materials.map((material) => material.id),
+      status: "draft",
+      confidence: "needsReview",
+    };
     const meta = await this
       .knowledgeDraftMeta(materials, readable.body, "zh", DRAFT_META_TIMEOUT_MS)
       .catch(() => ({ title: readable.title, note: readable.note ?? "" }));
@@ -284,7 +284,7 @@ export const collectApi = {
         body,
         language,
       }),
-    }, timeoutMs ? { timeoutMs } : undefined);
+    }, timeoutMs ? { timeoutMs, timeoutMessage: "Draft title and note generation timed out; the body draft was kept." } : undefined);
   },
 
   async readableDocument(materials: SourceMaterial[], parserMode: TextExtractionMode): Promise<KnowledgeItem> {
@@ -361,6 +361,37 @@ export const collectApi = {
 
     throw new Error("文本素材没有旧后端生成接口，将使用本地知识草稿。");
   },
+
+  async normalizeUrlTextMaterials(materials: SourceMaterial[]): Promise<SourceMaterial[]> {
+    return Promise.all(
+      materials.map(async (material) => {
+        if (material.type !== "text" || material.backendId) return material;
+        const url = singleUrl(material.source);
+        if (!url) return material;
+        if (looksLikeMediaUrl(url)) {
+          const resolved = await this.resolveMediaUrl(url);
+          if (!resolved) return { ...material, type: "link", source: url };
+          return {
+            ...material,
+            type: "media",
+            title: firstString(resolved.title, material.title, url),
+            source: firstString(resolved.canonical_url, resolved.source_url, url),
+            backendId: typeof resolved.id === "number" ? resolved.id : material.backendId,
+          };
+        }
+        const inspected = await this.inspectLink(url).catch(() => null);
+        return {
+          ...material,
+          type: "link",
+          title: inspected?.title?.trim() || material.title || url,
+          source: inspected?.final_url?.trim() || url,
+          linkType: inspected?.link_type,
+          extractionStrategy: inspected?.extraction_strategy,
+          accessStatus: inspected?.access_status,
+        };
+      }),
+    );
+  },
 };
 
 function assertV2Ok<T extends { ok?: boolean; error?: string }>(payload: V2Payload<T>): T {
@@ -373,6 +404,16 @@ function asFileList(files: File[]) {
   const form = new FormData();
   files.forEach((file) => form.append("files", file, file.name));
   return form;
+}
+
+function readableDraftTimeoutMs(materials: SourceMaterial[], parserMode: TextExtractionMode) {
+  const itemCount = Math.max(1, materials.length);
+  const baseTimeout = Math.max(READABLE_DRAFT_TIMEOUT_MS, READABLE_DRAFT_PER_ITEM_TIMEOUT_MS * itemCount);
+  const includesScreenshot = materials.some((material) => material.type === "image");
+  const includesDocument = materials.some((material) => material.type === "file");
+  if (parserMode === "ai_vision" || includesDocument) return Math.max(baseTimeout, 420_000);
+  if (includesScreenshot) return Math.max(baseTimeout, 300_000);
+  return baseTimeout;
 }
 
 function firstString(...values: unknown[]) {
@@ -407,6 +448,19 @@ function rawMaterialGroupKey(material: SourceMaterial) {
   return "text";
 }
 
+function singleUrl(value: string) {
+  const parts = value
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length === 1 && /^https?:\/\/\S+$/i.test(parts[0]) ? parts[0] : "";
+}
+
+function looksLikeMediaUrl(url: string) {
+  return /bilibili|douyin|youtube|youtu\.be|vimeo|xiaohongshu|xhslink|video|mp4|m3u8|audio/i.test(url);
+}
+
 function fileToDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -422,33 +476,4 @@ function normalizeClipboardImage(file: File, index: number) {
   const name = file.name && /\.[a-z0-9]+$/i.test(file.name) ? file.name : `clipboard-${Date.now()}-${index + 1}${suffix}`;
   if (file.name === name && file.type === type) return file;
   return new File([file], name, { type, lastModified: file.lastModified || Date.now() });
-}
-
-function localReadableDocument(materials: SourceMaterial[]): KnowledgeItem {
-  if (materials.length === 1) {
-    const material = materials[0];
-    const title = material.title.trim() || "未命名原文";
-    const body = material.source.trim()
-      ? `# ${title}\n\n${material.source.trim()}`
-      : `# ${title}\n\n${material.note ?? ""}`;
-    return {
-      id: `readable-${Date.now()}`,
-      title,
-      note: "本地文本原文草稿",
-      body,
-      sourceIds: [material.id],
-      status: "draft",
-      confidence: "medium",
-    };
-  }
-  const title = `合并原文 ${new Date().toLocaleString()}`;
-  return {
-    id: `readable-${Date.now()}`,
-    title,
-    note: `合并 ${materials.length} 条文本素材`,
-    body: [`# ${title}`, ...materials.map((material, index) => `\n\n## ${index + 1}. ${material.title}\n\n${material.source || material.note || ""}`)].join(""),
-    sourceIds: materials.map((material) => material.id),
-    status: "draft",
-    confidence: "medium",
-  };
 }

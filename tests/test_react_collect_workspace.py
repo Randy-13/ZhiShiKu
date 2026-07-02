@@ -22,23 +22,48 @@ def test_collect_workspace_exposes_five_material_input_modes():
 
 def test_collect_workspace_routes_each_material_type_to_real_handlers():
     source = read(WORKBENCH / "src" / "workspaces" / "CollectWorkspace.tsx")
-    api_source = read(WORKBENCH / "src" / "api.ts")
-    app_source = read(WORKBENCH / "src" / "App.tsx")
+    api_source = read(WORKBENCH / "src" / "apiCollect.ts")
+    hook_source = read(WORKBENCH / "src" / "hooks" / "useCollectFlow.ts")
 
-    assert "onCreateMaterial({ type: \"text\"" in source
+    assert 'onCreateMaterial({ type: "text"' in source
     assert 'onDrop={(event) => handleDrop(event, "image")}' in source
     assert 'onDrop={(event) => handleDrop(event, "file")}' in source
     assert 'onDrop={(event) => handleDrop(event, "media")}' in source
     assert "onPaste={handlePaste}" in source
     assert "onResolveLinks(urls)" in source
-    assert "const resolveLinksV2 = useCallback(" in app_source
-    assert "const inspected = await api.inspectLink(url);" in app_source
+    assert "const inspected = await collectApi.inspectLink(url);" in hook_source
     assert "/api/images" in api_source
     assert "/api/images/paste" in api_source
     assert "/api/files" in api_source
     assert "/api/media/upload" in api_source
     assert "/api/media/resolve-url" in api_source
     assert "/api/v2/collect/inspect-link" in api_source
+
+
+def test_collect_workspace_routes_url_only_text_to_link_resolution():
+    source = read(WORKBENCH / "src" / "workspaces" / "CollectWorkspace.tsx")
+    api_source = read(WORKBENCH / "src" / "apiCollect.ts")
+
+    assert "const urls = urlsFromUrlOnlyText(value);" in source
+    assert "onResolveLinks(urls);" in source
+    assert "function urlsFromUrlOnlyText" in source
+    assert "materials = await this.normalizeUrlTextMaterials(materials);" in api_source
+    assert "async normalizeUrlTextMaterials" in api_source
+    assert "looksLikeMediaUrl(url)" in api_source
+    assert "const resolved = await this.resolveMediaUrl(url);" in api_source
+
+
+def test_collect_queue_surfaces_link_strategy_and_access_metadata():
+    source = read(WORKBENCH / "src" / "components" / "ObjectList.tsx")
+    i18n_source = read(WORKBENCH / "src" / "i18n.ts")
+
+    assert "buildLinkMeta(item, t)" in source
+    assert 't("collect.meta.strategy")' in source
+    assert 't("collect.meta.access")' in source
+    assert "item.extractionStrategy" in source
+    assert "item.accessStatus" in source
+    assert '"collect.strategy.agentReach"' in i18n_source
+    assert '"collect.strategy.staticFetch"' in i18n_source
 
 
 def test_collect_workspace_has_queue_generate_original_and_preview_flow():
@@ -65,25 +90,26 @@ def test_collect_workspace_preview_editor_supports_title_note_and_body():
 
 
 def test_collect_app_flow_generates_readable_draft_then_saves_to_originals():
-    source = read(WORKBENCH / "src" / "App.tsx")
-    api_source = read(WORKBENCH / "src" / "api.ts")
+    source = read(WORKBENCH / "src" / "hooks" / "useCollectFlow.ts")
+    api_source = read(WORKBENCH / "src" / "apiCollect.ts")
 
     assert "const [collectDraft, setCollectDraft] = useState<ReadableDraftInput>()" in source
     assert "const [isCollectingReadable, setIsCollectingReadable] = useState(false)" in source
     assert "const [isSavingRawDraft, setIsSavingRawDraft] = useState(false)" in source
     assert "const generateCollectReadableDraft = useCallback(" in source
     assert "const saveCollectDraftToOriginalLibrary = useCallback(async () => {" in source
-    assert "const draft = await api.createReadableDraft(selectedItems, textExtractionMode);" in source
-    assert "const item = await api.saveRawDraft(collectDraft);" in source
+    assert "await collectApi.createReadableDraft(selectedItems, textExtractionMode)" in source
+    assert "const item = await collectApi.saveRawDraft(collectDraft);" in source
     assert "setCollectDraft(undefined);" in source
     assert "await refreshLibraries();" in source
     assert "createReadableDraft(materials: SourceMaterial[], parserMode: TextExtractionMode)" in api_source
     assert "saveRawDraft(draft: ReadableDraftInput)" in api_source
     assert '"/api/v2/collect/readable-draft"' in api_source
+    assert "localReadableDocument" not in api_source
 
 
 def test_collect_raw_draft_save_prefers_raw_file_and_falls_back_to_raw_markdown():
-    api_source = read(WORKBENCH / "src" / "api.ts")
+    api_source = read(WORKBENCH / "src" / "apiCollect.ts")
 
     assert '"/api/v2/collect/raw-file"' in api_source
     assert 'if (!message.includes("Not Found") && !message.includes("404")) throw error;' in api_source

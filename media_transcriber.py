@@ -13,7 +13,7 @@ import asr_settings
 def transcribe_audio(path: Path, provider: str = "local") -> str:
     setting = asr_settings.active_setting()
     provider = (provider if provider != "local" else setting.get("provider") or "").lower()
-    if provider in {"openai", "compatible"}:
+    if provider in {"openai", "compatible", "minimax"}:
         text = transcribe_with_openai_compatible(path, setting)
         asr_settings.mark_test_result(True, "最近一次语音转写成功。")
         return text
@@ -45,11 +45,11 @@ def transcribe_with_openai_compatible(path: Path, setting: dict) -> str:
 def transcribe_audio_url(audio_url: str, setting: dict | None = None) -> str:
     setting = setting or asr_settings.active_setting()
     provider = (setting.get("provider") or "").lower()
-    if provider not in {"dashscope", "openai", "compatible"}:
+    if provider not in {"dashscope", "openai", "compatible", "minimax"}:
         raise RuntimeError("ASR provider is not configured.")
-    if provider in {"openai", "compatible"}:
+    if provider in {"openai", "compatible", "minimax"}:
         raise RuntimeError(
-            "OpenAI-compatible ASR only accepts local audio files in this app. "
+            "OpenAI-compatible and MiniMax ASR only accept local audio files in this app. "
             "Download the audio first or switch to DashScope for remote file URLs."
         )
     task_id = submit_dashscope_task(audio_url, setting)

@@ -35,6 +35,14 @@ TEMPLATES = [
         "model": "whisper-1",
         "api_key_placeholder": "ASR API key",
     },
+    {
+        "id": "minimax",
+        "name": "MiniMax ASR",
+        "provider": "minimax",
+        "base_url": "https://api.minimaxi.com/v1",
+        "model": "Speech-2.8-HD",
+        "api_key_placeholder": "MiniMax API key",
+    },
 ]
 
 
@@ -97,6 +105,8 @@ def save_setting(payload: dict[str, Any]) -> dict[str, Any]:
     model = (payload.get("model") or "").strip()
     if "dashscope.aliyuncs.com" in base_url or "fun-asr" in model.lower():
         provider = "dashscope"
+    if "minimaxi.com" in base_url:
+        provider = "minimax"
     if provider == "dashscope" and model.lower() == "fun-asr":
         model = "paraformer-v2"
     config_changed = any(
@@ -137,10 +147,17 @@ def normalize_setting(setting: dict[str, Any]) -> dict[str, Any]:
     model = (item.get("model") or "").strip()
     if "dashscope.aliyuncs.com" in base_url or "fun-asr" in model.lower():
         provider = "dashscope"
+    if "minimaxi.com" in base_url:
+        provider = "minimax"
     if provider == "dashscope":
         base_url = "https://dashscope.aliyuncs.com/api/v1"
         if model.lower() == "fun-asr":
             model = "paraformer-v2"
+    if provider == "minimax":
+        if not base_url:
+            base_url = "https://api.minimaxi.com/v1"
+        if not model:
+            model = "Speech-2.8-HD"
     item["provider"] = provider
     item["base_url"] = base_url
     item["model"] = model
@@ -148,8 +165,8 @@ def normalize_setting(setting: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate(setting: dict[str, Any]) -> None:
-    if setting.get("provider") not in {"openai", "compatible", "dashscope"}:
-        raise ValueError("ASR provider must be openai, compatible, or dashscope.")
+    if setting.get("provider") not in {"openai", "compatible", "dashscope", "minimax"}:
+        raise ValueError("ASR provider must be openai, compatible, dashscope, or minimax.")
     if not setting.get("base_url"):
         raise ValueError("Please fill in ASR Base URL.")
     if not setting.get("model"):

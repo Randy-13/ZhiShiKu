@@ -1952,6 +1952,43 @@ def test_asr_settings_test_reuses_saved_api_key_when_form_omits_it(tmp_path, mon
     assert captured["setting"]["model"] == "paraformer-v2"
 
 
+def test_asr_settings_test_supports_minimax_local_audio_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr(asr_settings, "SETTINGS_PATH", tmp_path / "asr_settings.json")
+    client = TestClient(app.app)
+    captured = {}
+
+    def fake_transcribe_audio(path: Path):
+        captured["path"] = path
+        captured["setting"] = dict(asr_settings.active_setting())
+        return "ok"
+
+    def fail_transcribe_url(url, setting):
+        raise AssertionError("MiniMax ASR must not use DashScope URL transcription")
+
+    monkeypatch.setattr(app, "transcribe_audio", fake_transcribe_audio)
+    monkeypatch.setattr(app, "transcribe_audio_url", fail_transcribe_url)
+
+    tested = client.post(
+        "/api/asr-settings/test",
+        json={
+            "provider": "minimax",
+            "base_url": "https://api.minimaxi.com/v1",
+            "model": "Speech-2.8-HD",
+            "api_key": "minimax-secret",
+            "timeout": 30,
+        },
+    )
+
+    assert tested.status_code == 200
+    payload = tested.json()
+    assert payload["ok"] is True
+    assert payload["item"]["provider"] == "minimax"
+    assert payload["item"]["model"] == "Speech-2.8-HD"
+    assert "minimax-secret" not in str(payload)
+    assert captured["path"].suffix == ".wav"
+    assert captured["setting"]["provider"] == "minimax"
+
+
 @pytest.mark.skip(reason="graph_core specific coverage moved to tests/test_graph_core.py")
 def test_graph_merges_related_markdowns_into_one_topic_node(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
@@ -2388,6 +2425,97 @@ def test_writer_project_saved_strategies_are_used_for_draft_generation(tmp_path,
     assert drafted.json()["project"]["title"] == "策略生效文章"
 
 
+def test_writer_writing_strategy_library_crud_is_independent_from_knowledge_libraries(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+
+    listed = client.get("/api/writer/writing-strategies")
+    assert listed.status_code == 200
+    body = listed.json()
+    default_id = body["default_id"]
+    assert any(item["id"] == default_id and item["readonly"] for item in body["items"])
+
+    created = client.post(
+        "/api/writer/writing-strategies",
+        json={"name": "Evidence first", "body": "Open with the conclusion, then show evidence."},
+    )
+    assert created.status_code == 200
+    item = created.json()["item"]
+    assert item["name"] == "Evidence first"
+    assert item["readonly"] is False
+
+    updated = client.post(
+        "/api/writer/writing-strategies",
+        json={"id": item["id"], "name": "Evidence first v2", "body": "Lead with facts before opinion."},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["item"]["body"] == "Lead with facts before opinion."
+
+    assert client.delete(f"/api/writer/writing-strategies/{default_id}").status_code == 400
+    deleted = client.delete(f"/api/writer/writing-strategies/{item['id']}")
+    assert deleted.status_code == 200
+    assert all(strategy["id"] != item["id"] for strategy in deleted.json()["items"])
+
+    assert (storage.WRITER_DIR / "writing_strategies.json").exists()
+    assert not list(storage.RAW_MATERIAL_DIR.rglob("*Evidence first*"))
+    assert not list(storage.KNOWLEDGE_DIR.rglob("*Evidence first*"))
+    assert not list(storage.MINING_DIR.rglob("*Evidence first*"))
+
+
+def test_writer_project_can_apply_custom_writing_strategy_from_library(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        api_settings,
+        "active_setting",
+        lambda: {
+            "id": "test",
+            "name": "Test API",
+            "provider": "compatible",
+            "base_url": "https://example.com/v1",
+            "model": "test-model",
+            "api_key": "test-key",
+            "timeout": 60,
+            "max_retries": 0,
+        },
+    )
+    knowledge_id = make_ready_knowledge("strategy source", "writer-strategy-library-hash")
+    captured = {}
+
+    def fake_article(topic, markdown_files, writing_strategy="", setting=None):
+        captured["writing_strategy"] = writing_strategy
+        return WriterArticleResult(
+            title="Strategy library article",
+            markdown="# Strategy library article\n\nBody",
+            cover_prompt="cover",
+            content_image_prompts=["image"],
+            digest="digest",
+        )
+
+    monkeypatch.setattr(deepseek_client, "generate_wechat_article", fake_article)
+    client = TestClient(app.app)
+
+    preset = client.post(
+        "/api/writer/writing-strategies",
+        json={"name": "Custom library strategy", "body": "Use this saved library strategy."},
+    )
+    assert preset.status_code == 200
+    strategy_body = preset.json()["item"]["body"]
+
+    created = client.post("/api/writer/projects", json={"name": "library strategy project", "knowledge_ids": [knowledge_id]})
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    saved = client.post(f"/api/writer/projects/{project_id}/strategies", json={"writing_strategy": strategy_body})
+    assert saved.status_code == 200
+    assert saved.json()["project"]["writing_strategy"] == strategy_body
+
+    picked = client.post(f"/api/writer/projects/{project_id}/topic", json={"topic": {"title": "topic"}})
+    assert picked.status_code == 200
+    drafted = client.post(f"/api/writer/projects/{project_id}/draft", json={})
+    assert drafted.status_code == 200
+    assert captured["writing_strategy"] == strategy_body
+
+
 def test_writer_project_design_must_be_confirmed_before_preflight(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     client = TestClient(app.app)
@@ -2713,6 +2841,53 @@ def test_generate_image_escapes_non_ascii_prompt_for_compatible_api(tmp_path, mo
     assert json.loads(captured["body"].decode("utf-8"))["prompt"] == "测试图"
 
 
+def test_onefaka_image_generation_bypasses_environment_proxy(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    setting = {
+        "provider": "compatible",
+        "protocol": "openai_compatible",
+        "model": "gpt-image-2",
+        "base_url": "https://api.onefaka.com/v1",
+        "api_key": "secret-key",
+        "size": "1024x1024",
+        "quality": "auto",
+        "timeout": 90,
+    }
+    captured: dict[str, object] = {}
+
+    class FakeHttpxResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}]}
+
+    class FakeHttpxClient:
+        def __init__(self, *args, **kwargs):
+            captured["trust_env"] = kwargs.get("trust_env")
+            captured["timeout"] = kwargs.get("timeout")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, endpoint, content=None, headers=None):
+            captured["endpoint"] = endpoint
+            captured["body"] = content
+            captured["headers"] = headers or {}
+            return FakeHttpxResponse()
+
+    monkeypatch.setattr(writer_tools.httpx, "Client", FakeHttpxClient)
+    result = writer_tools.generate_image("测试图", tmp_path / "onefaka.png", setting=setting)
+
+    assert captured["trust_env"] is False
+    assert captured["endpoint"] == "https://api.onefaka.com/v1/images/generations"
+    assert "\\u6d4b\\u8bd5\\u56fe".encode("ascii") in captured["body"]
+    assert result["path"].endswith("onefaka.png")
+
+
 def test_generate_image_retries_long_prompt_after_upstream_error(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     setting = {
@@ -2790,6 +2965,48 @@ def test_generate_writer_images_keeps_partial_success(tmp_path, monkeypatch):
     assert metadata["cover"]["filename"] == "cover.png"
     assert metadata["content_images"][0]["filename"] == "content-1.png"
     assert metadata["errors"][0]["message"].startswith("生成正文配图 2 失败")
+
+
+def test_generate_writer_images_applies_cover_aspect_ratio_only(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("image-ratios")
+    seen: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        image_api_settings,
+        "active_setting",
+        lambda: {
+            "provider": "minimax",
+            "protocol": "minimax",
+            "base_url": "https://api.example.test/v1/image_generation",
+            "model": "image-model",
+            "api_key": "secret-key",
+            "size": "1024x1024",
+            "quality": "",
+            "aspect_ratio": "1:1",
+            "response_format": "base64",
+            "timeout": 60,
+        },
+    )
+
+    def fake_generate_image(prompt, output_path, setting=None):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(PNG_1X1)
+        seen.append((output_path.name, None if setting is None else setting.get("aspect_ratio")))
+        return {"path": storage.storage_relative(output_path), "prompt": prompt}
+
+    monkeypatch.setattr(writer_tools, "generate_image", fake_generate_image)
+
+    result = writer_tools.generate_writer_images(
+        workspace,
+        cover_prompt="cover",
+        content_prompts=["content"],
+        cover_aspect_ratio="2.35:1",
+        content_aspect_ratio="",
+    )
+
+    assert result["ok"] is True
+    assert seen == [("cover.png", "2.35:1"), ("content-1.png", None)]
 
 
 def readable_document_prefers_historical_ocr_text_and_slices_by_screenshot_legacy_encoding_probe(tmp_path, monkeypatch):
@@ -3146,7 +3363,8 @@ def test_format_article_falls_back_when_markdown_dependency_missing(tmp_path, mo
     monkeypatch.setattr("builtins.__import__", fake_import)
 
     result = writer_tools.format_article(workspace)
-    assert result["fallback"] is True
+    assert result["fallback"] is False
+    assert result["template_formatted"] is True
     assert "formatted.html" in result["path"]
     assert "正文" in result["html"]
 
@@ -3159,8 +3377,9 @@ def test_format_article_falls_back_when_formatter_script_missing(tmp_path, monke
 
     result = writer_tools.format_article(workspace)
 
-    assert result["fallback"] is True
-    assert "formatter script not found" in result["stderr"]
+    assert result["fallback"] is False
+    assert result["template_formatted"] is True
+    assert result["stderr"] == ""
     assert "formatted.html" in result["path"]
     assert "正文" in result["html"]
 
@@ -3173,13 +3392,13 @@ def test_fallback_markdown_to_html_preserves_ordered_lists(tmp_path, monkeypatch
 
     result = writer_tools.format_article(workspace)
 
-    assert "<ol>" in result["html"]
-    assert "<li>第一条</li>" in result["html"]
-    assert "<li>第二条</li>" in result["html"]
-    assert "<li>第三条</li>" in result["html"]
+    assert "<ol" in result["html"]
+    assert "第一条" in result["html"]
+    assert "第二条" in result["html"]
+    assert "第三条" in result["html"]
 
 
-def test_format_article_prefers_api_design_formatter(tmp_path, monkeypatch):
+def test_format_article_prefers_controlled_template_renderer(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("api-format")
     writer_tools.write_article(workspace, "# 标题\n\n## 小节\n\n正文")
@@ -3187,18 +3406,17 @@ def test_format_article_prefers_api_design_formatter(tmp_path, monkeypatch):
     monkeypatch.setattr(writer_tools.api_settings, "active_setting", lambda: {"api_key": "test", "model": "format-model"})
 
     def fake_design(markdown, design_strategy="", setting=None):
-        assert "# 标题" in markdown
-        assert "强调重点句" in design_strategy
-        assert setting["model"] == "format-model"
-        return "<html><body><section style='padding:24px'><blockquote>设计化导语</blockquote><p>正文</p></section></body></html>"
+        raise AssertionError("AI formatter should not be the primary HTML generator")
 
     monkeypatch.setattr(writer_tools.deepseek_client, "design_wechat_article_html", fake_design)
 
     result = writer_tools.format_article(workspace, design_strategy="强调重点句")
 
     assert result["fallback"] is False
-    assert result["ai_formatted"] is True
-    assert "设计化导语" in result["html"]
+    assert result["ai_formatted"] is False
+    assert result["template_formatted"] is True
+    assert result["design_intent"]["theme"] in {"tech", "column", "research", "xiumi"}
+    assert 'data-fl-component="title_card"' in result["html"]
     assert "formatted.html" in result["path"]
 
 
@@ -3413,6 +3631,161 @@ def test_publish_draft_script_path_uploads_content_images_before_publish(tmp_pat
     ]
     publish_ready = workspace / "publish_ready.html"
     assert "https://mmbiz.example/content-1.png" in publish_ready.read_text(encoding="utf-8")
+
+
+def test_wechat_template_renderer_outputs_distinct_themes_and_components():
+    markdown = """# Title
+
+> A concise opening quote.
+
+## Section
+
+Body paragraph with **bold** and ==mark==.
+
+- first
+- second
+
+| Metric | Value |
+| --- | --- |
+| Speed | 2x |
+
+![Chart](content-1.png)
+"""
+
+    tech = writer_tools.wechat_html_from_markdown(markdown, design_strategy="科技长文", theme="tech")
+    xiumi = writer_tools.wechat_html_from_markdown(markdown, design_strategy="秀米 装饰 金句", theme="tech")
+
+    assert tech["intent"]["theme"] == "tech"
+    assert xiumi["intent"]["theme"] == "xiumi"
+    assert tech["html"] != xiumi["html"]
+    assert 'data-fl-component="title_card"' in tech["html"]
+    assert 'data-fl-component="data_card"' in tech["html"]
+    assert 'data-fl-component="image_caption"' in tech["html"]
+    assert "<script" not in xiumi["html"].lower()
+
+
+
+def test_publish_preflight_accepts_underscore_content_image_alias(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("content-image-alias")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    (workspace / "formatted.html").write_text(
+        '<html><body><p>body</p><img src="content_1.png" /></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "article.md").write_text("# Title\n\nbody", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "missing-wechat.json")
+
+    result = writer_tools.publish_preflight(workspace, "Title", digest="Digest")
+    check_map = {item["key"]: item for item in result["checks"]}
+
+    assert check_map["missing_images"]["ok"] is True
+    assert result["publish_inspection"]["missing_images"] == []
+    assert result["publish_inspection"]["local_image_paths"] == [str(image_path.resolve())]
+
+
+def test_ensure_content_images_removes_underscore_placeholders(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("strip-content-image-alias")
+    (workspace / "content-1.png").write_bytes(PNG_1X1)
+    (workspace / "image_metadata.json").write_text(
+        json.dumps({"content_images": [{"filename": "content-1.png", "prompt": "body", "index": 1}]}),
+        encoding="utf-8",
+    )
+
+    markdown = "# Title\n\nbody paragraph.\n\n![stale placeholder](content_1.png)\n"
+    result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
+
+    assert "content_1.png" not in result
+    assert result.count("content-1.png") == 1
+
+
+def test_ensure_content_images_removes_cover_from_article_markdown(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("strip-cover-image")
+    (workspace / "content-1.png").write_bytes(PNG_1X1)
+    (workspace / "image_metadata.json").write_text(
+        json.dumps({"content_images": [{"filename": "content-1.png", "prompt": "body", "index": 1}]}),
+        encoding="utf-8",
+    )
+
+    markdown = "# Title\n\n![封面图](cover.png)\n\nbody paragraph.\n"
+    result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
+
+    assert "cover.png" not in result
+    assert result.count("content-1.png") == 1
+
+
+def test_prepare_html_for_publish_prunes_cover_and_duplicate_content_aliases(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("publish-prune-duplicates")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    (workspace / "content-1.png").write_bytes(PNG_1X1)
+    (workspace / "content-2.png").write_bytes(PNG_1X1)
+    html_path = workspace / "formatted.html"
+    html_path.write_text(
+        '<html><body>'
+        '<section data-fl-component="image_caption"><img src="cover.png" alt="cover" /></section>'
+        '<section data-fl-component="image_caption"><img src="content-1.png" alt="first" /></section>'
+        '<section data-fl-component="image_caption"><img src="content_1.png" alt="stale first" /></section>'
+        '<section data-fl-component="image_caption"><img src="content-2.png" alt="second" /></section>'
+        '</body></html>',
+        encoding="utf-8",
+    )
+
+    prepared = writer_tools.prepare_html_for_publish(workspace, html_path)
+    content = prepared.read_text(encoding="utf-8")
+
+    assert "cover.png" not in content
+    assert "content_1.png" not in content
+    assert content.count("content-1.png") == 1
+    assert content.count("content-2.png") == 1
+
+def test_publish_preflight_reports_bad_images_and_forbidden_tags(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("bad-publish-html")
+    (workspace / "formatted.html").write_text(
+        '<html><body><p style="text-indent:2em">正文</p><script>alert(1)</script>'
+        '<img src="missing.png" /><img src="data:image/png;base64,xx" />'
+        '<img src="https://example.com/remote.png" /></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "article.md").write_text("# 标题\n\n正文", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "missing-wechat.json")
+
+    result = writer_tools.publish_preflight(workspace, "标题", digest="摘要")
+    check_map = {item["key"]: item for item in result["checks"]}
+
+    assert result["ok"] is False
+    assert check_map["missing_images"]["ok"] is False
+    assert check_map["data_images"]["ok"] is False
+    assert check_map["remote_images"]["ok"] is False
+    assert check_map["wechat_html_sanitize"]["ok"] is False
+    assert (workspace / "publish_preflight_report.json").exists()
+
+
+def test_prepare_publish_html_upload_report_tracks_replacements(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("upload-report")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    html_path = workspace / "formatted.html"
+    html_path.write_text('<html><body><p>正文</p><img src="content-1.png" /></body></html>', encoding="utf-8")
+    monkeypatch.setattr(writer_tools, "_wechat_upload_content_image", lambda access_token, image: f"https://mmbiz.example/{image.name}")
+
+    publish_path, html_text, uploaded = writer_tools.prepare_publish_html_with_wechat_images(workspace, html_path, "token")
+    report = json.loads((workspace / "publish_image_uploads.json").read_text(encoding="utf-8"))
+
+    assert publish_path.name == "publish_ready.html"
+    assert "https://mmbiz.example/content-1.png" in html_text
+    assert uploaded == [{"path": str(image_path.resolve()), "url": "https://mmbiz.example/content-1.png"}]
+    assert report["expected_local_image_count"] == 1
+    assert report["uploaded_image_count"] == 1
+    assert report["replacement_count"] == 1
+    assert report["ok"] is True
 
 
 def test_writer_workspace_directory_status_and_resume(tmp_path, monkeypatch):

@@ -1,5 +1,5 @@
 import { requestJson } from "./apiCore";
-import type { WriterProjectState } from "./domain";
+import type { WriterProjectState, WriterStrategyPreset } from "./domain";
 import type { WriterLibraryFileInput } from "./api";
 
 export const writerApi = {
@@ -47,6 +47,24 @@ export const writerApi = {
 
   writerProjects() {
     return requestJson<{ items?: WriterProjectState["project"][] }>("/api/writer/projects");
+  },
+
+  writerWritingStrategies() {
+    return requestJson<{ default_id: string; items: WriterStrategyPreset[] }>("/api/writer/writing-strategies");
+  },
+
+  saveWriterWritingStrategy(name: string, body: string, id?: string) {
+    return requestJson<{ default_id: string; items: WriterStrategyPreset[]; item: WriterStrategyPreset }>("/api/writer/writing-strategies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name, body }),
+    });
+  },
+
+  deleteWriterWritingStrategy(id: string) {
+    return requestJson<{ default_id: string; items: WriterStrategyPreset[] }>(`/api/writer/writing-strategies/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
   },
 
   writerProject(projectId: string) {
@@ -129,27 +147,34 @@ export const writerApi = {
     });
   },
 
-  generateWriterProjectImages(projectId: string, coverPrompt?: string, contentImagePrompts: string[] = []) {
+  generateWriterProjectImages(projectId: string, coverPrompt?: string, contentImagePrompts: string[] = [], coverAspectRatio?: string, contentAspectRatio?: string) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/images`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cover_prompt: coverPrompt, content_image_prompts: contentImagePrompts }),
+      body: JSON.stringify({ cover_prompt: coverPrompt, content_image_prompts: contentImagePrompts, cover_aspect_ratio: coverAspectRatio, content_aspect_ratio: contentAspectRatio }),
     });
   },
 
-  generateWriterProjectImageItem(projectId: string, kind: "cover" | "content", prompt: string, index?: number) {
+  generateWriterProjectImageItem(projectId: string, kind: "cover" | "content", prompt: string, index?: number, aspectRatio?: string) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/images/item`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, prompt, index }),
+      body: JSON.stringify({ kind, prompt, index, aspect_ratio: aspectRatio }),
     });
   },
 
-  formatWriterProject(projectId: string, markdown?: string, designStrategy?: string) {
+  formatWriterProject(projectId: string, markdown?: string, designStrategy?: string, theme = "tech") {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/format`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, theme: "tech", design_strategy: designStrategy }),
+      body: JSON.stringify({ markdown, theme, design_strategy: designStrategy }),
+    });
+  },
+
+  sanitizeWriterProjectPublishHtml(projectId: string) {
+    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish/sanitize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
     });
   },
 

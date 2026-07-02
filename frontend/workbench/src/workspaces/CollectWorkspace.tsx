@@ -144,6 +144,12 @@ export function CollectWorkspace({
                   onClick={() => {
                     const value = textValue.trim();
                     if (!value) return;
+                    const urls = urlsFromUrlOnlyText(value);
+                    if (urls.length) {
+                      onResolveLinks(urls);
+                      setTextValue("");
+                      return;
+                    }
                     onCreateMaterial({ type: "text", title: value.slice(0, 32), source: value });
                     setTextValue("");
                   }}
@@ -282,7 +288,7 @@ export function CollectWorkspace({
             <EmptyState title={t("collect.empty")} />
           ) : (
             <>
-              <div className="queue-toolbar">
+              <div className="queue-toolbar collect-queue-toolbar">
                 <span>
                   {t("collect.selectedCount")} {checkedMaterialIds.length} / {materials.length}
                 </span>
@@ -296,8 +302,6 @@ export function CollectWorkspace({
                   <button className="secondary-button danger-button" type="button" disabled={!checkedMaterialIds.length} onClick={() => onDeleteMaterials(checkedMaterialIds)}>
                     {t("collect.deleteSelected")}
                   </button>
-                </div>
-                <div className="collect-main-action">
                   <button
                     className="primary-cta"
                     type="button"
@@ -374,6 +378,15 @@ export function CollectWorkspace({
       {rightRail}
     </section>
   );
+}
+
+function urlsFromUrlOnlyText(value: string) {
+  const lines = value
+    .split(/\s+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return [];
+  return lines.every((line) => /^https?:\/\/\S+$/i.test(line)) ? lines : [];
 }
 
 function Dropzone({
