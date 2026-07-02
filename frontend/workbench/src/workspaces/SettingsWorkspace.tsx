@@ -1,6 +1,7 @@
 import {
   CheckCircle2,
   Cookie,
+  Database,
   ExternalLink,
   FolderOpen,
   Plug,
@@ -24,6 +25,7 @@ import type {
   AsrSettingTemplate,
   AuthContext,
   BilibiliCookieStatus,
+  DatabaseStatus,
   HtmlGrabCheckStatus,
   ImageApiSettingInput,
   ImageApiSettingItem,
@@ -218,6 +220,9 @@ export function SettingsWorkspace({
   const [authContext, setAuthContext] = useState<AuthContext>();
   const [quotaStatus, setQuotaStatus] = useState<QuotaStatus>();
   const [quotaMessage, setQuotaMessage] = useState("");
+  const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatus>();
+  const [databaseLoading, setDatabaseLoading] = useState(false);
+  const [databaseMessage, setDatabaseMessage] = useState("");
 
   const localDiagnosticsVisible = authContext
     ? authContext.deploymentMode !== "cloud" || authContext.user?.role === "admin"
@@ -253,6 +258,18 @@ export function SettingsWorkspace({
       setQuotaStatus(await quotaApi.me());
     } catch (error) {
       setQuotaMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function refreshDatabaseStatus() {
+    setDatabaseLoading(true);
+    setDatabaseMessage("");
+    try {
+      setDatabaseStatus(await settingsApi.databaseStatus());
+    } catch (error) {
+      setDatabaseMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDatabaseLoading(false);
     }
   }
 
@@ -378,6 +395,7 @@ export function SettingsWorkspace({
         if (canSeeLocalDiagnostics) {
           refreshStorageLocations();
           refreshTrashStatus();
+          refreshDatabaseStatus();
         }
       })
       .catch(() => {
@@ -389,6 +407,17 @@ export function SettingsWorkspace({
   }, []);
 
   const dependencyItems = useMemo(() => Object.entries(dependencyStatus ?? {}), [dependencyStatus]);
+  const databaseTableItems = useMemo(
+    () =>
+      Object.entries(databaseStatus?.tables ?? {})
+        .filter(([, count]) => count >= 0)
+        .sort(([a], [b]) => a.localeCompare(b)),
+    [databaseStatus],
+  );
+  const duplicateHashCount = useMemo(
+    () => Object.values(databaseStatus?.duplicate_hashes ?? {}).reduce((total, rows) => total + rows.length, 0),
+    [databaseStatus],
+  );
   const readyCount = dependencyItems.filter(([, item]) => item.available || item.configured || item.verified).length;
   const dependencySummary =
     dependencyItems.length > 0
@@ -488,6 +517,60 @@ export function SettingsWorkspace({
                   <Trash2 size={16} />
                   {language === "zh" ? "管理垃圾箱" : "Manage trash"}
                 </button>
+              </div>
+
+              <div className="database-settings-card">
+                <div className="dependency-check-title">
+                  <Database size={17} />
+                  <h2>{language === "zh" ? "数据管理" : "Data management"}</h2>
+                  <StatusBadge tone={databaseStatus?.ok ? "done" : "error"}>
+                    {databaseStatus?.ok ? (language === "zh" ? "连接正常" : "Connected") : language === "zh" ? "需检查" : "Check"}
+                  </StatusBadge>
+                </div>
+                <div className="database-status-grid">
+                  <DatabaseMetric label={language === "zh" ? "数据库" : "Database"} value={databaseStatus?.backend ?? "unknown"} />
+                  <DatabaseMetric label="Schema" value={databaseStatus?.schema_version || "pending"} />
+                  <DatabaseMetric
+                    label="MySQL DSN"
+                    value={
+                      databaseStatus?.mysql_configured
+                        ? language === "zh"
+                          ? "已配置"
+                          : "Configured"
+                        : language === "zh"
+                          ? "未配置"
+                          : "Not set"
+                    }
+                  />
+                  <DatabaseMetric label={language === "zh" ? "重复 Hash" : "Duplicate hashes"} value={String(duplicateHashCount)} />
+                </div>
+                {databaseStatus?.sqlite_path ? <small className="dependency-path">{databaseStatus.sqlite_path}</small> : null}
+                {databaseStatus?.storage_root ? <small className="dependency-path">{databaseStatus.storage_root}</small> : null}
+                {databaseMessage || databaseStatus?.error ? (
+                  <p className="inline-error">{databaseMessage || databaseStatus?.error}</p>
+                ) : (
+                  <p className="hint">
+                    {language === "zh"
+                      ? "这里只做只读检查；迁移请在命令行使用 tools/migrate_sqlite_to_mysql.py。"
+                      : "Read-only status only. Run tools/migrate_sqlite_to_mysql.py from the command line for migration."}
+                  </p>
+                )}
+                {databaseTableItems.length ? (
+                  <div className="database-table-counts">
+                    {databaseTableItems.slice(0, 12).map(([table, count]) => (
+                      <span key={table}>
+                        <strong>{table}</strong>
+                        <em>{count}</em>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="dependency-actions">
+                  <button className="secondary-button" type="button" onClick={refreshDatabaseStatus} disabled={databaseLoading}>
+                    <RefreshCw size={16} />
+                    {databaseLoading ? (language === "zh" ? "检查中" : "Checking") : language === "zh" ? "只读检查" : "Read-only check"}
+                  </button>
+                </div>
               </div>
 
               <div className="storage-settings-card">
@@ -1617,6 +1700,15 @@ function QuotaMetric({
         {formatter(counter.used ?? 0)}
         {counter.limit > 0 ? ` / ${formatter(counter.limit)}` : ""}
       </strong>
+    </div>
+  );
+}
+
+function DatabaseMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="database-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }

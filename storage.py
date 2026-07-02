@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from src import db as database
 from src.auth import init_auth_schema
 
 
@@ -37,8 +38,14 @@ def _is_writable_dir(path: Path) -> bool:
 
 def _select_storage_root() -> Path:
     configured = os.getenv("FIGURELEARNING_STORAGE_ROOT")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        try:
+            configured_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return configured_path.resolve()
     candidates = [
-        Path(configured) if configured else None,
         PROJECT_DATA_DIR,
         DATA_DIR,
         SYSTEM_DATA_DIR,
@@ -141,6 +148,13 @@ def init_storage() -> None:
     TRASH_DIR.mkdir(parents=True, exist_ok=True)
     migrate_legacy_system_storage()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if database.configured_backend() == "mysql":
+        with connect() as conn:
+            database.init_mysql_schema(conn)
+            init_auth_schema(conn)
+            recover_markdown_entries(conn)
+            conn.commit()
+        return
     with connect() as conn:
         conn.execute(
             """
@@ -331,16 +345,51 @@ def storage_relative(path: Path) -> str:
 
 def connect() -> sqlite3.Connection:
     global DB_PATH
+    if database.configured_backend() == "mysql":
+        return database.connect(DB_PATH)
     try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
+        conn = database.connect(DB_PATH)
     except sqlite3.OperationalError:
         fallback = ROOT / "knowledge.db"
         fallback.parent.mkdir(parents=True, exist_ok=True)
         DB_PATH = fallback
-        conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+        conn = database.connect(DB_PATH)
     return conn
+
+
+def database_status() -> dict[str, Any]:
+    backend = database.configured_backend()
+    status: dict[str, Any] = {
+        "backend": backend,
+        "configured_backend": os.getenv("FIGURELEARNING_DB_BACKEND", ""),
+        "mysql_configured": bool(os.getenv("FIGURELEARNING_MYSQL_DSN")),
+        "sqlite_path": str(DB_PATH),
+        "storage_root": str(STORAGE_ROOT),
+        "storage_root_status": {
+            "exists": STORAGE_ROOT.exists(),
+            "writable": _is_writable_dir(STORAGE_ROOT),
+        },
+        "schema_version": "",
+        "ok": False,
+        "error": "",
+        "tables": {},
+        "path_columns": {},
+        "duplicate_hashes": {},
+    }
+    try:
+        with connect() as conn:
+            status["schema_version"] = database.schema_version(conn)
+            status["tables"] = database.table_counts(conn)
+            status["path_columns"] = database.path_column_report(conn)
+            status["duplicate_hashes"] = database.duplicate_hash_report(conn)
+            status["migrations"] = database.migration_history(conn)
+            status["foreign_keys"] = database.foreign_key_report(conn)
+            status["orphan_records"] = database.orphan_record_report(conn)
+            status["owner_workspace"] = database.owner_workspace_report(conn)
+            status["ok"] = True
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

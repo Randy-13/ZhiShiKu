@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import storage
+from src import db as database
 
 
 DEFAULT_LIMITS = {
@@ -47,6 +48,23 @@ def check_daily(conn: sqlite3.Connection, *, user_id: str, workspace_id: str, ke
 
 
 def consume_daily(conn: sqlite3.Connection, *, user_id: str, workspace_id: str, key: str, amount: int = 1, limit: int | None = None) -> dict[str, object]:
+    actual_limit = int(limit if limit is not None else DEFAULT_LIMITS[key])
+    if amount > actual_limit:
+        status = check_daily(conn, user_id=user_id, workspace_id=workspace_id, key=key, limit=actual_limit)
+        return {**status, "allowed": False}
+    if database.configured_backend() == "mysql":
+        before = check_daily(conn, user_id=user_id, workspace_id=workspace_id, key=key, limit=actual_limit)
+        conn.execute(
+            """
+            INSERT INTO usage_counters (user_id, workspace_id, counter_key, counter_date, count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, workspace_id, counter_key, counter_date)
+            DO UPDATE SET count = IF(count + excluded.count <= ?, count + excluded.count, count)
+            """,
+            (user_id, workspace_id, key, today_key(), amount, actual_limit),
+        )
+        updated = check_daily(conn, user_id=user_id, workspace_id=workspace_id, key=key, limit=actual_limit)
+        return {**updated, "allowed": int(updated["used"]) >= int(before["used"]) + amount}
     status = check_daily(conn, user_id=user_id, workspace_id=workspace_id, key=key, limit=limit)
     if int(status["used"]) + amount > int(status["limit"]):
         return {**status, "allowed": False}
@@ -63,20 +81,23 @@ def consume_daily(conn: sqlite3.Connection, *, user_id: str, workspace_id: str, 
     return {**updated, "allowed": True}
 
 
-def active_jobs(conn: sqlite3.Connection, *, user_id: str) -> int:
+def active_jobs(conn: sqlite3.Connection, *, user_id: str, workspace_id: str | None = None) -> int:
+    workspace_filter = "AND workspace_id = ?" if workspace_id else ""
+    params: tuple[object, ...] = (user_id, workspace_id) if workspace_id else (user_id,)
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS count FROM jobs
         WHERE owner_user_id = ? AND status IN ('queued', 'running')
+        {workspace_filter}
         """,
-        (user_id,),
+        params,
     ).fetchone()
     return int(row["count"] if row else 0)
 
 
-def check_concurrent_jobs(conn: sqlite3.Connection, *, user_id: str, limit: int | None = None) -> dict[str, object]:
+def check_concurrent_jobs(conn: sqlite3.Connection, *, user_id: str, workspace_id: str | None = None, limit: int | None = None) -> dict[str, object]:
     actual_limit = int(limit if limit is not None else DEFAULT_LIMITS["concurrent_jobs"])
-    used = active_jobs(conn, user_id=user_id)
+    used = active_jobs(conn, user_id=user_id, workspace_id=workspace_id)
     return {"allowed": used < actual_limit, "used": used, "limit": actual_limit, "remaining": max(0, actual_limit - used)}
 
 

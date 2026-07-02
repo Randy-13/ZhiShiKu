@@ -44,26 +44,35 @@ def create_job(
     )
     append_job_event(conn, job_id=job_id, status="queued", message="任务已进入队列")
     conn.commit()
-    return get_job(conn, user_id=user_id, job_id=job_id)
+    return get_job(conn, user_id=user_id, workspace_id=workspace_id, job_id=job_id)
 
 
-def list_jobs(conn: sqlite3.Connection, *, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+def list_jobs(conn: sqlite3.Connection, *, user_id: str, workspace_id: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+    workspace_filter = "AND workspace_id = ?" if workspace_id else ""
+    params: tuple[Any, ...] = (
+        user_id,
+        workspace_id,
+        max(1, min(limit, 100)),
+    ) if workspace_id else (user_id, max(1, min(limit, 100)))
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM jobs
         WHERE owner_user_id = ?
+        {workspace_filter}
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        (user_id, max(1, min(limit, 100))),
+        params,
     ).fetchall()
     return [job_row_to_dict(row) for row in rows]
 
 
-def get_job(conn: sqlite3.Connection, *, user_id: str, job_id: str) -> dict[str, Any]:
+def get_job(conn: sqlite3.Connection, *, user_id: str, job_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+    workspace_filter = "AND workspace_id = ?" if workspace_id else ""
+    params: tuple[Any, ...] = (job_id, user_id, workspace_id) if workspace_id else (job_id, user_id)
     row = conn.execute(
-        "SELECT * FROM jobs WHERE id = ? AND owner_user_id = ?",
-        (job_id, user_id),
+        f"SELECT * FROM jobs WHERE id = ? AND owner_user_id = ? {workspace_filter}",
+        params,
     ).fetchone()
     if not row:
         raise KeyError(job_id)
@@ -72,22 +81,31 @@ def get_job(conn: sqlite3.Connection, *, user_id: str, job_id: str) -> dict[str,
     return item
 
 
-def cancel_job(conn: sqlite3.Connection, *, user_id: str, job_id: str) -> dict[str, Any]:
-    job = get_job(conn, user_id=user_id, job_id=job_id)
+def cancel_job(conn: sqlite3.Connection, *, user_id: str, job_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+    job = get_job(conn, user_id=user_id, workspace_id=workspace_id, job_id=job_id)
     if job["status"] in TERMINAL_STATUSES:
         return job
     timestamp = now_iso()
+    workspace_filter = "AND workspace_id = ?" if workspace_id else ""
+    params: tuple[Any, ...] = (
+        timestamp,
+        timestamp,
+        job_id,
+        user_id,
+        workspace_id,
+    ) if workspace_id else (timestamp, timestamp, job_id, user_id)
     conn.execute(
-        """
+        f"""
         UPDATE jobs
         SET status = 'cancelled', updated_at = ?, finished_at = ?
         WHERE id = ? AND owner_user_id = ?
+        {workspace_filter}
         """,
-        (timestamp, timestamp, job_id, user_id),
+        params,
     )
     append_job_event(conn, job_id=job_id, status="cancelled", message="任务已取消")
     conn.commit()
-    return get_job(conn, user_id=user_id, job_id=job_id)
+    return get_job(conn, user_id=user_id, workspace_id=workspace_id, job_id=job_id)
 
 
 def start_job(conn: sqlite3.Connection, *, job_id: str) -> bool:

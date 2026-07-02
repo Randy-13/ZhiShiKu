@@ -317,13 +317,15 @@ function WorkbenchApp({
       const next = {
         ...selectedKnowledge,
         ...saved,
-        id: selectedKnowledge.id,
+        id: saved.id || saved.markdownPath || selectedKnowledge.id,
         title: saved.title || trimmed.title,
-        note: trimmed.note,
+        note: saved.note ?? trimmed.note,
         body: saved.body || trimmed.body,
-        sourceIds: selectedKnowledge.sourceIds,
+        sourceIds: saved.sourceIds?.length ? saved.sourceIds : selectedKnowledge.sourceIds,
         markdownPath: saved.markdownPath ?? selectedKnowledge.markdownPath,
         library: saved.library ?? selectedKnowledge.library,
+        createdAt: saved.createdAt || selectedKnowledge.createdAt,
+        updatedAt: saved.updatedAt || selectedKnowledge.updatedAt,
         status: saved.status || "saved",
         confidence: saved.confidence || "medium",
       };

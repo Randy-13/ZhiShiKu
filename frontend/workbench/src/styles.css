@@ -2342,6 +2342,12 @@ textarea {
   align-content: start;
 }
 
+.project-list-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: calc(100vh - 128px);
+  overflow: hidden;
+}
+
 .create-summary-bar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2701,6 +2707,12 @@ textarea {
 .preflight-list {
   display: grid;
   gap: 8px;
+}
+
+.project-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .knowledge-import-bar {
@@ -3877,6 +3889,74 @@ textarea {
   grid-column: span 2;
 }
 
+.database-settings-card {
+  grid-column: span 2;
+}
+
+.database-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.database-metric {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 8px;
+}
+
+.database-metric span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.database-metric strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.database-table-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  max-height: 168px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.database-table-counts span {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 6px 8px;
+}
+
+.database-table-counts strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.database-table-counts em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .quota-settings-card {
   align-content: start;
 }
@@ -4231,6 +4311,15 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .project-list-panel {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .project-list {
+    max-height: 360px;
+  }
+
   .right-context {
     position: static;
   }
@@ -4371,6 +4460,16 @@ textarea {
   .html-preview-actions,
   .project-create-row,
   .revision-row {
+    grid-template-columns: 1fr;
+  }
+
+  .database-settings-card,
+  .storage-settings-card {
+    grid-column: span 1;
+  }
+
+  .database-status-grid,
+  .database-table-counts {
     grid-template-columns: 1fr;
   }
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import json
@@ -2851,33 +2851,115 @@ def _writer_library_files_from_refs(refs: list[dict[str, object]], request: Requ
     seen: set[str] = set()
     scoped_owner = _writer_owner_scope(request) if request is not None else None
     for ref in refs:
-        if scoped_owner is not None:
-            knowledge_id = ref.get("knowledge_id") or ref.get("knowledgeId")
-            if knowledge_id is None:
-                continue
+        library = _normalize_writer_library_id(str(ref.get("library") or "original"))
+        knowledge_id = ref.get("knowledge_id") or ref.get("knowledgeId")
+        markdown_path = str(ref.get("markdown_path") or ref.get("markdownPath") or "").strip()
+
+        if scoped_owner is not None and knowledge_id is not None:
             item = storage.get_knowledge_entry(int(knowledge_id))
             _ensure_cloud_record_access(request, item, "Knowledge")
-            markdown_path = str(item.get("markdown_path") or "").strip()
-        else:
-            markdown_path = str(ref.get("markdown_path") or ref.get("markdownPath") or "").strip()
+            markdown_path = str(item.get("markdown_path") or markdown_path).strip()
+
         if not markdown_path:
             continue
-        path = storage.resolve_root_path(markdown_path)
+        path = _resolve_writer_library_ref_path(library, markdown_path)
         if not path or not path.exists():
             continue
+        if scoped_owner is not None and request is not None:
+            _ensure_cloud_library_file_access(request, path)
         relative_path = storage.storage_relative(path)
         if relative_path in seen:
             continue
         seen.add(relative_path)
         files.append(
             {
-                "library": str(ref.get("library") or "original"),
-                "knowledge_id": ref.get("knowledge_id") or ref.get("knowledgeId"),
+                "library": library,
+                "knowledge_id": knowledge_id,
                 "markdown_path": relative_path,
-                "title": str(ref.get("title") or path.stem),
+                "title": str(ref.get("title") or _markdown_title_for_file(path) or path.stem),
             }
         )
     return files
+
+
+def _normalize_writer_library_id(library: str) -> str:
+    normalized = library.strip().lower()
+    if normalized == "raw":
+        return "original"
+    if normalized in {"original", "focus", "perspective", "knowledge"}:
+        return normalized
+    return "original"
+
+
+def _resolve_writer_library_ref_path(library: str, markdown_path: str) -> Path | None:
+    path = storage.resolve_root_path(markdown_path)
+    if path and path.exists():
+        return path
+    root = {
+        "original": storage.RAW_MATERIAL_DIR,
+        "raw": storage.RAW_MATERIAL_DIR,
+        "focus": storage.KNOWLEDGE_DIR,
+        "knowledge": storage.KNOWLEDGE_DIR,
+        "perspective": storage.MINING_DIR,
+    }.get(library)
+    if not root:
+        return None
+    candidate = root / markdown_path
+    return candidate if candidate.exists() else None
+
+
+def _ensure_cloud_library_file_access(request: Request, path: Path) -> None:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    if context.get("deploymentMode") != "cloud":
+        return
+    user = context.get("user") or {}
+    if isinstance(user, dict) and user.get("role") == "admin":
+        return
+    user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    owner = _markdown_owner_user_id(text)
+    if owner and owner == user_id:
+        return
+    relative_path = storage.storage_relative(path)
+    if relative_path:
+        with storage.connect() as conn:
+            row = conn.execute(
+                "SELECT owner_user_id FROM knowledge_entries WHERE markdown_path = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+                (relative_path,),
+            ).fetchone()
+        if row and row["owner_user_id"] and row["owner_user_id"] == user_id:
+            return
+    raise HTTPException(status_code=404, detail="Library file not found")
+
+
+def _markdown_owner_user_id(text: str) -> str:
+    for line in text.splitlines()[:40]:
+        stripped = line.strip().lstrip("- ").strip()
+        if not stripped:
+            continue
+        if "\uff1a" in stripped:
+            key, value = stripped.split("\uff1a", 1)
+        elif ":" in stripped:
+            key, value = stripped.split(":", 1)
+        else:
+            continue
+        normalized = key.strip().lower().replace(" ", "_").replace("-", "_")
+        if normalized == "owner_user_id":
+            return value.strip()
+    return ""
+
+
+def _markdown_title_for_file(path: Path) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                return stripped.lstrip("#").strip()
+    except OSError:
+        return ""
+    return ""
+
 
 
 def _writer_project_knowledge_ids(project: dict[str, object]) -> list[int]:

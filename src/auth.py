@@ -11,6 +11,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request, Response, status
 
+from src import db as database
+
 
 SESSION_COOKIE_NAME = "figurelearning_session"
 LOCAL_USER_ID = "local-user"
@@ -73,6 +75,9 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def init_auth_schema(conn: sqlite3.Connection) -> None:
+    if database.configured_backend() == "mysql":
+        ensure_local_identity(conn)
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -219,10 +224,23 @@ def ensure_local_identity(conn: sqlite3.Connection) -> dict[str, Any]:
         """
         INSERT OR IGNORE INTO workspaces (
             id, owner_user_id, name, created_at, updated_at, status
-        ) VALUES (?, ?, '本地工作台', ?, ?, 'active')
+        ) VALUES (?, ?, ?, ?, ?, 'active')
         """,
-        (LOCAL_WORKSPACE_ID, LOCAL_USER_ID, timestamp, timestamp),
+        (LOCAL_WORKSPACE_ID, LOCAL_USER_ID, "\u672c\u5730\u5de5\u4f5c\u53f0", timestamp, timestamp),
     )
+    if database.configured_backend() == "mysql":
+        try:
+            conn.execute(
+                """
+                INSERT IGNORE INTO workspace_members (
+                    workspace_id, user_id, role, status, created_at, updated_at,
+                    created_at_dt, updated_at_dt
+                ) VALUES (?, ?, 'owner', 'active', ?, ?, NOW(6), NOW(6))
+                """,
+                (LOCAL_WORKSPACE_ID, LOCAL_USER_ID, timestamp, timestamp),
+            )
+        except Exception:
+            pass
     return {
         "id": LOCAL_USER_ID,
         "email": "local@figurelearning.local",
@@ -240,7 +258,7 @@ def current_context(request: Request, conn: sqlite3.Connection) -> dict[str, Any
 
     token = request.cookies.get(SESSION_COOKIE_NAME, "")
     if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录知识酷内测账号")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="\u8bf7\u5148\u767b\u5f55\u77e5\u8bc6\u9177\u5185\u6d4b\u8d26\u53f7")
     session = conn.execute(
         """
         SELECT * FROM sessions
@@ -249,10 +267,10 @@ def current_context(request: Request, conn: sqlite3.Connection) -> dict[str, Any
         (_hash_token(token), now_iso()),
     ).fetchone()
     if not session:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效，请重新登录")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55")
     user = get_user(conn, session["user_id"])
     if not user or user["status"] != "active":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号不可用")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="\u8d26\u53f7\u4e0d\u53ef\u7528")
     workspace = get_default_workspace(conn, user["id"])
     return _context_payload(user, workspace, authenticated=True)
 
@@ -293,9 +311,9 @@ def get_default_workspace(conn: sqlite3.Connection, user_id: str) -> sqlite3.Row
     conn.execute(
         """
         INSERT INTO workspaces (id, owner_user_id, name, created_at, updated_at, status)
-        VALUES (?, ?, '默认工作台', ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, 'active')
         """,
-        (workspace_id, user_id, timestamp, timestamp),
+        (workspace_id, user_id, "\u9ed8\u8ba4\u5de5\u4f5c\u53f0", timestamp, timestamp),
     )
     return conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
 
@@ -307,7 +325,7 @@ def login(conn: sqlite3.Connection, response: Response, email_or_username: str, 
         (identifier, identifier),
     ).fetchone()
     if not user or user["status"] != "active" or not verify_password(password, user["password_hash"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号或密码不正确")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="\u8d26\u53f7\u6216\u5bc6\u7801\u4e0d\u6b63\u786e")
     token = secrets.token_urlsafe(32)
     timestamp = now_iso()
     expires_at = (datetime.now() + timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds")
@@ -366,11 +384,11 @@ def register_with_invite(
         (cleaned_code,),
     ).fetchone()
     if not invitation:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邀请码无效或已用完")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="\u9080\u8bf7\u7801\u65e0\u6548\u6216\u5df2\u7528\u5b8c")
     if invitation["expires_at"] and invitation["expires_at"] <= now_iso():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邀请码已过期")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="\u9080\u8bf7\u7801\u5df2\u8fc7\u671f")
     if len(password) < 8:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="密码至少需要 8 位")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="\u5bc6\u7801\u81f3\u5c11\u9700\u8981 8 \u4f4d")
 
     timestamp = now_iso()
     user_id = str(uuid.uuid4())
@@ -392,14 +410,16 @@ def register_with_invite(
                 timestamp,
             ),
         )
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱或用户名已存在") from exc
+    except Exception as exc:
+        if database.configured_backend() != "mysql" and not isinstance(exc, sqlite3.IntegrityError):
+            raise
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="\u90ae\u7bb1\u6216\u7528\u6237\u540d\u5df2\u5b58\u5728") from exc
     conn.execute(
         """
         INSERT INTO workspaces (id, owner_user_id, name, created_at, updated_at, status)
         VALUES (?, ?, ?, ?, ?, 'active')
         """,
-        (workspace_id, user_id, f"{username.strip()} 的工作台", timestamp, timestamp),
+        (workspace_id, user_id, f"{username.strip()} \u7684\u5de5\u4f5c\u53f0", timestamp, timestamp),
     )
     conn.execute(
         "UPDATE invitations SET used_count = used_count + 1 WHERE id = ?",
@@ -458,12 +478,12 @@ def list_invitations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def update_user_status(conn: sqlite3.Connection, user_id: str, status_value: str, actor_user_id: str) -> dict[str, Any]:
     normalized = status_value.strip().lower()
     if normalized not in {"active", "disabled"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号状态只能是 active 或 disabled")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="\u8d26\u53f7\u72b6\u6001\u53ea\u80fd\u662f active \u6216 disabled")
     if user_id == actor_user_id and normalized != "active":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能停用当前登录的管理员账号")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="\u4e0d\u80fd\u505c\u7528\u5f53\u524d\u767b\u5f55\u7684\u7ba1\u7406\u5458\u8d26\u53f7")
     row = get_user(conn, user_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="\u7528\u6237\u4e0d\u5b58\u5728")
     timestamp = now_iso()
     conn.execute(
         "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",

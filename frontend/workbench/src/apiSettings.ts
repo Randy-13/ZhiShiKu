@@ -7,6 +7,7 @@ import type {
   AsrSettingsPayload,
   BilibiliCookieLoginResult,
   BilibiliCookieStatus,
+  DatabaseStatus,
   HtmlGrabCheckStatus,
   ImageApiSettingInput,
   ImageApiSettingsPayload,
@@ -161,6 +162,10 @@ export const settingsApi = {
 
   async trashStatus(): Promise<TrashStatus> {
     return unwrapV2(await requestJson<import("./apiCore").V2Payload<TrashStatus>>("/api/v2/settings/trash"));
+  },
+
+  async databaseStatus(): Promise<DatabaseStatus> {
+    return unwrapV2(await requestJson<import("./apiCore").V2Payload<DatabaseStatus>>("/api/v2/admin/database/status"));
   },
 
   async clearTrash(): Promise<TrashStatus> {

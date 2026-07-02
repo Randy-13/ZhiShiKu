@@ -3,7 +3,7 @@ import type { FormEvent, ReactNode } from "react";
 import { Lock, LogIn, RefreshCw, Ticket } from "lucide-react";
 import { authApi } from "../api";
 import type { AuthContext } from "../api";
-import { AuroraHero } from "./ui/hero-2";
+import { onAuthExpired } from "../apiCore";
 
 type AuthGateProps = {
   children:
@@ -12,6 +12,13 @@ type AuthGateProps = {
 };
 
 type Mode = "login" | "register";
+
+const signedOutCloudContext: AuthContext = {
+  deploymentMode: "cloud",
+  authenticated: false,
+  user: null,
+  workspace: null,
+};
 
 export function AuthGate({ children }: AuthGateProps) {
   const [context, setContext] = useState<AuthContext>();
@@ -27,7 +34,7 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const isCloud = context?.deploymentMode === "cloud" || !context;
   const canEnter = context?.authenticated && context.user;
-  const title = useMemo(() => (mode === "login" ? "登录知识酷" : "使用邀请码加入"), [mode]);
+  const title = useMemo(() => (mode === "login" ? "\u767b\u5f55\u77e5\u8bc6\u9177" : "\u4f7f\u7528\u9080\u8bf7\u7801\u52a0\u5165"), [mode]);
 
   useEffect(() => {
     let active = true;
@@ -38,12 +45,7 @@ export function AuthGate({ children }: AuthGateProps) {
       })
       .catch((requestError) => {
         if (!active) return;
-        setContext({
-          deploymentMode: "cloud",
-          authenticated: false,
-          user: null,
-          workspace: null,
-        });
+        setContext(signedOutCloudContext);
         if (requestError instanceof Error && !requestError.message.includes("401")) {
           setError(requestError.message);
         }
@@ -56,6 +58,16 @@ export function AuthGate({ children }: AuthGateProps) {
     };
   }, []);
 
+  useEffect(() => onAuthExpired(() => {
+    setContext((current) => ({
+      deploymentMode: current?.deploymentMode ?? "cloud",
+      authenticated: false,
+      user: null,
+      workspace: null,
+    }));
+    setError("\u767b\u5f55\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u3002");
+  }), []);
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
@@ -66,8 +78,9 @@ export function AuthGate({ children }: AuthGateProps) {
           ? await authApi.login(identifier, password)
           : await authApi.registerWithInvite({ inviteCode, email, username, password });
       setContext(payload);
+      setPassword("");
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "认证失败，请稍后重试");
+      setError(submitError instanceof Error ? submitError.message : "\u8ba4\u8bc1\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5");
     } finally {
       setIsSubmitting(false);
     }
@@ -78,7 +91,7 @@ export function AuthGate({ children }: AuthGateProps) {
       <main className="auth-screen auth-screen--loading">
         <div className="auth-panel auth-panel--loading">
           <RefreshCw size={20} aria-hidden="true" />
-          <span>正在进入知识酷...</span>
+          <span>{"\u6b63\u5728\u8fdb\u5165\u77e5\u8bc6\u9177..."}</span>
         </div>
       </main>
     );
@@ -95,21 +108,19 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   return (
-    <main className="auth-screen">
-      <AuroraHero className="auth-aurora">
-        <section className="auth-intro" aria-label="知识酷介绍">
-          <p className="auth-kicker">FigureLearning Workbench</p>
-          <h2>知识酷</h2>
-          <p>把素材收集、知识沉淀、视角挖掘和公众号创作放进一个安静的本地工作台。</p>
-        </section>
-      </AuroraHero>
+    <main className="auth-screen auth-screen--paper">
+      <section className="auth-intro" aria-label="\u77e5\u8bc6\u9177\u4ecb\u7ecd">
+        <p className="auth-kicker">FigureLearning Workbench</p>
+        <h2>{"\u77e5\u8bc6\u9177"}</h2>
+        <p>{"\u628a\u6536\u96c6\u3001\u5b66\u4e60\u3001\u6316\u6398\u548c\u521b\u4f5c\u653e\u5728\u4e00\u4e2a\u5b89\u9759\u53ef\u4fe1\u7684\u7f51\u9875\u5de5\u4f5c\u53f0\u91cc\u3002"}</p>
+      </section>
 
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="auth-brand">
-          <div className="brand-mark">知</div>
+          <div className="brand-mark">{"\u77e5"}</div>
           <div>
-            <strong>知识酷</strong>
-            <span>个人知识库与创作工作台</span>
+            <strong>{"\u77e5\u8bc6\u9177"}</strong>
+            <span>{"\u4e2a\u4eba\u77e5\u8bc6\u5e93\u4e0e\u521b\u4f5c\u5de5\u4f5c\u53f0"}</span>
           </div>
         </div>
         <div className="auth-heading">
@@ -119,27 +130,27 @@ export function AuthGate({ children }: AuthGateProps) {
         <form className="auth-form" onSubmit={submit}>
           {mode === "login" ? (
             <label>
-              <span>邮箱或用户名</span>
+              <span>{"\u90ae\u7bb1\u6216\u7528\u6237\u540d"}</span>
               <input value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" required />
             </label>
           ) : (
             <>
               <label>
-                <span>邀请码</span>
+                <span>{"\u9080\u8bf7\u7801"}</span>
                 <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} autoComplete="one-time-code" required />
               </label>
               <label>
-                <span>邮箱</span>
+                <span>{"\u90ae\u7bb1"}</span>
                 <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required />
               </label>
               <label>
-                <span>用户名</span>
+                <span>{"\u7528\u6237\u540d"}</span>
                 <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
               </label>
             </>
           )}
           <label>
-            <span>密码</span>
+            <span>{"\u5bc6\u7801"}</span>
             <input
               type="password"
               value={password}
@@ -152,7 +163,7 @@ export function AuthGate({ children }: AuthGateProps) {
           {error ? <p className="auth-error">{error}</p> : null}
           <button className="primary-action auth-submit" type="submit" disabled={isSubmitting}>
             {mode === "login" ? <LogIn size={18} aria-hidden="true" /> : <Ticket size={18} aria-hidden="true" />}
-            <span>{isSubmitting ? "提交中..." : mode === "login" ? "登录" : "加入内测"}</span>
+            <span>{isSubmitting ? "\u63d0\u4ea4\u4e2d..." : mode === "login" ? "\u767b\u5f55" : "\u52a0\u5165\u5185\u6d4b"}</span>
           </button>
         </form>
         <button
@@ -164,18 +175,12 @@ export function AuthGate({ children }: AuthGateProps) {
             setMode((current) => (current === "login" ? "register" : "login"));
           }}
         >
-          {mode === "login" ? "使用邀请码注册" : "已有账号，返回登录"}
+          {mode === "login" ? "\u4f7f\u7528\u9080\u8bf7\u7801\u6ce8\u518c" : "\u5df2\u6709\u8d26\u53f7\uff0c\u8fd4\u56de\u767b\u5f55"}
         </button>
-        <nav className="auth-policy-links" aria-label="内测说明">
-          <a href="/public-beta" target="_blank" rel="noreferrer">
-            内测说明
-          </a>
-          <a href="/privacy" target="_blank" rel="noreferrer">
-            隐私说明
-          </a>
-          <a href="/data-retention" target="_blank" rel="noreferrer">
-            数据保存
-          </a>
+        <nav className="auth-policy-links" aria-label="\u5185\u6d4b\u8bf4\u660e">
+          <a href="/public-beta" target="_blank" rel="noreferrer">{"\u5185\u6d4b\u8bf4\u660e"}</a>
+          <a href="/privacy" target="_blank" rel="noreferrer">{"\u9690\u79c1\u8bf4\u660e"}</a>
+          <a href="/data-retention" target="_blank" rel="noreferrer">{"\u6570\u636e\u4fdd\u5b58"}</a>
         </nav>
       </section>
     </main>

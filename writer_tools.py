@@ -30,6 +30,7 @@ import api_settings
 import deepseek_client
 import image_api_settings
 import storage
+from src import db as database
 
 
 WECHAT_ALLOWED_TAGS = {
@@ -401,7 +402,7 @@ def load_project(project_id: str, owner_user_id: str | None = None, include_owne
     else:
         project["article_markdown"] = (workspace / "article.md").read_text(encoding="utf-8") if (workspace / "article.md").exists() else ""
     html_ref = project.get("html_path")
-    if html_ref is not None:
+    if html_ref:
         html_path = storage.resolve_root_path(str(html_ref)) if html_ref else None
     else:
         html_path = workspace / "formatted_wechat.html"
@@ -463,6 +464,54 @@ def _write_project(project: dict[str, Any]) -> None:
     workspace = resolve_project_workspace(project_id)
     project["workspace"] = _relative(workspace)
     (workspace / "project.json").write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
+    _sync_project_metadata(project, workspace)
+
+
+def _sync_project_metadata(project: dict[str, Any], workspace: Path) -> None:
+    if database.configured_backend() != "mysql":
+        return
+    now = str(project.get("updated_at") or datetime.now().isoformat(timespec="seconds"))
+    metadata = {
+        key: value
+        for key, value in project.items()
+        if key not in {"article_markdown", "html"}
+    }
+    with storage.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO writer_projects (
+                id, owner_user_id, workspace_id, name, project_type, status,
+                workspace_path, article_path, html_path, metadata_json,
+                created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                owner_user_id = VALUES(owner_user_id),
+                workspace_id = VALUES(workspace_id),
+                name = VALUES(name),
+                project_type = VALUES(project_type),
+                status = VALUES(status),
+                workspace_path = VALUES(workspace_path),
+                article_path = VALUES(article_path),
+                html_path = VALUES(html_path),
+                metadata_json = VALUES(metadata_json),
+                updated_at = VALUES(updated_at)
+            """,
+            (
+                str(project["id"]),
+                str(project.get("owner_user_id") or "") or None,
+                str(project.get("workspace_id") or "") or None,
+                str(project.get("name") or ""),
+                str(project.get("type") or "article"),
+                str(project.get("status") or "active"),
+                storage.storage_relative(workspace),
+                str(project.get("article_path") or ""),
+                str(project.get("html_path") or ""),
+                json.dumps(metadata, ensure_ascii=False),
+                str(project.get("created_at") or now),
+                now,
+            ),
+        )
+        conn.commit()
 
 
 def resolve_workspace(path: str | None) -> Path:

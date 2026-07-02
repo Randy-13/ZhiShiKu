@@ -38,3 +38,6 @@ output/
 .tmp-*.html
 *.url
 *.lnk
+%SystemDrive%/
+browser_profile/
+tests/.codex-write-probe.txt

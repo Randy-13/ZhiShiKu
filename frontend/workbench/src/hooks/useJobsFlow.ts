@@ -15,7 +15,7 @@ export function useJobsFlow() {
       const payload = await jobsApi.list();
       setJobs(payload.items ?? []);
     } catch (error) {
-      setJobsError(error instanceof Error ? error.message : "任务中心加载失败");
+      setJobsError(error instanceof Error ? error.message : "\u4efb\u52a1\u4e2d\u5fc3\u52a0\u8f7d\u5931\u8d25");
     } finally {
       setIsJobsLoading(false);
     }
@@ -27,7 +27,7 @@ export function useJobsFlow() {
       const payload = await jobsApi.cancel(id);
       setJobs((current) => current.map((item) => (item.id === id ? payload.item : item)));
     } catch (error) {
-      setJobsError(error instanceof Error ? error.message : "任务取消失败");
+      setJobsError(error instanceof Error ? error.message : "\u4efb\u52a1\u53d6\u6d88\u5931\u8d25");
     }
   }, []);
 
@@ -43,6 +43,15 @@ export function useJobsFlow() {
   useEffect(() => {
     refreshJobs();
   }, [refreshJobs]);
+
+  useEffect(() => {
+    const hasActiveJob = jobs.some((job) => job.status === "queued" || job.status === "running");
+    if (!hasActiveJob) return;
+    const timer = window.setInterval(() => {
+      refreshJobs();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [jobs, refreshJobs]);
 
   const activeJobCount = useMemo(
     () => jobs.filter((job) => job.status === "queued" || job.status === "running").length,

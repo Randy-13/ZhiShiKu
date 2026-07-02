@@ -423,7 +423,16 @@ def jobs_list(request: Request, limit: int = 30) -> dict[str, object]:
     storage.init_storage()
     with storage.connect() as conn:
         context = current_context(request, conn)
-        return success_payload(data={"items": job_service.list_jobs(conn, user_id=context["user"]["id"], limit=limit)})
+        return success_payload(
+            data={
+                "items": job_service.list_jobs(
+                    conn,
+                    user_id=context["user"]["id"],
+                    workspace_id=context["workspace"]["id"],
+                    limit=limit,
+                )
+            }
+        )
 
 
 @jobs_router.post("")
@@ -456,7 +465,12 @@ def jobs_detail(job_id: str, request: Request) -> dict[str, object]:
     with storage.connect() as conn:
         context = current_context(request, conn)
         try:
-            item = job_service.get_job(conn, user_id=context["user"]["id"], job_id=job_id)
+            item = job_service.get_job(
+                conn,
+                user_id=context["user"]["id"],
+                workspace_id=context["workspace"]["id"],
+                job_id=job_id,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from exc
         return success_payload(data={"item": item})
@@ -468,7 +482,12 @@ def jobs_cancel(job_id: str, request: Request) -> dict[str, object]:
     with storage.connect() as conn:
         context = current_context(request, conn)
         try:
-            item = job_service.cancel_job(conn, user_id=context["user"]["id"], job_id=job_id)
+            item = job_service.cancel_job(
+                conn,
+                user_id=context["user"]["id"],
+                workspace_id=context["workspace"]["id"],
+                job_id=job_id,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from exc
         return success_payload(data={"item": item})
@@ -566,7 +585,9 @@ def quota_status(request: Request) -> dict[str, object]:
                     "llm_generate_daily": quota_service.check_daily(conn, user_id=user_id, workspace_id=workspace_id, key="llm_generate_daily"),
                 },
                 "jobs": {
-                    "concurrent_jobs": quota_service.check_concurrent_jobs(conn, user_id=user_id),
+                    "concurrent_jobs": quota_service.check_concurrent_jobs(
+                        conn, user_id=user_id, workspace_id=workspace_id
+                    ),
                 },
                 "uploads": {
                     "single_upload_bytes": {
@@ -581,6 +602,18 @@ def quota_status(request: Request) -> dict[str, object]:
 @router.get("/settings/web")
 def settings_web() -> dict[str, object]:
     return success_payload(data=web_settings.payload())
+
+
+@router.get("/admin/database/status")
+def admin_database_status(request: Request) -> dict[str, object]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    _require_local_or_admin(context, "公网内测普通用户不能查看数据库状态")
+    payload = storage.database_status()
+    if context.get("deploymentMode") == "cloud":
+        payload.pop("sqlite_path", None)
+        payload.pop("storage_root", None)
+    return success_payload(data=payload)
 
 
 @router.post("/settings/web")
@@ -757,8 +790,10 @@ def library_file(library_id: str, markdown_path: str, request: Request) -> dict[
 @router.post("/libraries/{library_id}/file")
 def update_library_file(library_id: str, markdown_path: str, request: LibraryFileUpdateRequest, http_request: Request) -> dict[str, object]:
     if not request.markdown.strip():
-        return success_payload(data={"ok": False, "error": "Markdown 正文不能为空"})
+        return success_payload(data={"ok": False, "error": "Markdown body cannot be empty."})
+    context = _request_context(http_request)
     path = _resolve_library_markdown_path(library_id, markdown_path)
+    _assert_library_file_visible(path, context)
     text = _replace_markdown_title(request.markdown, request.title.strip() or _markdown_title(request.markdown) or path.stem)
     text = _replace_markdown_note(text, request.note)
     path.write_text(text, encoding="utf-8")
@@ -1543,7 +1578,8 @@ def _enforce_concurrent_jobs(conn, context: dict[str, object]) -> None:
     user_id, _workspace_id = quota_service.user_ids(context)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
-    result = quota_service.check_concurrent_jobs(conn, user_id=user_id)
+    _user_id, workspace_id = quota_service.user_ids(context)
+    result = quota_service.check_concurrent_jobs(conn, user_id=user_id, workspace_id=workspace_id)
     if not result["allowed"]:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=_quota_detail("并发任务", result))
 
@@ -1619,7 +1655,7 @@ def _validate_job_payload(kind: str, payload: object, context: dict[str, object]
             cover_prompt = request.cover_prompt or project.get("cover_prompt")
             content_prompts = request.content_image_prompts or project.get("content_image_prompts") or []
             if not cover_prompt and not content_prompts:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="璇峰厛鐢熸垚鎴栧～鍐欓厤鍥炬彁绀鸿瘝")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please generate or enter image prompts first.")
             return
         if kind == "writer_image_item":
             _load_writer_project(_job_project_id(payload_dict), context)
@@ -1627,7 +1663,7 @@ def _validate_job_payload(kind: str, payload: object, context: dict[str, object]
             if request.kind not in {"cover", "content"}:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image kind must be cover or content")
             if not request.prompt.strip():
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="璇峰～鍐欓厤鍥炬彁绀鸿瘝")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please enter an image prompt.")
             if request.kind == "content" and (request.index is None or request.index < 1):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Content image index must be greater than 0")
             return
@@ -1723,7 +1759,7 @@ def _learn_refine_job_inputs(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     combined_raw_text = _combine_raw_material_sources(sources)
     if not combined_raw_text.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="閫変腑鐨勫師鏂欐枃浠舵病鏈夊彲瀛︿範鏂囨湰")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected original file has no learnable text.")
     source_hash = _raw_sources_hash(sources)
     existing = storage.get_knowledge_by_hash(source_hash)
     return request, sources, combined_raw_text, source_hash, existing
@@ -1837,7 +1873,7 @@ def _execute_writer_images_job(payload: dict[str, object], context: dict[str, ob
     cover_prompt = request.cover_prompt or project.get("cover_prompt")
     content_prompts = request.content_image_prompts or project.get("content_image_prompts") or []
     if not cover_prompt and not content_prompts:
-        return {"ok": False, "error": "璇峰厛鐢熸垚鎴栧～鍐欓厤鍥炬彁绀鸿瘝"}
+        return {"ok": False, "error": "Please generate or enter image prompts first."}
     workspace = writer_tools.resolve_project_workspace(request.project_id)
     images = writer_tools.generate_writer_images(
         workspace,
@@ -1860,7 +1896,7 @@ def _execute_writer_image_item_job(payload: dict[str, object], context: dict[str
     if request.kind not in {"cover", "content"}:
         return {"ok": False, "error": "Image kind must be cover or content"}
     if not request.prompt.strip():
-        return {"ok": False, "error": "璇峰～鍐欓厤鍥炬彁绀鸿瘝"}
+        return {"ok": False, "error": "Please enter an image prompt."}
     if request.kind == "content" and (request.index is None or request.index < 1):
         return {"ok": False, "error": "Content image index must be greater than 0"}
     workspace = writer_tools.resolve_project_workspace(request.project_id)

@@ -116,6 +116,20 @@ export type QuotaStatus = {
   };
 };
 
+export type DatabaseStatus = {
+  ok: boolean;
+  backend: "sqlite" | "mysql" | string;
+  configured_backend?: string;
+  mysql_configured?: boolean;
+  sqlite_path?: string;
+  storage_root?: string;
+  schema_version?: string;
+  error?: string;
+  tables?: Record<string, number>;
+  path_columns?: Record<string, Record<string, number>>;
+  duplicate_hashes?: Record<string, Array<Record<string, unknown>>>;
+};
+
 type LibraryFilePayload = Record<string, unknown> & {
   id?: string;
   title?: string;
