@@ -334,23 +334,6 @@ export function SettingsWorkspace({
     }
   }
 
-  async function bindLocalWechatPublisher() {
-    setWechatPublisherLoading(true);
-    setWechatPublisherMessage("");
-    try {
-      const result = await settingsApi.bindLocalWechatPublisher(
-        wechatPublisherForm.accountName.trim() || "本地微信公众号",
-        wechatPublisherForm.author.trim() || "Bobo",
-      );
-      applyWechatPublisherStatus(result);
-      setWechatPublisherMessage(language === "zh" ? "已把本机公众号配置绑定到当前用户。" : "Bound the local WeChat account to this user.");
-    } catch (error) {
-      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWechatPublisherLoading(false);
-    }
-  }
-
   async function refreshWechatPublisherToken() {
     setWechatPublisherLoading(true);
     setWechatPublisherMessage("");
@@ -611,7 +594,6 @@ export function SettingsWorkspace({
             <div className="wechat-publisher-meta">
               <span>Token: {wechatPublisherStatus?.token_cached ? (language === "zh" ? "已缓存" : "cached") : language === "zh" ? "未缓存" : "not cached"}</span>
               {wechatPublisherStatus?.token_updated_at ? <span>{wechatPublisherStatus.token_updated_at}</span> : null}
-              {wechatPublisherStatus?.legacy_appid_masked ? <span>{language === "zh" ? "本机配置" : "Local config"}: {wechatPublisherStatus.legacy_appid_masked}</span> : null}
             </div>
             {wechatPublisherMessage ? <p className={isErrorMessage(wechatPublisherMessage) ? "inline-error" : "hint"}>{wechatPublisherMessage}</p> : null}
             <div className="dependency-actions">
@@ -622,10 +604,6 @@ export function SettingsWorkspace({
               <button className="secondary-button" type="button" onClick={saveWechatPublisherBinding} disabled={wechatPublisherLoading || !wechatPublisherForm.appid.trim()}>
                 <Save size={16} />
                 {language === "zh" ? "保存绑定" : "Save binding"}
-              </button>
-              <button className="secondary-button" type="button" onClick={bindLocalWechatPublisher} disabled={wechatPublisherLoading || !wechatPublisherStatus?.can_bind_local_config}>
-                <Plug size={16} />
-                {language === "zh" ? "绑定本机配置" : "Bind local config"}
               </button>
               <button className="secondary-button" type="button" onClick={refreshWechatPublisherToken} disabled={wechatPublisherLoading || !wechatPublisherStatus?.configured}>
                 <CheckCircle2 size={16} />

@@ -182,14 +182,6 @@ export const settingsApi = {
     }));
   },
 
-  async bindLocalWechatPublisher(accountName = "本地微信公众号", author = "Bobo"): Promise<WechatPublisherBindingStatus> {
-    return ensureSettingsOk(await requestJson<WechatPublisherBindingStatus>("/api/settings/wechat-publisher/bind-local", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account_name: accountName, author }),
-    }));
-  },
-
   refreshWechatPublisherToken(): Promise<Record<string, unknown>> {
     return requestJson<Record<string, unknown>>("/api/settings/wechat-publisher/token/refresh", { method: "POST" });
   },

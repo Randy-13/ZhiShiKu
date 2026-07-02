@@ -3215,8 +3215,9 @@ def test_writer_revise_format_and_publish_use_workflow_helpers(tmp_path, monkeyp
 
     captured = {}
 
-    def fake_publish(workspace_path, title, author="Bobo", digest=None, cover_path=None):
+    def fake_publish(workspace_path, title, author="Bobo", digest=None, cover_path=None, account_key=None):
         captured["author"] = author
+        captured["account_key"] = account_key
         return {"media_id": "draft-media-id", "author": author}
 
     monkeypatch.setattr(writer_tools, "format_article", fake_format)
@@ -3250,6 +3251,7 @@ def test_writer_revise_format_and_publish_use_workflow_helpers(tmp_path, monkeyp
     assert published.status_code == 200
     assert published.json()["media_id"] == "draft-media-id"
     assert captured["author"] == "Bobo"
+    assert captured["account_key"] == "local-user"
 
 
 def test_writer_image_suggestions_and_file_preview(tmp_path, monkeypatch):

@@ -455,11 +455,6 @@ class WechatPublisherBindingRequest(BaseModel):
     author: str = "Bobo"
 
 
-class WechatPublisherBindLocalRequest(BaseModel):
-    account_name: str = "本地微信公众号"
-    author: str = "Bobo"
-
-
 class WriterProjectAdvanceRequest(BaseModel):
     step: str | None = None
     knowledge_ids: list[int] = []
@@ -1558,20 +1553,6 @@ def save_wechat_publisher_binding(payload: WechatPublisherBindingRequest, reques
         )}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/settings/wechat-publisher/bind-local")
-def bind_local_wechat_publisher(payload: WechatPublisherBindLocalRequest, request: Request) -> dict[str, object]:
-    _context, user_id, username = _wechat_user_binding_context(request)
-    try:
-        return {"ok": True, **writer_tools.bind_legacy_wechat_config_to_user(
-            user_id,
-            username,
-            account_name=payload.account_name,
-            author=payload.author,
-        )}
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/settings/wechat-publisher/token/refresh")

@@ -144,9 +144,6 @@ export type WechatPublisherBindingStatus = {
   token_cached?: boolean;
   token_updated_at?: string;
   updated_at?: string;
-  can_bind_local_config?: boolean;
-  legacy_appid?: string;
-  legacy_appid_masked?: string;
   message?: string;
   error?: string;
 };

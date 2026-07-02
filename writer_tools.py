@@ -170,18 +170,12 @@ def wechat_token_cache_file(account_key: str | None = None) -> Path:
     return wechat_config_dir(account_key) / "token_cache.json"
 
 
-def _legacy_wechat_config_file() -> Path:
-    return wechat_config_file(None)
-
-
 def wechat_user_config_exists(account_key: str | None) -> bool:
     return bool(_safe_wechat_account_key(account_key)) and wechat_config_file(account_key).exists()
 
 
-def wechat_config(account_key: str | None = None, *, allow_legacy_fallback: bool = True) -> dict[str, str]:
+def wechat_config(account_key: str | None = None) -> dict[str, str]:
     config_file = wechat_config_file(account_key) if account_key else wechat_config_file()
-    if account_key and not config_file.exists() and allow_legacy_fallback:
-        config_file = _legacy_wechat_config_file()
     if not config_file.exists():
         return {}
     try:
@@ -209,7 +203,7 @@ def _redact_appsecret(value: str) -> str:
 
 def wechat_binding_status(account_key: str | None, username: str = "") -> dict[str, Any]:
     config_file = wechat_config_file(account_key)
-    config = wechat_config(account_key, allow_legacy_fallback=False)
+    config = wechat_config(account_key)
     token_file = wechat_token_cache_file(account_key)
     token_cache: dict[str, Any] = {}
     if token_file.exists():
@@ -218,7 +212,6 @@ def wechat_binding_status(account_key: str | None, username: str = "") -> dict[s
         except json.JSONDecodeError:
             token_cache = {}
     configured = bool(config.get("appid") and config.get("appsecret"))
-    legacy_config = wechat_config(None, allow_legacy_fallback=False)
     return {
         "configured": configured,
         "account_key": _safe_wechat_account_key(account_key),
@@ -232,9 +225,6 @@ def wechat_binding_status(account_key: str | None, username: str = "") -> dict[s
         "token_cached": bool(token_cache.get("access_token")),
         "token_updated_at": token_cache.get("updated_at", ""),
         "updated_at": config.get("updated_at") or "",
-        "can_bind_local_config": bool(legacy_config.get("appid") and legacy_config.get("appsecret")),
-        "legacy_appid": legacy_config.get("appid", ""),
-        "legacy_appid_masked": redact_appid(legacy_config.get("appid", "")),
     }
 
 
@@ -250,7 +240,7 @@ def save_wechat_binding(
     key = _safe_wechat_account_key(account_key)
     if not key:
         raise ValueError("Missing WeChat binding account key")
-    existing = wechat_config(key, allow_legacy_fallback=False)
+    existing = wechat_config(key)
     cleaned_appid = appid.strip()
     cleaned_secret = (appsecret or "").strip() or existing.get("appsecret", "")
     if not cleaned_appid or not cleaned_secret:
@@ -271,28 +261,12 @@ def save_wechat_binding(
     return wechat_binding_status(key, username)
 
 
-def bind_legacy_wechat_config_to_user(account_key: str, username: str = "", *, account_name: str = "", author: str = "Bobo") -> dict[str, Any]:
-    legacy = wechat_config(None, allow_legacy_fallback=False)
-    if not legacy.get("appid") or not legacy.get("appsecret"):
-        raise FileNotFoundError(f"未找到本机微信公众号配置：{_legacy_wechat_config_file()}")
-    return save_wechat_binding(
-        account_key,
-        username,
-        appid=legacy["appid"],
-        appsecret=legacy["appsecret"],
-        account_name=account_name or legacy.get("account_name") or "本地微信公众号",
-        author=author or legacy.get("author") or "Bobo",
-    )
-
-
 def wechat_account_key_for_context(context: dict[str, Any]) -> str | None:
     user = context.get("user") or {}
     user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
     if not user_id:
         return None
-    if context.get("deploymentMode") == "cloud":
-        return user_id
-    return user_id if wechat_user_config_exists(user_id) else None
+    return user_id
 
 
 def clear_wechat_token_cache(reason: str = "", account_key: str | None = None) -> bool:
