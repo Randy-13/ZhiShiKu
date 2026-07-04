@@ -340,6 +340,78 @@ def test_mine_interpret_renders_five_part_perspective_markdown(tmp_path, monkeyp
     assert "## 结论建议" in markdown
     assert "优先判断行业结构、变量关系和后续验证重点。" in markdown
     assert "还需要补充更多样本验证这个判断是否具有普遍性。" in markdown
+    assert "- 引用：" not in markdown
+
+
+def test_structured_json_generation_repairs_invalid_first_response(monkeypatch):
+    calls: list[list[dict[str, str]]] = []
+
+    def fake_chat_completion(messages, json_mode=False, setting=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            return '{"title":"坏掉的 JSON"'
+        return json.dumps(
+            {
+                "title": "修复后的视角解读",
+                "perspective_name": "记者视角",
+                "tags": ["记者视角"],
+                "summary": "修复后可以解析。",
+                "criteria": "先看事实链，再看表达张力。",
+                "core_facts": [],
+                "deep_analysis": [],
+                "risks_and_questions": [],
+                "conclusion_and_actions": [],
+                "findings": [],
+                "writing_implications": [],
+                "risks_and_limits": [],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(deepseek_client, "sdk_chat_completion", fake_chat_completion)
+
+    result = deepseek_client.parse_json_model(
+        PerspectiveInterpretationResult,
+        [{"role": "user", "content": "生成视角解读 JSON"}],
+        setting={"provider": "compatible", "api_key": "test-key", "base_url": "https://example.test/v1", "model": "test"},
+    )
+
+    assert result.title == "修复后的视角解读"
+    assert len(calls) == 2
+    assert "上一条回复不是合法 JSON" in calls[1][-1]["content"]
+
+
+def test_mine_interpret_returns_ok_false_when_model_json_fails(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    client = TestClient(app.app)
+    raw_dir = storage.RAW_MATERIAL_DIR
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    source_path = raw_dir / "perspective-runtime-error.md"
+    source_path.write_text("# 测试原文\n\n这里有一段可供视角解读的原文内容。", encoding="utf-8")
+
+    def fail_interpret_from_perspective(material_blocks, perspective, setting=None):
+        raise RuntimeError("compatible 返回的 JSON 不符合应用 schema")
+
+    monkeypatch.setattr(deepseek_client, "interpret_from_perspective", fail_interpret_from_perspective)
+
+    response = client.post(
+        "/api/v2/mine/interpret",
+        json={
+            "sources": [{"library": "raw", "markdown_path": source_path.name, "title": "测试原文"}],
+            "perspective": {
+                "id": "reporter",
+                "name": "记者视角",
+                "positioning": "检查事实链",
+                "core_goal": "形成可用解读",
+                "stance": "不扩大材料",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is False
+    assert "JSON 不符合应用 schema" in payload["error"]
 
 
 def test_cloud_upload_rejects_single_file_over_limit(tmp_path, monkeypatch):
@@ -2966,6 +3038,35 @@ def test_generate_writer_images_keeps_partial_success(tmp_path, monkeypatch):
     assert metadata["content_images"][0]["filename"] == "content-1.png"
     assert metadata["errors"][0]["message"].startswith("生成正文配图 2 失败")
 
+def test_writer_image_metadata_canonicalizes_content_image_names(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("canonical-content-images")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    legacy_path = storage.storage_relative(workspace / "content1.png")
+    (workspace / "image_metadata.json").write_text(
+        json.dumps(
+            {
+                "content_images": [
+                    {
+                        "filename": "content1.png",
+                        "path": legacy_path,
+                        "prompt": "body prompt",
+                        "index": 1,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = writer_tools.load_writer_image_metadata(workspace)
+    items = writer_tools.content_image_items(workspace)
+
+    assert metadata["content_images"][0]["filename"] == "content-1.png"
+    assert metadata["content_images"][0]["path"].endswith("content-1.png")
+    assert items == [{"index": 1, "path": image_path, "prompt": "body prompt"}]
+
 
 def test_generate_writer_images_applies_cover_aspect_ratio_only(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
@@ -3468,6 +3569,27 @@ def test_publish_preflight_truncates_long_digest(tmp_path, monkeypatch):
     assert result["digest"].encode("utf-8").decode("utf-8") == result["digest"]
 
 
+def test_publish_preflight_uses_bound_author_when_author_omitted(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("bound-author")
+    (workspace / "formatted.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+    (workspace / "article.md").write_text("# Title\n\nBody", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+
+    def fake_wechat_config(account_key=None):
+        return {"author": "Alice"} if account_key == "user-1" else {}
+
+    monkeypatch.setattr(writer_tools, "wechat_config", fake_wechat_config)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda account_key=None: tmp_path / f"{account_key or 'global'}-wechat.json")
+    monkeypatch.setattr(writer_tools, "wechat_token_cache_file", lambda account_key=None: tmp_path / f"{account_key or 'global'}-token.json")
+
+    result = writer_tools.publish_preflight(workspace, "Title", account_key="user-1")
+    author_check = next(item for item in result["checks"] if item["key"] == "author")
+
+    assert author_check["ok"] is True
+    assert author_check["detail"].startswith("Alice")
+
+
 def test_publish_preflight_verifies_wechat_access_token(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("wechat-token-check")
@@ -3688,6 +3810,27 @@ def test_publish_preflight_accepts_underscore_content_image_alias(tmp_path, monk
     assert result["publish_inspection"]["local_image_paths"] == [str(image_path.resolve())]
 
 
+def test_publish_preflight_accepts_unseparated_content_image_alias(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("content-image-alias-unseparated")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    (workspace / "formatted.html").write_text(
+        '<html><body><p>body</p><img src="content1.png" /></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "article.md").write_text("# Title\n\nbody", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "missing-wechat.json")
+
+    result = writer_tools.publish_preflight(workspace, "Title", digest="Digest")
+    check_map = {item["key"]: item for item in result["checks"]}
+
+    assert check_map["missing_images"]["ok"] is True
+    assert result["publish_inspection"]["missing_images"] == []
+    assert result["publish_inspection"]["local_image_paths"] == [str(image_path.resolve())]
+
+
 def test_ensure_content_images_removes_underscore_placeholders(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("strip-content-image-alias")
@@ -3697,10 +3840,15 @@ def test_ensure_content_images_removes_underscore_placeholders(tmp_path, monkeyp
         encoding="utf-8",
     )
 
-    markdown = "# Title\n\nbody paragraph.\n\n![stale placeholder](content_1.png)\n"
+    markdown = (
+        "# Title\n\nbody paragraph.\n\n"
+        "![stale placeholder](content_1.png)\n\n"
+        "![stale compact placeholder](content1.png)\n"
+    )
     result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
 
     assert "content_1.png" not in result
+    assert "content1.png" not in result
     assert result.count("content-1.png") == 1
 
 
@@ -3732,6 +3880,7 @@ def test_prepare_html_for_publish_prunes_cover_and_duplicate_content_aliases(tmp
         '<section data-fl-component="image_caption"><img src="cover.png" alt="cover" /></section>'
         '<section data-fl-component="image_caption"><img src="content-1.png" alt="first" /></section>'
         '<section data-fl-component="image_caption"><img src="content_1.png" alt="stale first" /></section>'
+        '<section data-fl-component="image_caption"><img src="content1.png" alt="stale first compact" /></section>'
         '<section data-fl-component="image_caption"><img src="content-2.png" alt="second" /></section>'
         '</body></html>',
         encoding="utf-8",
@@ -3742,10 +3891,11 @@ def test_prepare_html_for_publish_prunes_cover_and_duplicate_content_aliases(tmp
 
     assert "cover.png" not in content
     assert "content_1.png" not in content
+    assert "content1.png" not in content
     assert content.count("content-1.png") == 1
     assert content.count("content-2.png") == 1
 
-def test_publish_preflight_reports_bad_images_and_forbidden_tags(tmp_path, monkeypatch):
+def test_publish_preflight_sanitizes_html_and_reports_remaining_publish_risks(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("bad-publish-html")
     (workspace / "formatted.html").write_text(
@@ -3765,7 +3915,9 @@ def test_publish_preflight_reports_bad_images_and_forbidden_tags(tmp_path, monke
     assert check_map["missing_images"]["ok"] is False
     assert check_map["data_images"]["ok"] is False
     assert check_map["remote_images"]["ok"] is False
-    assert check_map["wechat_html_sanitize"]["ok"] is False
+    assert check_map["wechat_html_sanitize"]["ok"] is True
+    assert result["publish_sanitize"]["content_path"].endswith("publish_ready.html")
+    assert (workspace / "publish_ready.html").exists()
     assert (workspace / "publish_preflight_report.json").exists()
 
 

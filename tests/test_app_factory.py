@@ -23,7 +23,7 @@ def test_create_app_exposes_existing_health_endpoint():
 def test_legacy_app_directly_serves_workspace_routes():
     client = TestClient(legacy_app.app)
 
-    for route in ["/collect", "/learn", "/mine", "/create", "/settings"]:
+    for route in ["/collect", "/learn", "/mine", "/create", "/library", "/settings", "/docs"]:
         response = client.get(route)
         assert response.status_code == 200
         assert '<div id="root"></div>' in response.text

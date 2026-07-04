@@ -848,10 +848,6 @@ export const api = {
     return writerApi.formatWriterProject(projectId, markdown, designStrategy, theme);
   },
 
-  sanitizeWriterProjectPublishHtml(projectId: string) {
-    return writerApi.sanitizeWriterProjectPublishHtml(projectId);
-  },
-
   preflightWriterProject(projectId: string, title: string, digest?: string, coverPath?: string) {
     return writerApi.preflightWriterProject(projectId, title, digest, coverPath);
   },

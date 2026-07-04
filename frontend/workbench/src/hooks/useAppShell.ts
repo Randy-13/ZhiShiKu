@@ -1,11 +1,11 @@
-import { BookOpen, Boxes, Cog, Feather, Inbox, Pickaxe } from "lucide-react";
+import { BookMarked, BookOpen, Boxes, Cog, Feather, Inbox, Pickaxe } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appShellApi } from "../apiAppShell";
 import type { AppShellPayload, AppShellSection } from "../apiAppShell";
 import type { WorkspaceId, WorkspaceNavItem } from "../domain";
 import type { Translator } from "../i18n";
 
-const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "library", "settings"];
+const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "library", "settings", "docs"];
 const workspaceIds = new Set<string>(workspaceOrder);
 const workspaceIcons = {
   collect: Inbox,
@@ -14,6 +14,7 @@ const workspaceIcons = {
   create: Feather,
   library: Boxes,
   settings: Cog,
+  docs: BookMarked,
 };
 
 export function useAppShell(t: Translator) {
@@ -78,8 +79,8 @@ function fallbackNavItem(id: WorkspaceId, t: Translator): WorkspaceNavItem {
 function toNavItem(section: AppShellSection, fallback: WorkspaceNavItem): WorkspaceNavItem {
   return {
     id: fallback.id,
-    label: section.navLabel || fallback.label,
-    description: section.navDescription || fallback.description,
+    label: fallback.id === "create" ? fallback.label : section.navLabel || fallback.label,
+    description: fallback.id === "create" ? fallback.description : section.navDescription || fallback.description,
     icon: fallback.icon,
   };
 }

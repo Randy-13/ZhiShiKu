@@ -43,7 +43,7 @@ def test_frontend_dist_pointer_selects_latest_build(tmp_path, monkeypatch):
 def test_mature_workspace_alias_routes_are_served_by_new_app_factory():
     client = TestClient(create_app())
 
-    for route in ["/collect", "/learn", "/mine", "/create", "/settings"]:
+    for route in ["/collect", "/learn", "/mine", "/create", "/library", "/settings", "/docs"]:
         response = client.get(route)
         assert_react_app_shell(response)
 
@@ -69,7 +69,7 @@ def test_create_route_is_served_as_creation_workspace():
 def test_main_workspace_routes_are_react_app_routes_not_server_rendered_rails():
     client = TestClient(create_app())
 
-    for route in ["/collect", "/learn", "/mine", "/create", "/settings"]:
+    for route in ["/collect", "/learn", "/mine", "/create", "/library", "/settings", "/docs"]:
         soup = BeautifulSoup(client.get(route).text, "html.parser")
         assert soup.find(id="root") is not None
         assert soup.select(".app-rail .app-nav-item") == []
@@ -94,6 +94,7 @@ def test_legacy_page_routes_reuse_server_rendered_app_rail():
             "create",
             "library",
             "settings",
+            "docs",
         ]
 
 

@@ -106,6 +106,8 @@ WECHAT_TOKEN_CACHE_FILE = Path(os.path.expanduser("~/.wechat-publisher/token_cac
 WECHAT_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 WECHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 IMAGE_PROMPT_RETRY_MAX_CHARS = 1200
+CONTENT_IMAGE_NAME_RE = re.compile(r"^content[_-]?(\d+)(\.[A-Za-z0-9]+)$", re.I)
+CONTENT_IMAGE_MARKDOWN_RE = re.compile(r"\n*!\[[^\]]*\]\([^\)]*content[_-]?\d+\.[^\)]*\)\n*", re.I)
 EMPHASIS_PATTERNS = (
     "关键变化",
     "关键变量",
@@ -118,6 +120,26 @@ EMPHASIS_PATTERNS = (
     "数据飞轮",
     "共识开始前移",
 )
+
+
+def canonical_content_image_filename(index: int, suffix: str = ".png") -> str:
+    clean_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"content-{int(index)}{clean_suffix.lower()}"
+
+
+def canonical_content_image_alias(name: str) -> str | None:
+    match = CONTENT_IMAGE_NAME_RE.fullmatch(Path(str(name)).name)
+    if not match:
+        return None
+    return canonical_content_image_filename(int(match.group(1)), match.group(2))
+
+
+def _replace_path_name(path_text: str, filename: str) -> str:
+    normalized = str(path_text or "").replace("\\", "/")
+    if not normalized:
+        return filename
+    prefix, sep, _name = normalized.rpartition("/")
+    return f"{prefix}{sep}{filename}" if sep else filename
 
 DEFAULT_WRITING_STRATEGY = """微信公众号文章默认写文策略
 - 面向普通读者，用一个清晰的问题开篇，不写成研报摘要。
@@ -193,6 +215,18 @@ def wechat_config(account_key: str | None = None) -> dict[str, str]:
     }
 
 
+def default_wechat_author(account_key: str | None = None) -> str:
+    config = wechat_config(account_key) if account_key else wechat_config()
+    if not config.get("author") and account_key:
+        config = wechat_config()
+    return config.get("author") or "Bobo"
+
+
+def resolve_publish_author(author: str | None = None, account_key: str | None = None) -> str:
+    cleaned = (author or "").strip()
+    return cleaned or default_wechat_author(account_key)
+
+
 def _redact_appsecret(value: str) -> str:
     if not value:
         return ""
@@ -217,7 +251,7 @@ def wechat_binding_status(account_key: str | None, username: str = "") -> dict[s
         "account_key": _safe_wechat_account_key(account_key),
         "username": username,
         "account_name": config.get("account_name") or "",
-        "author": config.get("author") or "Bobo",
+        "author": default_wechat_author(account_key),
         "appid": config.get("appid", ""),
         "appid_masked": redact_appid(config.get("appid", "")),
         "appsecret": _redact_appsecret(config.get("appsecret", "")) if configured else "",
@@ -1051,9 +1085,9 @@ def resolve_html_image_src(src: str, base_dir: Path) -> Path | None:
         candidates.append(base_dir / path)
         candidates.append(storage.STORAGE_ROOT / path)
         candidates.append(storage.ROOT / path)
-        content_match = re.fullmatch(r"content_(\d+)(\.[A-Za-z0-9]+)", path.name)
-        if content_match:
-            alias_path = path.with_name(f"content-{content_match.group(1)}{content_match.group(2)}")
+        alias_name = canonical_content_image_alias(path.name)
+        if alias_name:
+            alias_path = path.with_name(alias_name)
             candidates.append(base_dir / alias_path)
             candidates.append(storage.STORAGE_ROOT / alias_path)
             candidates.append(storage.ROOT / alias_path)
@@ -1078,10 +1112,7 @@ def publish_image_identity(image_path: Path) -> str | None:
     name = image_path.name.lower()
     if name.startswith("cover.") and image_path.suffix.lower() in WECHAT_IMAGE_EXTENSIONS:
         return "cover"
-    match = re.fullmatch(r"content[_-](\d+)(\.[a-z0-9]+)", name)
-    if match:
-        return f"content-{int(match.group(1))}{match.group(2).lower()}"
-    return None
+    return canonical_content_image_alias(name)
 
 
 def prune_non_article_publish_images(html_text: str, base_dir: Path) -> str:
@@ -1179,11 +1210,55 @@ def _clean_wechat_style(style: str) -> str:
     return ";".join(cleaned)
 
 
+def _normalize_wechat_lists(soup: BeautifulSoup, report: dict[str, Any]) -> None:
+    """Render lists as plain rows so WeChat does not create empty bullet items."""
+    for list_tag in list(soup.find_all(["ul", "ol"])):
+        ordered = (list_tag.name or "").lower() == "ol"
+        rows = []
+        for index, item in enumerate(list_tag.find_all("li", recursive=False), start=1):
+            for block_child in list(item.find_all(["p", "section"], recursive=False)):
+                block_child.unwrap()
+            inner_html = "".join(str(child) for child in item.contents).strip()
+            if not inner_html or inner_html in {"<br/>", "<br>"}:
+                continue
+            marker = f"{index}." if ordered else "•"
+            row = BeautifulSoup(
+                (
+                    '<p data-fl-list-row="1" '
+                    'style="margin:8px 0;color:#201b16;font-size:15.5px;line-height:1.85;">'
+                    f'<span style="display:inline-block;width:22px;color:#201b16;font-weight:700;vertical-align:top;">{html.escape(marker)}</span>'
+                    '<span style="display:inline-block;width:calc(100% - 28px);vertical-align:top;">'
+                    f"{inner_html}</span></p>"
+                ),
+                "html.parser",
+            )
+            if row.p:
+                rows.append(row.p)
+        if not rows:
+            list_tag.decompose()
+            continue
+        container = soup.new_tag("section")
+        container["data-fl-component"] = "wechat_list"
+        container["style"] = _clean_wechat_style(
+            str(list_tag.get("style", ""))
+            or "margin:18px 0;padding:14px 18px;border:1px solid #ddd1bf;border-radius:10px;background:#fffaf1;"
+        )
+        if "padding" not in container["style"]:
+            container["style"] = (container["style"] + ";padding:14px 18px").strip(";")
+        for row in rows:
+            container.append(row)
+        list_tag.replace_with(container)
+        report["normalized_lists"] = int(report.get("normalized_lists") or 0) + 1
+        report["normalized_list_items"] = int(report.get("normalized_list_items") or 0) + len(rows)
+
+
 def sanitize_wechat_html(html_text: str) -> tuple[str, dict[str, Any]]:
     report: dict[str, Any] = {
         "removed_tags": [],
         "stripped_attrs": [],
         "normalized_paragraphs": 0,
+        "normalized_lists": 0,
+        "normalized_list_items": 0,
         "image_count": 0,
         "local_image_count": 0,
         "remote_image_count": 0,
@@ -1306,6 +1381,10 @@ def prepare_html_for_publish(workspace: Path, html_path: Path) -> Path:
     html_text = normalize_publish_image_paths(html_text, html_path.parent)
     html_text = prune_non_article_publish_images(html_text, html_path.parent)
     html_text, sanitize_report = sanitize_wechat_html(add_publish_emphasis(html_text))
+    if BeautifulSoup is not None:
+        soup = BeautifulSoup(html_text, "html.parser")
+        _normalize_wechat_lists(soup, sanitize_report)
+        html_text = str(soup)
     output_path = workspace / "publish_ready.html"
     output_path.write_text(html_text, encoding="utf-8")
     (workspace / "publish_ready_sanitize_report.json").write_text(
@@ -1499,11 +1578,12 @@ def attach_publish_image_warning(result: dict[str, Any], workspace: Path) -> dic
 def publish_draft_builtin(
     workspace: Path,
     title: str,
-    author: str = "Bobo",
+    author: str = "",
     digest: str | None = None,
     cover_path: str | None = None,
     account_key: str | None = None,
 ) -> dict[str, Any]:
+    author = resolve_publish_author(author, account_key)
     digest = truncate_utf8(digest, 120)
     invalidated_token = invalidate_stale_wechat_token_cache(account_key=account_key)
     html_path = workspace / "formatted_wechat.html"
@@ -1524,7 +1604,7 @@ def publish_draft_builtin(
         "articles": [
             {
                 "title": title,
-                "author": author or "Bobo",
+                "author": author,
                 "digest": digest or "",
                 "content": html_text,
                 "thumb_media_id": thumb_media_id,
@@ -1541,7 +1621,7 @@ def publish_draft_builtin(
         "returncode": 0,
         "stdout": json.dumps(data, ensure_ascii=False),
         "stderr": "",
-        "author": author or "Bobo",
+        "author": author,
         "content_path": _relative(publish_html_path),
         "source_content_path": _relative(html_path),
         "invalidated_token_cache": invalidated_token,
@@ -1563,11 +1643,12 @@ def publish_draft_builtin(
 def publish_preflight(
     workspace: Path,
     title: str,
-    author: str = "Bobo",
+    author: str = "",
     digest: str | None = None,
     cover_path: str | None = None,
     account_key: str | None = None,
 ) -> dict[str, Any]:
+    author = resolve_publish_author(author, account_key)
     original_digest = digest or ""
     safe_digest = truncate_utf8(original_digest, 120)
     digest_was_truncated = safe_digest != original_digest
@@ -1578,7 +1659,13 @@ def publish_preflight(
     cover = Path(cover_path) if cover_path else workspace / "cover.png"
     if not cover.is_absolute():
         cover = storage.ROOT / cover
-    html_text = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
+    publish_sanitize: dict[str, Any] = {}
+    publish_html_path = html_path
+    html_text = ""
+    if html_path.exists():
+        publish_sanitize = sanitize_publish_html_preview(workspace)
+        publish_html_path = workspace / "publish_ready.html"
+        html_text = publish_html_path.read_text(encoding="utf-8") if publish_html_path.exists() else ""
     config: dict[str, Any] = {}
     config_file = wechat_config_file(account_key) if account_key else wechat_config_file()
     token_cache_file = wechat_token_cache_file(account_key) if account_key else wechat_token_cache_file()
@@ -1599,7 +1686,8 @@ def publish_preflight(
     wechat_api_check: dict[str, Any] | None = (
         refresh_wechat_access_token(account_key=account_key) if account_key else refresh_wechat_access_token()
     ) if config_ready else None
-    publish_inspection = inspect_wechat_html_for_publish(html_text, html_path.parent) if html_path.exists() else {
+    publish_inspection = publish_sanitize.get("publish_inspection") or (
+        inspect_wechat_html_for_publish(html_text, publish_html_path.parent) if publish_html_path.exists() else {
         "ok": False,
         "local_image_paths": [],
         "missing_images": [],
@@ -1609,7 +1697,8 @@ def publish_preflight(
         "abnormal_indent": False,
         "html_chars": 0,
         "sanitize_report": {},
-    }
+        }
+    )
     content_image_paths = sorted({str(path) for path in publish_inspection.get("local_image_paths", [])})
     checks = [
         {
@@ -1634,7 +1723,7 @@ def publish_preflight(
         {
             "key": "html",
             "label": "微信公众号 HTML",
-            "ok": html_path.exists() and bool(html_text.strip()),
+            "ok": publish_html_path.exists() and bool(html_text.strip()),
             "detail": f"{_relative(html_path) if html_path.exists() else '缺少 formatted.html'}; {len(html_text)} 字符",
         },
         {
@@ -1656,8 +1745,8 @@ def publish_preflight(
         {
             "key": "author",
             "label": "作者长度",
-            "ok": utf8_len(author or "Bobo") <= 20,
-            "detail": f"{author or 'Bobo'}，{utf8_len(author or 'Bobo')} 字节，publisher 会按 20 字节保护",
+            "ok": utf8_len(author) <= 20,
+            "detail": f"{author}，{utf8_len(author)} 字节，publisher 会按 20 字节保护",
         },
         {
             "key": "digest",
@@ -1753,6 +1842,7 @@ def publish_preflight(
             "appid": redact_appid(config.get("appid", "")),
             "config_path": str(config_file),
         },
+        "publish_sanitize": publish_sanitize,
         "publish_inspection": {key: value for key, value in publish_inspection.items() if key != "sanitized_html"},
         "flow": [
             "1. 获取 access_token：GET /cgi-bin/token?grant_type=client_credential",
@@ -2104,8 +2194,22 @@ def _normalize_image_metadata(metadata: dict[str, Any] | None = None) -> dict[st
     content_images = data.get("content_images") if isinstance(data.get("content_images"), list) else []
     errors = data.get("errors") if isinstance(data.get("errors"), list) else []
     cover = data.get("cover") if isinstance(data.get("cover"), dict) else None
+    normalized_content_images = []
+    for item in content_images:
+        if not isinstance(item, dict):
+            continue
+        normalized_item = dict(item)
+        index = int(normalized_item.get("index") or 0)
+        alias_name = canonical_content_image_alias(str(normalized_item.get("filename") or ""))
+        if index > 0:
+            alias_name = canonical_content_image_filename(index, Path(alias_name or normalized_item.get("filename") or "content.png").suffix or ".png")
+        if alias_name:
+            normalized_item["filename"] = alias_name
+            if normalized_item.get("path"):
+                normalized_item["path"] = _replace_path_name(str(normalized_item["path"]), alias_name)
+        normalized_content_images.append(normalized_item)
     content_images = sorted(
-        [item for item in content_images if isinstance(item, dict)],
+        normalized_content_images,
         key=lambda item: int(item.get("index") or 0),
     )
     items = []
@@ -2190,7 +2294,7 @@ def generate_writer_image_item(
     elif kind == "content":
         if not index or index < 1:
             raise ValueError("正文配图 index 必须从 1 开始")
-        filename = f"content-{index}.png"
+        filename = canonical_content_image_filename(index)
         image_path = workspace / filename
     else:
         raise ValueError(f"未知图片类型：{kind}")
@@ -2254,11 +2358,16 @@ def content_image_items(workspace: Path) -> list[dict[str, Any]]:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             metadata = {}
-    prompt_by_name = {
-        item.get("filename"): item.get("prompt", "")
-        for item in metadata.get("content_images", [])
-        if item.get("filename")
-    }
+    prompt_by_name = {}
+    for item in metadata.get("content_images", []):
+        filename = item.get("filename")
+        if not filename:
+            continue
+        prompt = item.get("prompt", "")
+        prompt_by_name[filename] = prompt
+        alias = canonical_content_image_alias(str(filename))
+        if alias:
+            prompt_by_name[alias] = prompt
     items = []
     for index, path in enumerate(content_images(workspace), start=1):
         items.append(
@@ -2299,7 +2408,7 @@ def image_prompt_keywords(prompt: str) -> list[str]:
 
 def strip_existing_content_images(markdown_text: str) -> str:
     text = re.sub(r"\n*!\[内容配图\d*\]\([^\)]*content-\d+\.[^\)]*\)\n*", "\n", markdown_text or "")
-    text = re.sub(r"\n*!\[[^\]]*\]\([^\)]*content[_-]\d+\.[^\)]*\)\n*", "\n", text)
+    text = CONTENT_IMAGE_MARKDOWN_RE.sub("\n", text)
     text = re.sub(r"\n*!\[[^\]]*\]\((?:[^\)]*[\\/])?cover\.(?:png|jpe?g|webp|bmp)[^\)]*\)\n*", "\n", text, flags=re.I)
     text = re.sub(r"\n*## 内容配图\s*\n+(?=(## |\Z))", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -2607,11 +2716,12 @@ def format_article(
 def publish_draft(
     workspace: Path,
     title: str,
-    author: str = "Bobo",
+    author: str = "",
     digest: str | None = None,
     cover_path: str | None = None,
     account_key: str | None = None,
 ) -> dict[str, Any]:
+    author = resolve_publish_author(author, account_key)
     digest = truncate_utf8(digest, 120)
     if account_key or not PUBLISHER_SCRIPT.exists():
         return publish_draft_builtin(workspace, title, author=author, digest=digest, cover_path=cover_path, account_key=account_key)
@@ -2634,7 +2744,7 @@ def publish_draft(
         "--content",
         str(publish_html_path),
         "--author",
-        author or "Bobo",
+        author,
     ]
     if cover.exists():
         command.extend(["--cover", str(cover)])
@@ -2648,7 +2758,7 @@ def publish_draft(
             "returncode": -1,
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or "",
-            "author": author or "Bobo",
+            "author": author,
             "content_path": _relative(publish_html_path),
             "source_content_path": _relative(html_path),
             "uploaded_content_images": uploaded_images,
@@ -2668,7 +2778,7 @@ def publish_draft(
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
-        "author": author or "Bobo",
+        "author": author,
         "content_path": _relative(publish_html_path),
         "source_content_path": _relative(html_path),
         "invalidated_token_cache": invalidated_token,

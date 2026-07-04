@@ -20,7 +20,7 @@ Perspective configuration:
 RTFC requirements:
 1. Rule: state clearly what this perspective cares about, what it excludes, and which standard it uses to judge value.
 2. Target: stay tightly focused on this perspective's only real objective. Do not drift into generic summarization.
-3. Fact: every key judgment must be anchored in the provided materials. Use `evidence_refs` such as `S1`, `S2`, `S3`.
+3. Fact: every key judgment must be anchored in the provided materials. Use `evidence_refs` internally for traceability, but do not write visible citation labels like `引用：S1` in user-facing interpretation text.
 4. Conclusion: the conclusion must match this perspective's real working scene, concerns, and stance.
 
 Fixed five-part structure:

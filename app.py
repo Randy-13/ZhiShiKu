@@ -65,7 +65,13 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Screenshot Knowledge Base", version="0.3.0", lifespan=lifespan)
+app = FastAPI(
+    title="Screenshot Knowledge Base",
+    version="0.3.0",
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+)
 app.mount("/static", StaticFiles(directory=storage.ROOT / "static"), name="static")
 
 
@@ -366,7 +372,7 @@ def _test_asr_setting_payload_or_400(payload: dict[str, object]) -> dict[str, ob
 class WriterPublishRequest(BaseModel):
     workspace: str
     title: str
-    author: str = "Bobo"
+    author: str = ""
     digest: str | None = None
     cover_path: str | None = None
 
@@ -443,7 +449,7 @@ class WriterProjectDesignConfirmRequest(BaseModel):
 
 class WriterProjectPublishRequest(BaseModel):
     title: str = ""
-    author: str = "Bobo"
+    author: str = ""
     digest: str | None = None
     cover_path: str | None = None
 
@@ -466,7 +472,7 @@ class WriterProjectAdvanceRequest(BaseModel):
     cover_aspect_ratio: str | None = None
     content_aspect_ratio: str | None = None
     title: str | None = None
-    author: str = "Bobo"
+    author: str = ""
     digest: str | None = None
     cover_path: str | None = None
 
@@ -504,8 +510,18 @@ def create_page() -> HTMLResponse:
     return react_app_response()
 
 
+@app.get("/library", response_class=HTMLResponse)
+def library_page() -> HTMLResponse:
+    return react_app_response()
+
+
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page() -> HTMLResponse:
+    return react_app_response()
+
+
+@app.get("/docs", response_class=HTMLResponse)
+def docs_page() -> HTMLResponse:
     return react_app_response()
 
 
@@ -3649,14 +3665,16 @@ def writer_project_publish_preflight(project_id: str, payload: WriterProjectPubl
         workspace = _writer_project_workspace(project_id)
         title = payload.title or str(project.get("title") or project.get("name") or "")
         digest = payload.digest if payload.digest is not None else project.get("digest")
-        result = writer_tools.publish_preflight(workspace, title, author=payload.author or "Bobo", digest=str(digest or ""), cover_path=payload.cover_path, account_key=account_key)
+        author = writer_tools.resolve_publish_author(payload.author, account_key)
+        result = writer_tools.publish_preflight(workspace, title, author=author, digest=str(digest or ""), cover_path=payload.cover_path, account_key=account_key)
         safe_digest = result.get("digest", str(digest or ""))
         writer_tools.update_project(
             project_id,
             preflight=result,
+            publish_sanitize=result.get("publish_sanitize"),
             publish_inspection=result.get("publish_inspection"),
             publish_title=title,
-            publish_author=payload.author or "Bobo",
+            publish_author=author,
             publish_digest=safe_digest,
             publish_cover_path=payload.cover_path,
         )
@@ -3681,7 +3699,7 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
             raise HTTPException(status_code=400, detail="请先确认美编预览，再进入发布流程")
         workspace = _writer_project_workspace(project_id)
         title = payload.title or str(project.get("publish_title") or project.get("title") or project.get("name") or "")
-        author = payload.author or str(project.get("publish_author") or "Bobo")
+        author = writer_tools.resolve_publish_author(payload.author or str(project.get("publish_author") or ""), account_key)
         digest = payload.digest if payload.digest is not None else project.get("publish_digest") or project.get("digest")
         cover_path = payload.cover_path or project.get("publish_cover_path")
         preflight = writer_tools.publish_preflight(
@@ -3694,7 +3712,12 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
         )
         digest = preflight.get("digest", str(digest or ""))
         if not preflight["ok"]:
-            writer_tools.update_project(project_id, preflight=preflight)
+            writer_tools.update_project(
+                project_id,
+                preflight=preflight,
+                publish_sanitize=preflight.get("publish_sanitize"),
+                publish_inspection=preflight.get("publish_inspection"),
+            )
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
         result = writer_tools.publish_draft(
             workspace,
@@ -3707,6 +3730,7 @@ def writer_project_publish(project_id: str, payload: WriterProjectPublishRequest
         writer_tools.update_project(
             project_id,
             preflight=preflight,
+            publish_sanitize=preflight.get("publish_sanitize"),
             publish_inspection=preflight.get("publish_inspection"),
             publish_result=result,
             status="published" if result.get("returncode") == 0 else "active",
@@ -3957,10 +3981,11 @@ def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str,
     try:
         account_key = _writer_wechat_account_key(request)
         workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
+        author = writer_tools.resolve_publish_author(payload.author, account_key)
         preflight = writer_tools.publish_preflight(
             workspace,
             payload.title,
-            author=payload.author or "Bobo",
+            author=author,
             digest=payload.digest,
             cover_path=payload.cover_path,
             account_key=account_key,
@@ -3969,7 +3994,7 @@ def writer_publish(payload: WriterPublishRequest, request: Request) -> dict[str,
         if not preflight["ok"]:
             raise HTTPException(status_code=400, detail={"message": "Publish preflight failed", **preflight})
         publish_kwargs = {
-            "author": payload.author or "Bobo",
+            "author": author,
             "digest": str(digest or ""),
             "cover_path": payload.cover_path,
         }
@@ -3988,10 +4013,11 @@ def writer_publish_preflight(payload: WriterPublishRequest, request: Request) ->
     try:
         account_key = _writer_wechat_account_key(request)
         workspace = _resolve_legacy_writer_workspace(payload.workspace, request)
+        author = writer_tools.resolve_publish_author(payload.author, account_key)
         result = writer_tools.publish_preflight(
             workspace,
             payload.title,
-            author=payload.author or "Bobo",
+            author=author,
             digest=payload.digest,
             cover_path=payload.cover_path,
             account_key=account_key,

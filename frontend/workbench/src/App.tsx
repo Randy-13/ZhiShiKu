@@ -15,6 +15,7 @@ import { MineWorkspace } from "./workspaces/MineWorkspace";
 import { CreateWorkspace } from "./workspaces/CreateWorkspace";
 import { LibraryWorkspace } from "./workspaces/LibraryWorkspace";
 import { SettingsWorkspace } from "./workspaces/SettingsWorkspace";
+import { DocsWorkspace } from "./workspaces/DocsWorkspace";
 import { KnowledgeLibraryRail } from "./components/KnowledgeLibraryRail";
 import { AuthGate } from "./components/AuthGate";
 import { JobCenter } from "./components/JobCenter";
@@ -30,6 +31,16 @@ import { useWriterFlow } from "./hooks/useWriterFlow";
 import { useWorkspaceRoute } from "./hooks/useWorkspaceRoute";
 
 const libraryKinds: LibraryKind[] = ["original", "focus", "perspective"];
+const visualThemeStorageKey = "figurelearning.visualTheme";
+type VisualTheme = "dark" | "light";
+
+function readInitialVisualTheme(): VisualTheme {
+  if (typeof window === "undefined") {
+    return "dark";
+  }
+  const savedTheme = window.localStorage.getItem(visualThemeStorageKey);
+  return savedTheme === "light" ? "light" : "dark";
+}
 
 function WorkbenchApp({
   authContext,
@@ -39,6 +50,7 @@ function WorkbenchApp({
   onAuthContextChange: (nextContext: AuthContext) => void;
 }) {
   const [language, setLanguage] = useState<Language>("zh");
+  const [visualTheme, setVisualTheme] = useState<VisualTheme>(readInitialVisualTheme);
   const [textExtractionMode, setTextExtractionMode] = useState<TextExtractionMode>("ai_vision");
   const t = useMemo(() => createTranslator(language), [language]);
   const { navItems } = useAppShell(t);
@@ -89,11 +101,15 @@ function WorkbenchApp({
     generateWriterImages,
     retryWriterImageItems,
     formatWriterProject,
-    sanitizeWriterPublishHtml,
     confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,
   } = useWriterFlow({ language, addActivity, selectWorkspace });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = visualTheme;
+    window.localStorage.setItem(visualThemeStorageKey, visualTheme);
+  }, [visualTheme]);
 
   const refreshLibraries = useCallback(async (options?: { selectFirst?: boolean; clearChecked?: boolean }) => {
     if (options?.clearChecked !== false) setLibraryRailCheckedIds([]);
@@ -168,11 +184,14 @@ function WorkbenchApp({
     perspectiveDraft,
     setPerspectiveDraft,
     isMining,
+    isExpandingPerspective,
     isSavingPerspective,
     setSelectedPerspectiveId,
     savePerspectiveProfile,
     deletePerspectiveProfile,
     runPerspectiveInterpretation,
+    previewPerspectiveExpansion,
+    mergePerspectiveExpansion,
     savePerspectiveDraft,
   } = useMineFlow({
     language,
@@ -496,6 +515,7 @@ function WorkbenchApp({
             selectedSources={selectedRailOriginals}
             draft={perspectiveDraft}
             isRunning={isMining}
+            isExpanding={isExpandingPerspective}
             isSaving={isSavingPerspective}
             disabledReason={mineSourceDisabledReason}
             rightRail={knowledgeRail}
@@ -503,6 +523,8 @@ function WorkbenchApp({
             onSavePerspective={savePerspectiveProfile}
             onDeletePerspective={deletePerspectiveProfile}
             onRunInterpretation={runPerspectiveInterpretation}
+            onPreviewExpansion={previewPerspectiveExpansion}
+            onMergeExpansion={mergePerspectiveExpansion}
             onUpdateDraft={setPerspectiveDraft}
             onSaveDraft={savePerspectiveDraft}
           />
@@ -530,7 +552,6 @@ function WorkbenchApp({
             onGenerateImages={generateWriterImages}
             onRetryImageItems={retryWriterImageItems}
             onFormat={formatWriterProject}
-            onSanitizePublishHtml={sanitizeWriterPublishHtml}
             onConfirmDesign={confirmWriterDesign}
             onPreflight={preflightWriterProject}
             onPublish={publishWriterProject}
@@ -551,14 +572,18 @@ function WorkbenchApp({
           <SettingsWorkspace
             t={t}
             language={language}
+            visualTheme={visualTheme}
             textExtractionMode={textExtractionMode}
             activities={activities}
             rightRail={knowledgeRail}
             onLanguageChange={setLanguage}
+            onVisualThemeChange={setVisualTheme}
             onTextExtractionModeChange={setTextExtractionMode}
             onSave={saveWorkbenchSettings}
           />
         );
+      case "docs":
+        return <DocsWorkspace t={t} language={language} />;
     }
   })();
 
@@ -651,5 +676,3 @@ function ResponsiveKnowledgeRail({ summary, count, children }: { summary: string
     </aside>
   );
 }
-
-

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { mineApi } from "../apiMine";
+import type { ExpansionExternalSource, PerspectiveExpansionPreview } from "../apiMine";
 import type { LibraryBucket } from "../components/KnowledgeLibraryRail";
 import type { ActivityEvent, KnowledgeItem, Language, PerspectiveDraft, PerspectiveProfile } from "../domain";
 
@@ -30,6 +31,7 @@ export function useMineFlow({
   const [selectedPerspectiveId, setSelectedPerspectiveId] = useState<string>();
   const [perspectiveDraft, setPerspectiveDraft] = useState<PerspectiveDraft>();
   const [isMining, setIsMining] = useState(false);
+  const [isExpandingPerspective, setIsExpandingPerspective] = useState(false);
   const [isSavingPerspective, setIsSavingPerspective] = useState(false);
 
   const selectedPerspective = useMemo(
@@ -172,17 +174,117 @@ export function useMineFlow({
     }
   }, [addActivity, language, perspectiveDraft, refreshLibraries, selectedPerspective, selectedRailOriginals, setKnowledge, setLibraryRailBucket, setSelectedKnowledgeId]);
 
+  const runPerspectiveExpansion = useCallback(async (instruction = "") => {
+    if (!selectedPerspective || mineSourceDisabledReason || !perspectiveDraft?.markdown.trim()) return;
+    setIsExpandingPerspective(true);
+    try {
+      const draft = await mineApi.expandPerspective(selectedRailOriginals, selectedPerspective, perspectiveDraft.markdown, instruction);
+      setPerspectiveDraft(draft);
+      addActivity({
+        title: draft.title,
+        detail:
+          language === "zh"
+            ? instruction.trim()
+              ? `拓展解读已按命令生成：${instruction.trim()}`
+              : "拓展解读已生成，已用官方优先的外部证据覆盖当前草稿。"
+            : "Expanded interpretation generated and applied to the current draft.",
+        workspace: "mine",
+        status: "done",
+      });
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "拓展解读失败" : "Expansion failed",
+        detail: error instanceof Error ? error.message : "Perspective expansion API failed",
+        workspace: "mine",
+        status: "error",
+      });
+    } finally {
+      setIsExpandingPerspective(false);
+    }
+  }, [addActivity, language, mineSourceDisabledReason, perspectiveDraft, selectedPerspective, selectedRailOriginals]);
+
+  const previewPerspectiveExpansion = useCallback(async (instruction = ""): Promise<PerspectiveExpansionPreview | undefined> => {
+    if (!selectedPerspective || mineSourceDisabledReason || !perspectiveDraft?.markdown.trim()) return undefined;
+    setIsExpandingPerspective(true);
+    try {
+      const preview = await mineApi.previewPerspectiveExpansion(
+        selectedRailOriginals,
+        selectedPerspective,
+        perspectiveDraft.markdown,
+        instruction,
+      );
+      addActivity({
+        title: language === "zh" ? "拓展来源预览完成" : "Expansion sources previewed",
+        detail:
+          language === "zh"
+            ? `找到 ${preview.externalSources.length} 个可读外部来源。`
+            : `${preview.externalSources.length} readable external source(s) found.`,
+        workspace: "mine",
+        status: "done",
+      });
+      return preview;
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "拓展来源检索失败" : "Expansion source search failed",
+        detail: error instanceof Error ? error.message : "Perspective expansion preview API failed",
+        workspace: "mine",
+        status: "error",
+      });
+      throw error;
+    } finally {
+      setIsExpandingPerspective(false);
+    }
+  }, [addActivity, language, mineSourceDisabledReason, perspectiveDraft, selectedPerspective, selectedRailOriginals]);
+
+  const mergePerspectiveExpansion = useCallback(async (instruction = "", externalSources: ExpansionExternalSource[]) => {
+    if (!selectedPerspective || mineSourceDisabledReason || !perspectiveDraft?.markdown.trim()) return;
+    setIsExpandingPerspective(true);
+    try {
+      const draft = await mineApi.mergePerspectiveExpansion(
+        selectedRailOriginals,
+        selectedPerspective,
+        perspectiveDraft.markdown,
+        externalSources,
+        instruction,
+      );
+      setPerspectiveDraft(draft);
+      addActivity({
+        title: draft.title,
+        detail:
+          language === "zh"
+            ? `已将 ${externalSources.length} 个外部来源智能融入当前草稿。`
+            : `${externalSources.length} external source(s) merged into the current draft.`,
+        workspace: "mine",
+        status: "done",
+      });
+    } catch (error) {
+      addActivity({
+        title: language === "zh" ? "拓展解读融入失败" : "Expansion merge failed",
+        detail: error instanceof Error ? error.message : "Perspective expansion merge API failed",
+        workspace: "mine",
+        status: "error",
+      });
+      throw error;
+    } finally {
+      setIsExpandingPerspective(false);
+    }
+  }, [addActivity, language, mineSourceDisabledReason, perspectiveDraft, selectedPerspective, selectedRailOriginals]);
+
   return {
     perspectives,
     selectedPerspective,
     perspectiveDraft,
     setPerspectiveDraft,
     isMining,
+    isExpandingPerspective,
     isSavingPerspective,
     setSelectedPerspectiveId,
     savePerspectiveProfile,
     deletePerspectiveProfile,
     runPerspectiveInterpretation,
+    runPerspectiveExpansion,
+    previewPerspectiveExpansion,
+    mergePerspectiveExpansion,
     savePerspectiveDraft,
   };
 }

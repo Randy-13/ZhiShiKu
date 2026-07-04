@@ -77,8 +77,8 @@ def test_v2_app_shell_contract():
     sections = payload["data"]["primarySections"]
     entries = payload["data"]["workspaceEntries"]
     libraries = payload["data"]["globalLibraries"]
-    assert [item["id"] for item in sections] == ["collect", "learn", "mine", "create", "library", "settings"]
-    assert [item["navLabel"] for item in sections] == ["收集", "学习", "挖掘", "创作", "知识库", "设置中心"]
+    assert [item["id"] for item in sections] == ["collect", "learn", "mine", "create", "library", "settings", "docs"]
+    assert [item["navLabel"] for item in sections] == ["收集", "学习", "挖掘", "公众号文章创作", "知识库", "设置中心", "文档"]
     assert [item["id"] for item in libraries] == ["raw", "focus", "perspective"]
     assert [item["label"] for item in libraries] == ["原料库", "重点库", "视角库"]
     assert all(item["navDescription"] for item in sections)
@@ -90,10 +90,17 @@ def test_v2_app_shell_contract():
         for item in entries
     )
     assert any(
-        item["id"] == "create-content"
+        item["id"] == "create-wechat-article"
         and item["route"] == "/create"
         and item["shellSection"] == "create"
-        and item["capabilityId"] == "create_content"
+        and item["capabilityId"] == "create_wechat_article"
+        for item in entries
+    )
+    assert any(
+        item["id"] == "docs-help"
+        and item["route"] == "/docs"
+        and item["shellSection"] == "docs"
+        and item["capabilityId"] == "read_documentation"
         for item in entries
     )
     assert any(
@@ -529,7 +536,7 @@ def test_jobs_auto_run_publish_preflight_for_local_project(monkeypatch):
     (workspace / "formatted.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
     (workspace / "article.md").write_text("# Publish Job\n\nBody", encoding="utf-8")
 
-    def fake_preflight(workspace_arg, title, author="Bobo", digest=None, cover_path=None):
+    def fake_preflight(workspace_arg, title, author="Bobo", digest=None, cover_path=None, account_key=None):
         assert workspace_arg == workspace
         assert title == "Publish Title"
         return {
@@ -1897,6 +1904,70 @@ def test_v2_learn_refines_then_saves_focus_markdown_from_raw_library(monkeypatch
     assert all(file["markdown_path"] != raw_item["markdown_path"] for file in pending_after_save)
 
 
+def test_v2_learn_refine_compacts_large_raw_text_and_uses_fast_llm_setting(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_generate_knowledge_from_text(raw_text: str, setting=None):
+        captured["raw_text"] = raw_text
+        captured["setting"] = setting
+        assert "opening evidence for learning" in raw_text
+        assert "closing evidence for learning" in raw_text
+        assert "middle filler 0500" not in raw_text
+        return (
+            KnowledgeResult(
+                title="Compacted Focus Fixture",
+                topic="large raw learning topic",
+                tags=["learning"],
+                focus_question="What should be retained?",
+                clusters=[
+                    KnowledgeCluster(
+                        name="Compacted raw material",
+                        domain="learning",
+                        occurrence_count=1,
+                        meaning="Large raw material is compacted before focus extraction.",
+                        key_information=["opening evidence", "closing evidence"],
+                    )
+                ],
+                investment_insights="None",
+            ),
+            raw_text,
+        )
+
+    monkeypatch.setattr(api_v2.deepseek_client, "generate_knowledge_from_text", fake_generate_knowledge_from_text)
+    monkeypatch.setattr(
+        api_v2.api_settings,
+        "active_setting",
+        lambda: {"api_key": "test-key", "timeout": 120, "max_retries": 2},
+    )
+    client = TestClient(create_app())
+    middle = "\n".join(f"middle filler {index:04d} with enough words to make this source large" for index in range(900))
+    long_markdown = f"# Long Learn Fixture\n\nopening evidence for learning\n\n{middle}\n\nclosing evidence for learning"
+    raw_item = client.post(
+        "/api/v2/collect/raw-file",
+        json={
+            "material_type": "text",
+            "title": "Long Learn Fixture",
+            "note": "",
+            "markdown": long_markdown,
+            "source": "manual",
+        },
+    ).json()["data"]["item"]
+
+    response = client.post(
+        "/api/v2/learn/refine-knowledge-cluster",
+        json={"raw_paths": [raw_item["markdown_path"]]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True
+    assert payload["input_compacted"] is True
+    assert payload["input_char_count"] <= api_v2.LEARN_REFINE_MAX_SOURCE_CHARS + 300
+    assert len(str(captured["raw_text"])) < len(long_markdown) // 2
+    assert captured["setting"]["max_retries"] == 0
+    assert captured["setting"]["timeout"] == api_v2.LEARN_REFINE_FAST_TIMEOUT_SECONDS
+
+
 def test_v2_mine_perspectives_expose_structured_profiles():
     client = TestClient(create_app())
 
@@ -1946,6 +2017,31 @@ def test_v2_mine_perspectives_can_save_and_delete_custom_profile():
     assert delete_response.json()["data"]["ok"] is True
     after_delete = client.get("/api/v2/mine/perspectives").json()["data"]["items"]
     assert all(item["id"] != "custom_test_writer" for item in after_delete)
+
+
+def test_v2_mine_perspectives_local_delete_matches_visible_custom_profiles():
+    client = TestClient(create_app())
+    storage.upsert_perspective_profile(
+        {
+            "id": "custom_legacy_student",
+            "name": "Legacy Student",
+            "positioning": "legacy owner profile",
+            "core_goal": "delete from local workbench",
+            "stance": "visible locally",
+        },
+        owner_user_id="legacy-cloud-user",
+        workspace_id="legacy-cloud-workspace",
+    )
+
+    items = client.get("/api/v2/mine/perspectives").json()["data"]["items"]
+    assert any(item["id"] == "custom_legacy_student" for item in items)
+
+    delete_response = client.delete("/api/v2/mine/perspectives/custom_legacy_student")
+
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["ok"] is True
+    after_delete = client.get("/api/v2/mine/perspectives").json()["data"]["items"]
+    assert all(item["id"] != "custom_legacy_student" for item in after_delete)
 
 
 def test_v2_mine_interprets_raw_library_queue_and_saves_perspective_file(monkeypatch):
@@ -2004,6 +2100,7 @@ def test_v2_mine_interprets_raw_library_queue_and_saves_perspective_file(monkeyp
     assert "## RTFC 解读规范" not in markdown
     assert "## 固定五段式结构" not in markdown
     assert "## 旧版兼容字段" not in markdown
+    assert "- 引用：" not in markdown
 
     save_response = client.post(
         "/api/v2/mine/perspective-file",
@@ -2026,6 +2123,445 @@ def test_v2_mine_interprets_raw_library_queue_and_saves_perspective_file(monkeyp
 
     perspective_items = client.get("/api/v2/libraries/perspective/files").json()["data"]["items"]
     assert any(file["markdown_path"] == item["markdown_path"] for file in perspective_items)
+
+
+def test_v2_mine_expand_interpretation_requires_sources_and_draft():
+    client = TestClient(create_app())
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    no_sources = client.post(
+        "/api/v2/mine/expand-interpretation",
+        json={"sources": [], "perspective": perspective, "current_markdown": "# Draft"},
+    )
+    no_draft = client.post(
+        "/api/v2/mine/expand-interpretation",
+        json={
+            "sources": [{"library": "raw", "markdown_path": "missing.md", "title": "Missing"}],
+            "perspective": perspective,
+            "current_markdown": "",
+        },
+    )
+
+    assert no_sources.status_code == 200
+    assert no_sources.json()["data"]["ok"] is False
+    assert no_draft.status_code == 200
+    assert no_draft.json()["data"]["ok"] is False
+
+
+def test_v2_mine_expand_query_generation_flattens_source_preview_words():
+    queries = api_v2._perspective_expansion_queries(
+        current_markdown="# Expansion Draft\n\nbody",
+        perspective=api_v2.MinePerspectiveProfile(
+            name="记者视角",
+            positioning="核对事实链条",
+            core_goal="补足官方证据",
+            stance="只接受可追溯证据",
+        ),
+        sources=[
+            {"title": "Source A", "text": "first source words should be flattened into one query"},
+            {"title": "Source B", "text": "second source words should also be flattened safely"},
+        ],
+        expansion_instruction="重点核对就业数据口径",
+    )
+
+    assert queries
+    assert all(isinstance(query, str) for query in queries)
+    assert any("就业数据口径" in query for query in queries)
+    assert any("gov.cn" in query for query in queries)
+
+
+def test_v2_mine_expand_query_generation_prioritizes_domestic_official_sites_for_chinese_material():
+    queries = api_v2._perspective_expansion_queries(
+        current_markdown="# 2026年6月中国采购经理指数运行情况\n\nbody",
+        perspective=api_v2.MinePerspectiveProfile(
+            name="行业研究员视角",
+            positioning="核对国内官方统计口径",
+            core_goal="补足国家统计局和中国政府网来源",
+            stance="优先国内官方来源",
+        ),
+        sources=[{"title": "PMI原文", "text": "中国 采购经理 指数 国家统计局 官方 数据"}],
+        expansion_instruction="优先检索国内官方网站，不要只找国外网站",
+    )
+
+    assert queries
+    assert "gov.cn" in queries[0]
+    assert any("stats.gov.cn" in query for query in queries)
+
+
+def test_v2_mine_expand_search_keeps_domestic_official_seed_when_search_provider_is_blocked(monkeypatch):
+    def blocked_jina(query: str):
+        raise RuntimeError("HTTP Error 403: Forbidden")
+
+    def blocked_duckduckgo(query: str):
+        raise RuntimeError("HTTP Error 403: Forbidden")
+
+    def fake_reader(url: str):
+        if "gov.cn" in url or "stats.gov.cn" in url:
+            return "国内官方来源页面。国家统计局或中国政府网发布政策与数据。"
+        return ""
+
+    monkeypatch.setattr(api_v2, "_jina_search", blocked_jina)
+    monkeypatch.setattr(api_v2, "_duckduckgo_search", blocked_duckduckgo)
+    monkeypatch.setattr(api_v2, "_read_external_page", fake_reader)
+
+    sources = api_v2._collect_perspective_expansion_sources(
+        current_markdown="# 2026年6月中国采购经理指数运行情况\n\nbody",
+        perspective=api_v2.MinePerspectiveProfile(
+            name="行业研究员视角",
+            positioning="核对国内官方统计口径",
+            core_goal="补足国家统计局来源",
+            stance="国内官方优先",
+        ),
+        sources=[{"title": "PMI原文", "text": "中国 采购经理 指数 国家统计局 官方 数据"}],
+        expansion_instruction="优先检索国内官方网站",
+    )
+
+    assert sources
+    assert any("gov.cn" in item["url"] for item in sources)
+    assert all(item["authority"] == "official" for item in sources)
+
+
+def test_v2_mine_expand_source_authority_recognizes_domestic_sources():
+    assert api_v2._source_authority("https://www.gov.cn/zhengce/") == "official"
+    assert api_v2._source_authority("https://www.stats.gov.cn/sj/zxfb/") == "official"
+    assert api_v2._source_authority("https://www.news.cn/politics/") == "authoritative_supplement"
+
+
+def test_v2_mine_expand_search_keeps_official_seed_when_search_provider_is_blocked(monkeypatch):
+    def blocked_jina(query: str):
+        raise RuntimeError("HTTP Error 403: Forbidden")
+
+    def blocked_duckduckgo(query: str):
+        raise RuntimeError("HTTP Error 403: Forbidden")
+
+    def fake_reader(url: str):
+        if "bls.gov" in url:
+            return "THE EMPLOYMENT SITUATION - JUNE 2026. Average hourly earnings and payroll data."
+        if "federalreserve.gov" in url:
+            return "FOMC projections and federal funds rate path."
+        return ""
+
+    monkeypatch.setattr(api_v2, "_jina_search", blocked_jina)
+    monkeypatch.setattr(api_v2, "_duckduckgo_search", blocked_duckduckgo)
+    monkeypatch.setattr(api_v2, "_read_external_page", fake_reader)
+
+    sources = api_v2._collect_perspective_expansion_sources(
+        current_markdown="# 美国6月薪资与美联储利率路径\n\nbody",
+        perspective=api_v2.MinePerspectiveProfile(
+            name="记者视角",
+            positioning="核对就业与利率事实链条",
+            core_goal="补足官方证据",
+            stance="只接受可追溯证据",
+        ),
+        sources=[{"title": "原文", "text": "美国6月薪资 就业 美联储 2026 利率"}],
+        expansion_instruction="重点核对官方就业数据和美联储利率展望",
+    )
+
+    assert sources
+    assert any("bls.gov" in item["url"] for item in sources)
+    assert all(item["authority"] == "official" for item in sources)
+
+
+def test_v2_mine_expand_interpretation_degrades_when_search_fails(monkeypatch):
+    def fail_collect(**kwargs):
+        raise RuntimeError("api search offline")
+
+    def fail_model(*args, **kwargs):
+        raise AssertionError("model should not run without external evidence")
+
+    monkeypatch.setattr(api_v2, "_collect_perspective_expansion_sources", fail_collect)
+    monkeypatch.setattr(api_v2.deepseek_client, "expand_perspective_interpretation", fail_model)
+    client = TestClient(create_app())
+    raw_response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={
+            "material_type": "text",
+            "title": "Expansion Raw Fixture",
+            "items": [{"content": "raw material for expansion", "title": "Expansion Raw Fixture"}],
+        },
+    )
+    raw_item = raw_response.json()["data"]["item"]
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    response = client.post(
+        "/api/v2/mine/expand-interpretation",
+        json={
+            "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+            "perspective": perspective,
+            "current_markdown": "# Current Draft\n\nbody",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["ok"] is True
+    assert data["external_sources"] == []
+    assert data["markdown"] == "# Current Draft\n\nbody"
+    assert "拓展来源状态" not in data["markdown"]
+    assert data["warning"]
+
+
+def test_v2_mine_expand_preview_returns_sources_and_diagnostics(monkeypatch):
+    def fake_collect(**kwargs):
+        return (
+            [
+                {
+                    "library": "external",
+                    "title": "Official labor report",
+                    "relative_path": "https://official.example/report",
+                    "url": "https://official.example/report",
+                    "authority": "official",
+                    "query": "labor official report",
+                    "text": "Official report confirms the data chain.",
+                    "snippet": "Official report confirms the data chain.",
+                    "read_status": "readable",
+                }
+            ],
+            {"queries": ["labor official report"], "errors": ["jina: HTTP Error 401: Unauthorized"], "candidates": 1, "readable": 1},
+        )
+
+    monkeypatch.setattr(api_v2, "_collect_perspective_expansion_sources_with_report", fake_collect)
+    client = TestClient(create_app())
+    raw_response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={
+            "material_type": "text",
+            "title": "Expansion Preview Fixture",
+            "items": [{"content": "raw material for expansion preview", "title": "Expansion Preview Fixture"}],
+        },
+    )
+    raw_item = raw_response.json()["data"]["item"]
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    response = client.post(
+        "/api/v2/mine/expand-preview",
+        json={
+            "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+            "perspective": perspective,
+            "current_markdown": "# Current Draft\n\nbody",
+            "expansion_instruction": "focus on official labor data definitions",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["ok"] is True
+    assert "markdown" not in data
+    assert data["external_sources"][0]["authority"] == "official"
+    assert data["external_sources"][0]["read_status"] == "readable"
+    assert data["search_report"]["errors"] == ["jina: HTTP Error 401: Unauthorized"]
+
+
+def test_v2_mine_expand_preview_zero_sources_does_not_return_fallback_markdown(monkeypatch):
+    def fake_collect(**kwargs):
+        return ([], {"queries": ["blocked query"], "errors": ["jina: HTTP Error 401: Unauthorized"], "candidates": 0, "readable": 0})
+
+    monkeypatch.setattr(api_v2, "_collect_perspective_expansion_sources_with_report", fake_collect)
+    client = TestClient(create_app())
+    raw_response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={
+            "material_type": "text",
+            "title": "Expansion Empty Preview Fixture",
+            "items": [{"content": "raw material for empty preview", "title": "Expansion Empty Preview Fixture"}],
+        },
+    )
+    raw_item = raw_response.json()["data"]["item"]
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    response = client.post(
+        "/api/v2/mine/expand-preview",
+        json={
+            "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+            "perspective": perspective,
+            "current_markdown": "# Current Draft\n\nbody",
+        },
+    )
+
+    data = response.json()["data"]
+    assert data["ok"] is True
+    assert data["external_sources"] == []
+    assert "markdown" not in data
+    assert data["warning"]
+
+
+def test_v2_mine_expand_preview_degrades_when_source_search_fails(monkeypatch):
+    def fail_collect(**kwargs):
+        raise RuntimeError("agent reach unavailable in cloud worker")
+
+    monkeypatch.setattr(api_v2, "_collect_perspective_expansion_sources_with_report", fail_collect)
+    client = TestClient(create_app())
+    raw_response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={
+            "material_type": "text",
+            "title": "Expansion Failure Preview Fixture",
+            "items": [{"content": "raw material for failed preview", "title": "Expansion Failure Preview Fixture"}],
+        },
+    )
+    raw_item = raw_response.json()["data"]["item"]
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    response = client.post(
+        "/api/v2/mine/expand-preview",
+        json={
+            "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+            "perspective": perspective,
+            "current_markdown": "# Current Draft\n\nbody",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["ok"] is True
+    assert data["external_sources"] == []
+    assert data["search_report"]["errors"] == ["agent reach unavailable in cloud worker"]
+    assert data["warning"]
+
+
+def test_v2_mine_expand_interpretation_renders_external_evidence_refs(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_expand(material_blocks, perspective, current_markdown, external_sources, expansion_instruction="", setting=None):
+        captured["model_instruction"] = expansion_instruction
+        assert material_blocks[0]["library"] == "raw"
+        assert external_sources[0]["authority"] == "official"
+        assert "Current Draft" in current_markdown
+        return PerspectiveInterpretationResult(
+            title="Expanded perspective",
+            perspective_name=perspective["name"],
+            tags=["expanded"],
+            summary="External evidence completes the chain.",
+            criteria="Use source facts first, then official external evidence.",
+            core_facts=[
+                PerspectiveFinding(
+                    dimension="Evidence chain",
+                    interpretation="The original claim is strengthened by official confirmation.",
+                    evidence_refs=["S1", "E1"],
+                )
+            ],
+            deep_analysis=[
+                PerspectiveFinding(
+                    dimension="Causal reading",
+                    interpretation="The added official source makes the inference more complete.",
+                    evidence_refs=["S1", "E1"],
+                )
+            ],
+            risks_and_questions=["Check whether later revisions changed the official data."],
+            conclusion_and_actions=["Keep S1 and E1 together when saving the interpretation."],
+        )
+
+    monkeypatch.setattr(api_v2.deepseek_client, "expand_perspective_interpretation", fake_expand)
+    client = TestClient(create_app())
+    raw_response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={
+            "material_type": "text",
+            "title": "Expansion Success Fixture",
+            "items": [{"content": "raw material for expansion success", "title": "Expansion Success Fixture"}],
+        },
+    )
+    raw_item = raw_response.json()["data"]["item"]
+    perspective = client.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+
+    response = client.post(
+        "/api/v2/mine/expand-merge",
+        json={
+            "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+            "perspective": perspective,
+            "current_markdown": "# Current Draft\n\nbody",
+            "external_sources": [
+                {
+                    "library": "external",
+                    "title": "Official labor report",
+                    "relative_path": "https://official.example/report",
+                    "url": "https://official.example/report",
+                    "authority": "official",
+                    "query": "labor official report",
+                    "text": "Official report confirms the data chain.",
+                }
+            ],
+            "expansion_instruction": "focus on official labor data definitions",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    markdown = data["markdown"]
+    assert data["ok"] is True
+    assert data["title"] == "Expanded perspective"
+    assert "## 外部拓展来源" in markdown
+    assert "[E1] Official labor report" in markdown
+    assert "- 引用：" not in markdown
+    assert data["source_files"][1]["authority"] == "official"
+    assert captured["model_instruction"] == "focus on official labor data definitions"
+
+
+def test_v2_cloud_member_can_merge_owned_mine_expansion_sources(monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    client_a, _payload_a = _register_cloud_member("MINE-MERGE-A", "mine-merge-a@example.test", "mine_merge_a")
+    client_b, _payload_b = _register_cloud_member("MINE-MERGE-B", "mine-merge-b@example.test", "mine_merge_b")
+
+    def fake_expand(material_blocks, perspective, current_markdown, external_sources, expansion_instruction="", setting=None):
+        assert material_blocks[0]["library"] == "raw"
+        assert external_sources[0]["library"] == "external"
+        return PerspectiveInterpretationResult(
+            title="Cloud expanded perspective",
+            perspective_name=perspective["name"],
+            tags=["cloud"],
+            summary="Cloud member can merge external evidence.",
+            criteria="Use owned source first.",
+            core_facts=[
+                PerspectiveFinding(
+                    dimension="Owned source",
+                    interpretation="Owned raw material remains visible during merge.",
+                    evidence_refs=["S1", "E1"],
+                )
+            ],
+            deep_analysis=[],
+            risks_and_questions=[],
+            conclusion_and_actions=["Merged for cloud member."],
+        )
+
+    monkeypatch.setattr(api_v2.deepseek_client, "expand_perspective_interpretation", fake_expand)
+    raw_item = client_a.post(
+        "/api/v2/collect/raw-file",
+        json={
+            "material_type": "text",
+            "title": "Cloud Merge Source",
+            "note": "",
+            "markdown": "# Cloud Merge Source\n\nowned mine merge body",
+            "source": "manual",
+        },
+    ).json()["data"]["item"]
+    perspective = client_a.get("/api/v2/mine/perspectives").json()["data"]["items"][0]
+    payload = {
+        "sources": [{"library": "raw", "markdown_path": raw_item["markdown_path"], "title": raw_item["title"]}],
+        "perspective": perspective,
+        "current_markdown": "# Current Draft\n\nbody",
+        "external_sources": [
+            {
+                "library": "external",
+                "title": "Official cloud source",
+                "relative_path": "https://official.example/cloud",
+                "url": "https://official.example/cloud",
+                "authority": "official",
+                "query": "cloud official source",
+                "text": "Official cloud source confirms the chain.",
+            }
+        ],
+    }
+
+    blocked = client_b.post("/api/v2/mine/expand-merge", json=payload)
+    assert blocked.status_code == 404
+
+    response = client_a.post("/api/v2/mine/expand-merge", json=payload)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["ok"] is True, data
+    assert "Cloud expanded perspective" in data["markdown"]
+    assert data["external_sources"][0]["title"] == "Official cloud source"
 
 
 def test_v2_collect_text_saves_raw_markdown():

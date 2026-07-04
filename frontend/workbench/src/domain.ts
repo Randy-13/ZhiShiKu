@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 
-export type WorkspaceId = "collect" | "learn" | "mine" | "create" | "library" | "settings";
+export type WorkspaceId = "collect" | "learn" | "mine" | "create" | "library" | "settings" | "docs";
 export type LegacyStageId =
   | "overview"
   | "inbox"

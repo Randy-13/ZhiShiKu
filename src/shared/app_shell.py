@@ -73,12 +73,12 @@ PRIMARY_SECTIONS: tuple[ShellSection, ...] = (
     ),
     ShellSection(
         id="create",
-        label="Create",
-        nav_label="创作",
-        nav_description="引用三库生成成品",
+        label="WeChat Article",
+        nav_label="公众号文章创作",
+        nav_description="写作、美编与发布检查",
         route="/create",
         priority="P1",
-        purpose="Create articles, Xiaohongshu posts, short-video scripts, and long-video scripts from all libraries.",
+        purpose="Write, design, preflight, and publish-check WeChat public-account articles from all libraries.",
     ),
     ShellSection(
         id="library",
@@ -97,6 +97,15 @@ PRIMARY_SECTIONS: tuple[ShellSection, ...] = (
         route="/settings",
         priority="P3",
         purpose="Manage model, ASR, image processing, perspective templates, and system configuration.",
+    ),
+    ShellSection(
+        id="docs",
+        label="Docs",
+        nav_label="文档",
+        nav_description="工作区说明与排障指南",
+        route="/docs",
+        priority="P3",
+        purpose="Explain workspace workflows, dependencies, and troubleshooting paths for users.",
     ),
 )
 
@@ -164,11 +173,11 @@ WORKSPACE_ENTRIES: tuple[WorkspaceEntry, ...] = (
         surface="main_workspace",
     ),
     WorkspaceEntry(
-        id="create-content",
-        label="Creation studio",
+        id="create-wechat-article",
+        label="WeChat article studio",
         route="/create",
         shell_section="create",
-        capability_id="create_content",
+        capability_id="create_wechat_article",
         priority="P1",
         surface="main_workspace",
     ),
@@ -187,6 +196,15 @@ WORKSPACE_ENTRIES: tuple[WorkspaceEntry, ...] = (
         route="/settings",
         shell_section="settings",
         capability_id="configure_system",
+        priority="P3",
+        surface="main_workspace",
+    ),
+    WorkspaceEntry(
+        id="docs-help",
+        label="Documentation",
+        route="/docs",
+        shell_section="docs",
+        capability_id="read_documentation",
         priority="P3",
         surface="main_workspace",
     ),
@@ -230,11 +248,11 @@ WORKSPACE_PLACEMENTS: tuple[WorkspacePlacement, ...] = (
         interaction_stage="focus_to_perspective_markdown",
     ),
     WorkspacePlacement(
-        capability_id="create_content",
+        capability_id="create_wechat_article",
         shell_section="create",
         primary_region="workspace",
         secondary_region="global_library",
-        interaction_stage="quote_libraries_to_publishable_content",
+        interaction_stage="quote_libraries_to_wechat_article",
     ),
     WorkspacePlacement(
         capability_id="manage_libraries",
@@ -249,6 +267,13 @@ WORKSPACE_PLACEMENTS: tuple[WorkspacePlacement, ...] = (
         primary_region="workspace",
         secondary_region="global_library",
         interaction_stage="configure_and_test",
+    ),
+    WorkspacePlacement(
+        capability_id="read_documentation",
+        shell_section="docs",
+        primary_region="workspace",
+        secondary_region="documentation",
+        interaction_stage="read_help_and_troubleshoot",
     ),
 )
 

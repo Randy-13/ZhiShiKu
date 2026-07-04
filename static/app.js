@@ -272,7 +272,7 @@ function navigateToWorkspaceEntry(entryId, fallbackRoute) {
 
 function shellSectionFromPath() {
   const path = window.location.pathname.replace(/^\/+/, "") || "collect";
-  if (["collect", "learn", "mine", "create", "settings"].includes(path)) return path;
+  if (["collect", "learn", "mine", "create", "library", "settings", "docs"].includes(path)) return path;
   return "collect";
 }
 

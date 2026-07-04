@@ -27,7 +27,12 @@ def test_app_rail_uses_product_level_navigation_not_input_types():
     labels = [item.select_one("span").get_text(strip=True) for item in soup.select(".app-rail nav:first-of-type .app-nav-item")]
 
     assert labels == [section.nav_label for section in PRIMARY_SECTIONS]
-    assert not any(label in {"截图", "文档", "音视频", "链接"} for label in labels)
+    input_type_labels = {
+        item["data-shell-section"]: item.select_one("span").get_text(strip=True)
+        for item in soup.select(".app-rail nav:first-of-type .app-nav-item")
+    }
+    assert not any(label in {"截图", "音视频", "链接"} for label in input_type_labels.values())
+    assert "document" not in input_type_labels
 
 
 def test_existing_business_control_ids_are_preserved():
@@ -67,8 +72,9 @@ def test_app_rail_has_no_duplicate_object_or_settings_entries():
 
     assert soup.select_one(".app-rail .secondary-nav") is None
     assert len(soup.select(".app-rail .app-nav-item[href='/settings']")) == 1
-    assert soup.select_one(".app-rail .app-nav-item[href='/library']") is None
-    assert all(link.get_text(" ", strip=True) not in {"知识库", "知识网络", "知识问答"} for link in soup.select(".app-rail .app-nav-item"))
+    assert len(soup.select(".app-rail .app-nav-item[href='/library']")) == 1
+    assert len(soup.select(".app-rail .app-nav-item[href='/docs']")) == 1
+    assert all(link.get_text(" ", strip=True) not in {"知识网络", "知识问答"} for link in soup.select(".app-rail .app-nav-item"))
 
 
 def test_right_sidebar_is_global_three_library_panel():
@@ -94,7 +100,8 @@ def test_primary_shell_nav_uses_mature_routes():
     links = {item["data-shell-section"]: item["href"] for item in soup.select(".app-rail nav:first-of-type [data-shell-section]")}
 
     assert links == {section.id: section.route for section in PRIMARY_SECTIONS}
-    assert "library" not in links
+    assert links["library"] == "/library"
+    assert links["docs"] == "/docs"
 
 
 def test_app_script_activates_shell_section_from_route():
@@ -105,7 +112,7 @@ def test_app_script_activates_shell_section_from_route():
     assert "document.body.dataset.activeShellSection = section" in script
     assert "switchPrimaryMode(\"mining\")" in script
     assert "setActiveGlobalLibrary" in script
-    assert '["collect", "learn", "mine", "create", "settings"]' in script
+    assert '["collect", "learn", "mine", "create", "library", "settings", "docs"]' in script
 
 
 def test_create_workspace_integrates_article_workflow_entry():
@@ -113,12 +120,10 @@ def test_create_workspace_integrates_article_workflow_entry():
     create_workspace = soup.find(id="createWorkspace")
 
     assert create_workspace is not None
-    assert [card.get_text(" ", strip=True).split()[0] for card in create_workspace.select(".creation-type-card")] == [
-        "文章",
-        "小红书图文",
-        "短视频脚本",
-        "长视频脚本",
-    ]
+    assert create_workspace.get("aria-label") == "公众号文章创作"
+    assert "小红书图文" not in create_workspace.get_text(" ", strip=True)
+    assert "短视频脚本" not in create_workspace.get_text(" ", strip=True)
+    assert "长视频脚本" not in create_workspace.get_text(" ", strip=True)
     assert create_workspace.find(id="openLegacyWriterTool") is not None
 
 

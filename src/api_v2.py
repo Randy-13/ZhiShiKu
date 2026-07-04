@@ -63,6 +63,15 @@ jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
 
 SCREENSHOT_POLISH_TIMEOUT_SECONDS = 45.0
+LEARN_REFINE_MAX_SOURCE_CHARS = 7000
+LEARN_REFINE_MAX_TOTAL_CHARS = 12000
+LEARN_REFINE_FAST_TIMEOUT_SECONDS = 75.0
+MINE_EXPAND_QUERY_LIMIT = 8
+MINE_EXPAND_SOURCE_LIMIT = 4
+MINE_EXPAND_SEARCH_TIMEOUT_SECONDS = 12.0
+MINE_EXPAND_READER_TIMEOUT_SECONDS = 18.0
+MINE_EXPAND_MAX_SOURCE_CHARS = 5000
+MINE_AGENT_REACH_VERIFIED: bool | None = None
 
 
 class CollectTextRequest(BaseModel):
@@ -167,6 +176,42 @@ class MineInterpretRequest(BaseModel):
     perspective: MinePerspectiveProfile
 
 
+class MineExpandInterpretRequest(BaseModel):
+    sources: list[LibrarySourceRequest]
+    perspective: MinePerspectiveProfile
+    current_markdown: str
+    expansion_instruction: str = ""
+    official_scope: str = "official_first"
+
+
+class MineExternalSource(BaseModel):
+    library: str = "external"
+    title: str = ""
+    relative_path: str = ""
+    url: str = ""
+    authority: str = "supplemental"
+    query: str = ""
+    text: str = ""
+    snippet: str = ""
+    read_status: str = "readable"
+
+
+class MineExpandPreviewRequest(BaseModel):
+    sources: list[LibrarySourceRequest]
+    perspective: MinePerspectiveProfile
+    current_markdown: str
+    expansion_instruction: str = ""
+    official_scope: str = "official_first"
+
+
+class MineExpandMergeRequest(BaseModel):
+    sources: list[LibrarySourceRequest]
+    perspective: MinePerspectiveProfile
+    current_markdown: str
+    external_sources: list[MineExternalSource]
+    expansion_instruction: str = ""
+
+
 class MineSavePerspectiveRequest(BaseModel):
     sources: list[LibrarySourceRequest]
     perspective: MinePerspectiveProfile
@@ -212,7 +257,7 @@ class CreateWriterFormatRequest(BaseModel):
 
 class CreateWriterPublishPreflightRequest(BaseModel):
     title: str = ""
-    author: str = "Bobo"
+    author: str = ""
     digest: str | None = None
     cover_path: str | None = None
 
@@ -274,7 +319,7 @@ class WriterImageItemJobRequest(BaseModel):
 class WriterPublishPreflightJobRequest(BaseModel):
     project_id: str
     title: str = ""
-    author: str = "Bobo"
+    author: str = ""
     digest: str | None = None
     cover_path: str | None = None
 
@@ -1100,7 +1145,8 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest, 
     try:
         context = _request_context(http_request)
         sources = [_read_raw_material_file(path, context=context) for path in request.raw_paths]
-        combined_raw_text = _combine_raw_material_sources(sources)
+        prompt_sources = _compact_learn_refine_sources(sources)
+        combined_raw_text = _combine_raw_material_sources(prompt_sources)
         if not combined_raw_text.strip():
             return success_payload(data={"ok": False, "error": "选中的原料文件没有可学习文本"})
 
@@ -1112,7 +1158,10 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest, 
             return success_payload(data={"ok": True, "item": existing, "skipped": True})
 
         _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
-        knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(combined_raw_text)
+        knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
+            combined_raw_text,
+            setting=_learn_refine_llm_setting(),
+        )
         _ = learned_raw_text
         if request.title.strip():
             knowledge.title = request.title.strip()
@@ -1125,8 +1174,12 @@ def learn_refine_knowledge_cluster(request: LearnRefineKnowledgeClusterRequest, 
                 "cluster_count": len(knowledge.clusters),
                 "markdown": markdown,
                 "existing_item": existing,
+                "input_compacted": any(bool(item.get("compacted")) for item in prompt_sources),
+                "input_char_count": len(combined_raw_text),
             }
         )
+    except RuntimeError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
     except (OSError, ValueError, KeyError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -1204,7 +1257,8 @@ def mine_delete_perspective(profile_id: str, request: Request) -> dict[str, obje
         return success_payload(data={"ok": False, "error": "预设视角不能删除，请先复制为自定义视角"})
     try:
         context = _request_context(request)
-        deleted = storage.delete_perspective_profile(profile_id, owner_user_id=_owner_meta(context).get("owner_user_id") or None)
+        owner_user_id, _ = _perspective_profile_scope(context)
+        deleted = storage.delete_perspective_profile(profile_id, owner_user_id=owner_user_id)
     except KeyError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
     return success_payload(data={"ok": True, "item": deleted, "items": _list_perspective_profiles(context=context)})
@@ -1229,6 +1283,143 @@ def mine_interpret(request: MineInterpretRequest, http_request: Request) -> dict
                 "perspective": request.perspective.model_dump(),
             }
         )
+    except RuntimeError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+    except (OSError, ValueError, KeyError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/mine/expand-interpretation")
+def mine_expand_interpretation(request: MineExpandInterpretRequest, http_request: Request) -> dict[str, object]:
+    if not request.sources:
+        return success_payload(data={"ok": False, "error": "请先从右侧原文库勾选解读来源"})
+    current_markdown = request.current_markdown.strip()
+    if not current_markdown:
+        return success_payload(data={"ok": False, "error": "请先生成或填写视角解读草稿"})
+    try:
+        context = _request_context(http_request)
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
+        try:
+            external_sources = _collect_perspective_expansion_sources(
+                current_markdown=current_markdown,
+                perspective=request.perspective,
+                sources=sources,
+                expansion_instruction=request.expansion_instruction,
+                official_scope=request.official_scope,
+            )
+            search_error = ""
+        except Exception as exc:  # External search should not destroy the draft.
+            logger.warning("Perspective expansion search failed: %s", exc)
+            external_sources = []
+            search_error = str(exc)
+        if not external_sources:
+            markdown = current_markdown
+            return success_payload(
+                data={
+                    "ok": True,
+                    "markdown": markdown,
+                    "source_files": sources,
+                    "external_sources": [],
+                    "title": _markdown_title(current_markdown) or f"{request.perspective.name}拓展解读",
+                    "perspective": request.perspective.model_dump(),
+                    "warning": search_error or "官方来源不足，已保留当前草稿并追加检索说明。",
+                }
+            )
+        _consume_daily_quota(context, "llm_generate_daily", "AI 生成")
+        result = deepseek_client.expand_perspective_interpretation(
+            material_blocks=sources,
+            perspective=request.perspective.model_dump(),
+            current_markdown=current_markdown,
+            external_sources=external_sources,
+            expansion_instruction=request.expansion_instruction,
+        )
+        markdown = _render_perspective_markdown(result, request.perspective, sources, external_sources=external_sources)
+        return success_payload(
+            data={
+                "ok": True,
+                "markdown": markdown,
+                "source_files": [*sources, *external_sources],
+                "external_sources": external_sources,
+                "title": result.title,
+                "perspective": request.perspective.model_dump(),
+            }
+        )
+    except RuntimeError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+    except (OSError, ValueError, KeyError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/mine/expand-preview")
+def mine_expand_preview(request: MineExpandPreviewRequest, http_request: Request) -> dict[str, object]:
+    if not request.sources:
+        return success_payload(data={"ok": False, "error": "Please select original sources before expanding."})
+    current_markdown = request.current_markdown.strip()
+    if not current_markdown:
+        return success_payload(data={"ok": False, "error": "Please generate or write a perspective draft first."})
+    try:
+        context = _request_context(http_request)
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
+        external_sources, search_report = _collect_perspective_expansion_sources_with_report(
+            current_markdown=current_markdown,
+            perspective=request.perspective,
+            sources=sources,
+            expansion_instruction=request.expansion_instruction,
+            official_scope=request.official_scope,
+        )
+        return success_payload(
+            data={
+                "ok": True,
+                "title": _markdown_title(current_markdown) or f"{request.perspective.name} expansion preview",
+                "source_files": sources,
+                "external_sources": external_sources,
+                "search_report": search_report,
+                "perspective": request.perspective.model_dump(),
+                "warning": "" if external_sources else "No readable official or authoritative external source was found.",
+            }
+        )
+    except RuntimeError as exc:
+        logger.warning("Perspective expansion preview search failed: %s", exc)
+        return success_payload(
+            data={
+                "ok": True,
+                "title": _markdown_title(current_markdown) or f"{request.perspective.name} expansion preview",
+                "source_files": sources if "sources" in locals() else [],
+                "external_sources": [],
+                "search_report": {"queries": [], "errors": [str(exc)], "candidates": 0, "readable": 0},
+                "perspective": request.perspective.model_dump(),
+                "warning": str(exc) or "No readable official or authoritative external source was found.",
+            }
+        )
+    except (OSError, ValueError, KeyError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.post("/mine/expand-merge")
+def mine_expand_merge(request: MineExpandMergeRequest, http_request: Request) -> dict[str, object]:
+    if not request.sources:
+        return success_payload(data={"ok": False, "error": "Please select original sources before expanding."})
+    current_markdown = request.current_markdown.strip()
+    if not current_markdown:
+        return success_payload(data={"ok": False, "error": "Please generate or write a perspective draft first."})
+    external_sources = [_normalize_external_source(item.model_dump()) for item in request.external_sources]
+    external_sources = [item for item in external_sources if item.get("text", "").strip()]
+    if not external_sources:
+        return success_payload(data={"ok": False, "error": "Please select at least one readable external source."})
+    try:
+        context = _request_context(http_request)
+        sources = [_read_mine_source(item, context=context) for item in request.sources]
+        return _merge_perspective_expansion(
+            context=context,
+            sources=sources,
+            perspective=request.perspective,
+            current_markdown=current_markdown,
+            external_sources=external_sources,
+            expansion_instruction=request.expansion_instruction,
+            search_report={"queries": [], "errors": [], "candidates": len(external_sources), "readable": len(external_sources)},
+        )
+    except RuntimeError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
     except (OSError, ValueError, KeyError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -1270,6 +1461,8 @@ def mine_save_perspective_file(request: MineSavePerspectiveRequest, http_request
                 },
             }
         )
+    except RuntimeError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
     except (OSError, ValueError, KeyError) as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
@@ -1431,7 +1624,7 @@ def create_writer_publish_preflight(project_id: str, request: CreateWriterPublis
     result = writer_tools.publish_preflight(
         workspace,
         title,
-        author=request.author or "Bobo",
+        author=request.author,
         digest=request.digest,
         cover_path=request.cover_path,
         account_key=account_key,
@@ -1455,7 +1648,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
     preflight = writer_tools.publish_preflight(
         workspace,
         title,
-        author=request.author or "Bobo",
+        author=request.author,
         digest=request.digest,
         cover_path=request.cover_path,
         account_key=account_key,
@@ -1473,7 +1666,7 @@ def create_writer_publish(project_id: str, request: CreateWriterPublishPreflight
     result = writer_tools.publish_draft(
         workspace,
         title,
-        author=request.author or "Bobo",
+        author=request.author,
         digest=request.digest,
         cover_path=request.cover_path,
         account_key=account_key,
@@ -1613,7 +1806,7 @@ def _consume_daily_quota_in_conn(conn, context: dict[str, object], key: str, lab
 def _consume_job_quota(conn, context: dict[str, object], kind: str, payload: object | None = None) -> None:
     if kind == "learn_refine":
         if isinstance(payload, dict):
-            _request, _sources, _combined_raw_text, _source_hash, existing = _learn_refine_job_inputs(payload, context)
+            _request, _sources, _prompt_sources, _combined_raw_text, _source_hash, existing = _learn_refine_job_inputs(payload, context)
             if existing and existing.get("markdown_path") and existing.get("status") == "ready":
                 return
         _consume_daily_quota_in_conn(conn, context, "llm_generate_daily", "AI 生成")
@@ -1751,7 +1944,7 @@ def _execute_job(job: dict[str, object], context: dict[str, object]) -> dict[str
 def _learn_refine_job_inputs(
     payload: dict[str, object],
     context: dict[str, object],
-) -> tuple[LearnRefineKnowledgeClusterRequest, list[dict[str, str]], str, str, dict[str, object] | None]:
+) -> tuple[LearnRefineKnowledgeClusterRequest, list[dict[str, str]], list[dict[str, str]], str, str, dict[str, object] | None]:
     request = LearnRefineKnowledgeClusterRequest.model_validate(payload)
     if not request.raw_paths:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先从原文库选择待处理文件")
@@ -1759,19 +1952,23 @@ def _learn_refine_job_inputs(
         sources = [_read_raw_material_file(path, context=context) for path in request.raw_paths]
     except (OSError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    combined_raw_text = _combine_raw_material_sources(sources)
+    prompt_sources = _compact_learn_refine_sources(sources)
+    combined_raw_text = _combine_raw_material_sources(prompt_sources)
     if not combined_raw_text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected original file has no learnable text.")
     source_hash = _raw_sources_hash(sources)
     existing = storage.get_knowledge_by_hash(source_hash)
-    return request, sources, combined_raw_text, source_hash, existing
+    return request, sources, prompt_sources, combined_raw_text, source_hash, existing
 
 
 def _execute_learn_refine_job(payload: dict[str, object], context: dict[str, object]) -> dict[str, object]:
-    request, sources, combined_raw_text, source_hash, existing = _learn_refine_job_inputs(payload, context)
+    request, sources, prompt_sources, combined_raw_text, source_hash, existing = _learn_refine_job_inputs(payload, context)
     if existing and existing.get("markdown_path") and existing.get("status") == "ready":
         return {"ok": True, "item": existing, "skipped": True}
-    knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(combined_raw_text)
+    knowledge, learned_raw_text = deepseek_client.generate_knowledge_from_text(
+        combined_raw_text,
+        setting=_learn_refine_llm_setting(),
+    )
     _ = learned_raw_text
     if request.title.strip():
         knowledge.title = request.title.strip()
@@ -1783,6 +1980,8 @@ def _execute_learn_refine_job(payload: dict[str, object], context: dict[str, obj
         "cluster_count": len(knowledge.clusters),
         "markdown": markdown,
         "existing_item": existing,
+        "input_compacted": any(bool(item.get("compacted")) for item in prompt_sources),
+        "input_char_count": len(combined_raw_text),
     }
 
 
@@ -1927,7 +2126,7 @@ def _execute_publish_preflight_job(payload: dict[str, object], context: dict[str
     result = writer_tools.publish_preflight(
         workspace,
         str(title),
-        author=request.author or "Bobo",
+        author=request.author,
         digest=request.digest,
         cover_path=request.cover_path,
         account_key=account_key,
@@ -2589,16 +2788,18 @@ def _list_perspective_profiles(context: dict[str, object] | None = None) -> list
         profile["origin"] = "preset"
         profile["readonly"] = True
         defaults.append(profile)
-    owner_user_id = None
-    include_ownerless = True
-    if context is not None and context.get("deploymentMode") == "cloud":
-        user = context.get("user") or {}
-        if isinstance(user, dict) and user.get("role") != "admin":
-            owner_user_id = str(user.get("id") or "")
-            include_ownerless = False
+    owner_user_id, include_ownerless = _perspective_profile_scope(context)
     custom = storage.list_perspective_profiles(owner_user_id=owner_user_id, include_ownerless=include_ownerless)
     custom_ids = {item.get("id") for item in custom}
     return [*custom, *[item for item in defaults if item.get("id") not in custom_ids]]
+
+
+def _perspective_profile_scope(context: dict[str, object] | None = None) -> tuple[str | None, bool]:
+    if context is not None and context.get("deploymentMode") == "cloud":
+        user = context.get("user") or {}
+        if isinstance(user, dict) and user.get("role") != "admin":
+            return str(user.get("id") or ""), False
+    return None, True
 
 
 def _read_mine_source(source: LibrarySourceRequest, context: dict[str, object] | None = None) -> dict[str, str]:
@@ -2615,6 +2816,514 @@ def _read_mine_source(source: LibrarySourceRequest, context: dict[str, object] |
         "relative_path": storage.storage_relative(path),
         "text": text,
     }
+
+
+def _collect_perspective_expansion_sources(
+    current_markdown: str,
+    perspective: MinePerspectiveProfile,
+    sources: list[dict[str, str]],
+    expansion_instruction: str = "",
+    official_scope: str = "official_first",
+) -> list[dict[str, str]]:
+    external_sources, _ = _collect_perspective_expansion_sources_with_report(
+        current_markdown=current_markdown,
+        perspective=perspective,
+        sources=sources,
+        expansion_instruction=expansion_instruction,
+        official_scope=official_scope,
+    )
+    return external_sources
+
+
+def _collect_perspective_expansion_sources_with_report(
+    current_markdown: str,
+    perspective: MinePerspectiveProfile,
+    sources: list[dict[str, str]],
+    expansion_instruction: str = "",
+    official_scope: str = "official_first",
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    report: dict[str, object] = {"queries": [], "errors": [], "candidates": 0, "readable": 0}
+    _verify_agent_reach_environment()
+    queries = _perspective_expansion_queries(current_markdown, perspective, sources, expansion_instruction=expansion_instruction)
+    report["queries"] = queries
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for query in queries:
+        for candidate in _smart_search(query, report=report):
+            url = candidate.get("url", "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidate["query"] = query
+            candidate["authority"] = _source_authority(url, official_scope=official_scope)
+            candidates.append(candidate)
+    report["candidates"] = len(candidates)
+    candidates.sort(key=lambda item: _authority_rank(item.get("authority", "")))
+    external_sources: list[dict[str, str]] = []
+    for candidate in candidates:
+        if len(external_sources) >= MINE_EXPAND_SOURCE_LIMIT:
+            break
+        try:
+            text = _read_external_page(candidate["url"])
+        except Exception as exc:
+            logger.info("Perspective expansion could not read %s: %s", candidate["url"], exc)
+            _add_search_report_error(report, f"read {candidate['url']}: {exc}")
+            continue
+        if not text.strip():
+            _add_search_report_error(report, f"read {candidate['url']}: empty response")
+            continue
+        external_sources.append(_normalize_external_source({**candidate, "text": text}))
+    report["readable"] = len(external_sources)
+    return external_sources, report
+
+
+def _smart_search(query: str, report: dict[str, object] | None = None) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    seed_candidates = _official_seed_candidates(query)
+    results.extend(seed_candidates)
+    if len(seed_candidates) >= 3:
+        return seed_candidates[:12]
+    for provider_name, provider in (("jina", _jina_search), ("duckduckgo", _duckduckgo_search)):
+        try:
+            results.extend(provider(query))
+        except Exception as exc:
+            logger.info("Perspective expansion %s search failed for %r: %s", provider_name, query[:120], exc)
+            if report is not None:
+                _add_search_report_error(report, f"{provider_name}: {exc}")
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in results:
+        url = item.get("url", "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(item)
+    return deduped[:12]
+
+
+def _add_search_report_error(report: dict[str, object], message: str) -> None:
+    errors = report.setdefault("errors", [])
+    if isinstance(errors, list) and message not in errors:
+        errors.append(message)
+
+
+def _normalize_external_source(item: dict[str, object]) -> dict[str, str]:
+    url = str(item.get("url") or item.get("relative_path") or "").strip()
+    text = str(item.get("text") or "").strip()
+    title = str(item.get("title") or url).strip()
+    authority = str(item.get("authority") or "supplemental").strip()
+    query = str(item.get("query") or "").strip()
+    snippet = str(item.get("snippet") or "").strip()
+    if not snippet:
+        snippet = re.sub(r"\s+", " ", text)[:420]
+    return {
+        "library": "external",
+        "title": title,
+        "relative_path": url,
+        "url": url,
+        "authority": authority,
+        "query": query,
+        "text": text[:MINE_EXPAND_MAX_SOURCE_CHARS],
+        "snippet": snippet,
+        "read_status": "readable" if text else "unreadable",
+    }
+
+
+def _official_seed_candidates(query: str) -> list[dict[str, str]]:
+    lowered = query.lower()
+    candidates: list[dict[str, str]] = []
+    candidates.extend(_domestic_official_seed_candidates(query))
+    if any(term in lowered for term in ("employment", "jobs", "payroll", "wage", "labor", "unemployment", "薪资", "就业", "失业")):
+        candidates.append(
+            {
+                "title": "BLS Employment Situation Summary",
+                "url": "https://www.bls.gov/news.release/empsit.nr0.htm",
+            }
+        )
+    if any(term in lowered for term in ("fed", "federal reserve", "fomc", "rate", "interest", "projection", "利率", "美联储", "点阵图")):
+        candidates.extend(
+            [
+                {
+                    "title": "Federal Reserve FOMC Projections",
+                    "url": "https://www.federalreserve.gov/monetarypolicy/fomcprojtabl20260617.htm",
+                },
+                {
+                    "title": "Federal Reserve FOMC Statement",
+                    "url": "https://www.federalreserve.gov/monetarypolicy/fomc.htm",
+                },
+            ]
+        )
+    return candidates
+
+
+def _domestic_official_seed_candidates(query: str) -> list[dict[str, str]]:
+    if not _contains_cjk(query):
+        return []
+    lowered = query.lower()
+    candidates: list[dict[str, str]] = [
+        {"title": "中国政府网政策文件库", "url": "https://www.gov.cn/zhengce/"},
+        {"title": "中国政府网政策解读", "url": "https://www.gov.cn/zhengce/jiedu/"},
+    ]
+    if any(term in query for term in ("统计", "数据", "指数", "PMI", "采购经理", "CPI", "PPI", "GDP", "就业", "失业", "人口")):
+        candidates.extend(
+            [
+                {"title": "国家统计局最新发布", "url": "https://www.stats.gov.cn/sj/zxfb/"},
+                {"title": "国家统计局数据", "url": "https://data.stats.gov.cn/"},
+            ]
+        )
+    if any(term in query for term in ("央行", "人民银行", "货币", "利率", "金融", "信贷", "社融", "汇率")):
+        candidates.extend(
+            [
+                {"title": "中国人民银行新闻发布", "url": "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"},
+                {"title": "中国人民银行货币政策", "url": "https://www.pbc.gov.cn/zhengcehuobisi/125207/125227/125957/index.html"},
+            ]
+        )
+    if any(term in query for term in ("发改委", "发展改革", "投资", "价格", "能源", "基础设施", "十五五")):
+        candidates.append({"title": "国家发展改革委新闻发布", "url": "https://www.ndrc.gov.cn/xwdt/xwfb/"})
+    if any(term in query for term in ("商务", "外贸", "消费", "进出口", "服务贸易", "电商")):
+        candidates.append({"title": "商务部政策发布", "url": "https://www.mofcom.gov.cn/zwgk/zcfb/"})
+    if any(term in query for term in ("工信", "工业", "制造", "人工智能", "算力", "通信", "芯片")):
+        candidates.append({"title": "工业和信息化部政策文件", "url": "https://www.miit.gov.cn/zwgk/zcwj/"})
+    if any(term in query for term in ("财政", "税收", "预算", "债务", "政府采购")):
+        candidates.append({"title": "财政部政策发布", "url": "https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/"})
+    if any(term in query for term in ("交通", "运输", "物流", "都市圈", "铁路", "公路", "民航")):
+        candidates.append({"title": "交通运输部政策文件", "url": "https://www.mot.gov.cn/zhengcejiedu/"})
+    if any(term in query for term in ("证监", "股票", "证券", "上市", "基金", "资本市场")):
+        candidates.append({"title": "中国证监会新闻发布", "url": "https://www.csrc.gov.cn/csrc/c100028/common_list.shtml"})
+    if any(term in lowered for term in ("xinhua",)) or any(term in query for term in ("新华社", "权威媒体", "新闻通稿")):
+        candidates.append({"title": "新华社权威发布", "url": "https://www.news.cn/politics/"})
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        url = item["url"]
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(item)
+    return deduped
+
+
+def _verify_agent_reach_environment() -> bool:
+    global MINE_AGENT_REACH_VERIFIED
+    if MINE_AGENT_REACH_VERIFIED is not None:
+        return MINE_AGENT_REACH_VERIFIED
+    command = shutil.which("agent-reach")
+    if not command:
+        logger.info("agent-reach CLI not found; using API search directly for perspective expansion")
+        MINE_AGENT_REACH_VERIFIED = False
+        return False
+    try:
+        subprocess.run(
+            [command, "doctor", "--json"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info("agent-reach doctor unavailable; using API search directly: %s", exc)
+        MINE_AGENT_REACH_VERIFIED = False
+        return False
+    MINE_AGENT_REACH_VERIFIED = True
+    return True
+
+
+def _perspective_expansion_queries(
+    current_markdown: str,
+    perspective: MinePerspectiveProfile,
+    sources: list[dict[str, str]],
+    expansion_instruction: str = "",
+) -> list[str]:
+    title = _markdown_title(current_markdown) or "视角解读"
+    source_titles = " ".join(source.get("title", "") for source in sources[:3])
+    source_preview_words: list[str] = []
+    for source in sources[:2]:
+        source_preview_words.extend(_plain_words(source.get("text", ""))[:12])
+    source_preview = " ".join(source_preview_words)
+    base = " ".join(
+        part
+        for part in [
+            title,
+            perspective.name,
+            expansion_instruction,
+            perspective.positioning or perspective.role or perspective.target_subject,
+            perspective.core_goal or perspective.purpose,
+            source_titles,
+            source_preview,
+        ]
+        if part
+    )
+    compact = " ".join(_plain_words(base)[:18])
+    domestic_terms = [
+        "site:gov.cn 官方 原文 数据 报告",
+        "site:stats.gov.cn OR site:gov.cn 统计局 数据 发布",
+        "site:pbc.gov.cn OR site:gov.cn 央行 政策 发布",
+        "site:ndrc.gov.cn OR site:gov.cn 政策 文件 解读",
+        "中国 官方 原文 数据 报告",
+    ]
+    global_terms = [
+        "official source data report",
+        "government central bank regulator official",
+        "official announcement primary source",
+    ]
+    official_terms = [*domestic_terms, *global_terms] if _contains_cjk(base) else [*global_terms, *domestic_terms[:2]]
+    queries = [f"{compact} {term}".strip() for term in official_terms if compact]
+    if not queries:
+        queries = [f"{perspective.name} 官方 数据 报告", f"{perspective.name} official report"]
+    deduped: list[str] = []
+    for query in queries:
+        normalized = re.sub(r"\s+", " ", query).strip()
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped[:MINE_EXPAND_QUERY_LIMIT]
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+
+def _plain_words(text: str) -> list[str]:
+    cleaned = re.sub(r"https?://\S+", " ", text)
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", cleaned, flags=re.UNICODE)
+    return [item for item in cleaned.split() if len(item) > 1]
+
+
+def _jina_search(query: str) -> list[dict[str, str]]:
+    url = "https://s.jina.ai/?q=" + urllib.parse.quote(query)
+    text = _http_text(url, timeout=MINE_EXPAND_SEARCH_TIMEOUT_SECONDS)
+    results: list[dict[str, str]] = []
+    for title, link in re.findall(r"\[([^\]]{2,180})\]\((https?://[^)]+)\)", text):
+        normalized = _clean_external_url(link)
+        if normalized:
+            results.append({"title": title.strip(), "url": normalized})
+    for match in re.findall(r"(?im)^\s*URL:\s*(https?://\S+)", text):
+        normalized = _clean_external_url(match)
+        if normalized:
+            results.append({"title": normalized, "url": normalized})
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in results:
+        if item["url"] in seen:
+            continue
+        seen.add(item["url"])
+        deduped.append(item)
+    return deduped[:8]
+
+
+def _duckduckgo_search(query: str) -> list[dict[str, str]]:
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+    text = _http_text(url, timeout=MINE_EXPAND_SEARCH_TIMEOUT_SECONDS)
+    results: list[dict[str, str]] = []
+    for href, title in re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text, flags=re.I | re.S):
+        cleaned_title = re.sub(r"<[^>]+>", "", html.unescape(title)).strip()
+        normalized = _clean_external_url(_unwrap_duckduckgo_url(href))
+        if normalized:
+            results.append({"title": cleaned_title or normalized, "url": normalized})
+    return results[:8]
+
+
+def _unwrap_duckduckgo_url(url: str) -> str:
+    cleaned = html.unescape(url)
+    parsed = urllib.parse.urlparse(cleaned)
+    query_values = urllib.parse.parse_qs(parsed.query)
+    if "uddg" in query_values and query_values["uddg"]:
+        return query_values["uddg"][0]
+    if cleaned.startswith("//"):
+        return "https:" + cleaned
+    return cleaned
+
+
+def _read_external_page(url: str) -> str:
+    api_text = _official_api_text(url)
+    if api_text:
+        return api_text
+    try:
+        return _read_jina_page(url)
+    except Exception as exc:
+        logger.info("Jina reader failed for %s: %s", url, exc)
+    return _read_direct_page(url)
+
+
+def _official_api_text(url: str) -> str:
+    domain = urllib.parse.urlparse(url).netloc.lower()
+    path = urllib.parse.urlparse(url).path.lower()
+    if "bls.gov" in domain and "empsit" in path:
+        series = {
+            "CES0000000001": "Total nonfarm payroll employment, all employees",
+            "CES0500000003": "Average hourly earnings of all private employees",
+            "LNS14000000": "Unemployment rate",
+        }
+        blocks = ["BLS public API data for the Employment Situation release."]
+        for series_id, label in series.items():
+            api_url = f"https://api.bls.gov/publicAPI/v2/timeseries/data/{series_id}?startyear=2026&endyear=2026"
+            try:
+                payload = json.loads(_http_text(api_url, timeout=MINE_EXPAND_READER_TIMEOUT_SECONDS))
+            except Exception as exc:
+                logger.info("BLS public API failed for %s: %s", series_id, exc)
+                continue
+            values = []
+            for series_item in (payload.get("Results") or {}).get("series", []):
+                for row in series_item.get("data", [])[:12]:
+                    values.append(
+                        f"{row.get('year')} {row.get('periodName')} ({row.get('period')}): {row.get('value')}"
+                    )
+            if values:
+                blocks.append(f"{label} ({series_id}):\n" + "\n".join(values))
+        return "\n\n".join(blocks) if len(blocks) > 1 else ""
+    return ""
+
+
+def _read_jina_page(url: str) -> str:
+    reader_url = "https://r.jina.ai/" + url
+    text = _http_text(reader_url, timeout=MINE_EXPAND_READER_TIMEOUT_SECONDS)
+    text = re.sub(r"(?is)\n\s*Images?:.*", "", text).strip()
+    return text
+
+
+def _read_direct_page(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 FigureLearning/1.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=MINE_EXPAND_READER_TIMEOUT_SECONDS) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    soup = BeautifulSoup(raw, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+    text = soup.get_text("\n", strip=True)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _http_text(url: str, timeout: float) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "FigureLearning/1.0 api-smart-search",
+            "Accept": "text/plain, text/markdown, */*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _clean_external_url(url: str) -> str:
+    cleaned = html.unescape(url).strip().rstrip(").,;")
+    if not cleaned.startswith(("http://", "https://")):
+        return ""
+    parsed = urllib.parse.urlparse(cleaned)
+    if not parsed.netloc or "jina.ai" in parsed.netloc.lower():
+        return ""
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
+
+
+def _source_authority(url: str, official_scope: str = "official_first") -> str:
+    domain = urllib.parse.urlparse(url).netloc.lower()
+    official_markers = (
+        ".gov",
+        ".mil",
+        ".gov.cn",
+        "gov.cn",
+        "federalreserve.gov",
+        "bls.gov",
+        "bea.gov",
+        "treasury.gov",
+        "sec.gov",
+        "ecb.europa.eu",
+        "imf.org",
+        "worldbank.org",
+        "bis.org",
+        "stats.gov.cn",
+        "pbc.gov.cn",
+        "ndrc.gov.cn",
+        "mofcom.gov.cn",
+        "miit.gov.cn",
+        "mof.gov.cn",
+        "mot.gov.cn",
+        "csrc.gov.cn",
+        "safe.gov.cn",
+        "customs.gov.cn",
+        "samr.gov.cn",
+        "mohrss.gov.cn",
+        "mee.gov.cn",
+        "nhc.gov.cn",
+        "moe.gov.cn",
+        "nea.gov.cn",
+        "sasac.gov.cn",
+        "stats.gov",
+        "census.gov",
+    )
+    authority_markers = (
+        "news.cn",
+        "xinhuanet.com",
+        "people.com.cn",
+        "china.com.cn",
+        "ce.cn",
+        "cnstock.com",
+        "cs.com.cn",
+        "stcn.com",
+        "yicai.com",
+        "reuters.com",
+        "apnews.com",
+        "bloomberg.com",
+        "ft.com",
+        "wsj.com",
+        "fitchratings.com",
+        "moodys.com",
+        "spglobal.com",
+    )
+    if any(marker in domain for marker in official_markers):
+        return "official"
+    if official_scope != "strict_official" and any(marker in domain for marker in authority_markers):
+        return "authoritative_supplement"
+    return "supplemental"
+
+
+def _authority_rank(authority: str) -> int:
+    return {"official": 0, "authoritative_supplement": 1, "supplemental": 2}.get(authority, 3)
+
+
+def _merge_perspective_expansion(
+    context: dict[str, object],
+    sources: list[dict[str, str]],
+    perspective: MinePerspectiveProfile,
+    current_markdown: str,
+    external_sources: list[dict[str, str]],
+    expansion_instruction: str = "",
+    search_report: dict[str, object] | None = None,
+) -> dict[str, object]:
+    _consume_daily_quota(context, "llm_generate_daily", "AI 鐢熸垚")
+    result = deepseek_client.expand_perspective_interpretation(
+        material_blocks=sources,
+        perspective=perspective.model_dump(),
+        current_markdown=current_markdown,
+        external_sources=external_sources,
+        expansion_instruction=expansion_instruction,
+    )
+    markdown = _render_perspective_markdown(result, perspective, sources, external_sources=external_sources)
+    return success_payload(
+        data={
+            "ok": True,
+            "markdown": markdown,
+            "source_files": [*sources, *external_sources],
+            "external_sources": external_sources,
+            "search_report": search_report or {},
+            "title": result.title,
+            "perspective": perspective.model_dump(),
+        }
+    )
+
+
+def _append_perspective_expansion_status(current_markdown: str, search_error: str = "") -> str:
+    status = "未检索到足够可读的官方或权威外部来源，已保留当前视角解读草稿。"
+    if search_error:
+        status += f"\n\n- 检索错误：{search_error}"
+    status += "\n- 建议：稍后重试，或先补充更明确的来源标题、机构名、事件名后再拓展。"
+    return current_markdown.rstrip() + "\n\n## 拓展来源状态\n\n" + status + "\n"
 
 
 def _read_create_source(source: LibrarySourceRequest, context: dict[str, object] | None = None) -> dict[str, str]:
@@ -2649,7 +3358,13 @@ def _writer_markdown_files(sources: list[dict[str, str]]) -> list[tuple[str, str
     return [(Path(source["relative_path"]).name, source["text"]) for source in sources]
 
 
-def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, sources: list[dict[str, str]]) -> str:
+def _render_perspective_markdown(
+    result,
+    perspective: MinePerspectiveProfile,
+    sources: list[dict[str, str]],
+    external_sources: list[dict[str, str]] | None = None,
+) -> str:
+    external_sources = external_sources or []
     now = datetime.now().isoformat(timespec="seconds")
     tags = "、".join(result.tags or [perspective.name])
     core_facts = result.core_facts or result.findings or []
@@ -2669,6 +3384,12 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
     ]
     for index, source in enumerate(sources, start=1):
         sections.append(f"- [S{index}] {source['title']}（{source['library']}：{source['relative_path']}）")
+    if external_sources:
+        sections.extend(["", "## 外部拓展来源", ""])
+        for index, source in enumerate(external_sources, start=1):
+            authority = source.get("authority") or "supplemental"
+            url = source.get("url") or source.get("relative_path") or ""
+            sections.append(f"- [E{index}] {source.get('title') or url}（{authority}：{url}）")
     sections.extend(
         [
             "",
@@ -2686,15 +3407,13 @@ def _render_perspective_markdown(result, perspective: MinePerspectiveProfile, so
     )
     if core_facts:
         for finding in core_facts:
-            refs = "、".join(finding.evidence_refs) if finding.evidence_refs else "请补充引用"
-            sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), "", f"- 引用：{refs}", ""])
+            sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), ""])
     else:
         sections.extend(["暂无可保存的原文提炼。", ""])
     sections.extend(["## 专属分析", ""])
     if deep_analysis:
         for finding in deep_analysis:
-            refs = "、".join(finding.evidence_refs) if finding.evidence_refs else "请补充引用"
-            sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), "", f"- 引用：{refs}", ""])
+            sections.extend([f"### {finding.dimension}", "", finding.interpretation.strip(), ""])
     else:
         sections.append("暂无专属分析。")
     sections.extend(["", "## 风险疑问", ""])
@@ -2737,14 +3456,116 @@ def _read_raw_material_file(relative_path: str, context: dict[str, object] | Non
         "text": text,
     }
 
+
+def _compact_learn_refine_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not sources:
+        return []
+    per_source_limit = min(
+        LEARN_REFINE_MAX_SOURCE_CHARS,
+        max(1800, LEARN_REFINE_MAX_TOTAL_CHARS // len(sources)),
+    )
+    compacted_sources: list[dict[str, str]] = []
+    for source in sources:
+        original_text = source.get("text", "")
+        compacted_text = _compact_learn_refine_text(original_text, per_source_limit)
+        compacted = dict(source)
+        compacted["text"] = compacted_text
+        compacted["original_char_count"] = str(len(original_text))
+        compacted["prompt_char_count"] = str(len(compacted_text))
+        compacted["compacted"] = "true" if len(compacted_text) < len(original_text.strip()) else ""
+        compacted_sources.append(compacted)
+    return compacted_sources
+
+
+def _compact_learn_refine_text(text: str, char_limit: int) -> str:
+    clean_text = re.sub(r"\n{3,}", "\n\n", text.strip())
+    if len(clean_text) <= char_limit:
+        return clean_text
+
+    marker = "\n\n[Content compacted for faster focus extraction. Key lines from the omitted middle are preserved below.]\n\n"
+    head_limit = max(600, int(char_limit * 0.48))
+    tail_limit = max(350, int(char_limit * 0.22))
+
+    head = _trim_to_line_boundary(clean_text[:head_limit])
+    tail = _trim_start_to_line_boundary(clean_text[-tail_limit:])
+    middle = clean_text[len(head) : max(len(head), len(clean_text) - len(tail))]
+    reserved_for_tail = len(marker.strip()) + len(tail) + 8
+    if len(head) + reserved_for_tail > char_limit:
+        head = _trim_to_line_boundary(head[: max(0, char_limit - reserved_for_tail)])
+    signal_limit = max(0, char_limit - len(head) - reserved_for_tail)
+    signals = _learn_refine_signal_lines(middle, signal_limit)
+
+    parts = [head.rstrip(), marker.strip()]
+    if signals:
+        parts.extend(["", signals.strip()])
+    parts.extend(["", tail.lstrip()])
+    compacted = "\n".join(part for part in parts if part is not None).strip()
+    return compacted
+
+
+def _trim_to_line_boundary(text: str) -> str:
+    if "\n" not in text:
+        return text
+    return text.rsplit("\n", 1)[0].strip()
+
+
+def _trim_start_to_line_boundary(text: str) -> str:
+    if "\n" not in text:
+        return text
+    return text.split("\n", 1)[1].strip()
+
+
+def _learn_refine_signal_lines(text: str, char_limit: int) -> str:
+    if char_limit <= 0:
+        return ""
+    patterns = (
+        re.compile(r"^\s{0,3}#{1,4}\s+"),
+        re.compile(r"^\s*(?:[-*+]|\d+[.)]|[一二三四五六七八九十]+[、.])\s+"),
+        re.compile(r"\d+(?:\.\d+)?\s*(?:%|亿元|万亿元|万人|万公里|GW|TWh|MW)"),
+    )
+    selected: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if len(line) < 8:
+            continue
+        if not any(pattern.search(line) for pattern in patterns):
+            continue
+        normalized = re.sub(r"\s+", " ", line)
+        if normalized in seen:
+            continue
+        next_used = used + len(line) + 1
+        if next_used > char_limit:
+            break
+        selected.append(line)
+        seen.add(normalized)
+        used = next_used
+    return "\n".join(selected)
+
+
+def _learn_refine_llm_setting() -> dict[str, object]:
+    setting = dict(api_settings.active_setting())
+    current_timeout = float(setting.get("timeout") or LEARN_REFINE_FAST_TIMEOUT_SECONDS)
+    setting["timeout"] = min(current_timeout, LEARN_REFINE_FAST_TIMEOUT_SECONDS)
+    setting["max_retries"] = 0
+    return setting
+
+
 def _combine_raw_material_sources(sources: list[dict[str, str]]) -> str:
     blocks = []
     for index, source in enumerate(sources, start=1):
+        meta_lines = []
+        if source.get("compacted"):
+            meta_lines.append(
+                f"Compacted: {source.get('prompt_char_count', '?')}/{source.get('original_char_count', '?')} chars"
+            )
         blocks.append(
             "\n".join(
                 [
                     f"[R{index}: {source['title']}]",
                     f"Path: {source['relative_path']}",
+                    *meta_lines,
                     "",
                     source["text"].strip(),
                 ]

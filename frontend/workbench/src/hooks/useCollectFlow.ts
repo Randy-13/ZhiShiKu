@@ -383,7 +383,7 @@ async function createReadableDraftWithItemProgress({ items, parserMode, language
 
 function mergeReadableDrafts(drafts: ReadableDraftInput[], items: SourceMaterial[], errors: string[], language: Language): ReadableDraftInput {
   if (drafts.length === 1) return drafts[0];
-  const title = language === "zh" ? `\u5408\u5e76\u539f\u6587\uff08${drafts.length}\u6761\uff09` : `Merged original ${drafts.length} items`;
+  const title = mergedReadableDraftTitle(drafts, items, language);
   const failedNote = errors.length ? (language === "zh" ? `\u90e8\u5206\u5931\u8d25\uff1a${errors.join("\uff1b")}` : `Partial failures: ${errors.join("; ")}`) : "";
   return {
     title,
@@ -393,6 +393,40 @@ function mergeReadableDrafts(drafts: ReadableDraftInput[], items: SourceMaterial
     materialType: drafts[0]?.materialType ?? "screenshot",
     source: items.map((item) => item.source || item.title).filter(Boolean).join("; "),
   };
+}
+
+function mergedReadableDraftTitle(drafts: ReadableDraftInput[], items: SourceMaterial[], language: Language) {
+  const fallbackTitle = language === "zh" ? `\u5408\u5e76\u539f\u6587\uff08${drafts.length}\u6761\uff09` : `Merged original ${drafts.length} items`;
+  const title = firstDistinctSpecificTitle([
+    ...drafts.map((draft) => draft.title),
+    ...items.map((item) => item.title),
+  ]);
+  if (!title) return fallbackTitle;
+  if (drafts.length <= 1) return title;
+  return language === "zh" ? `${title}\u7b49${drafts.length}\u6761\u539f\u6587` : `${title} and ${drafts.length - 1} more original${drafts.length > 2 ? "s" : ""}`;
+}
+
+function firstDistinctSpecificTitle(titles: string[]) {
+  const seen = new Set<string>();
+  for (const rawTitle of titles) {
+    const title = rawTitle.trim();
+    if (!title || seen.has(title) || isGenericReadableTitle(title)) continue;
+    seen.add(title);
+    return title.length > 48 ? `${title.slice(0, 48)}...` : title;
+  }
+  return "";
+}
+
+function isGenericReadableTitle(title: string) {
+  const normalized = title.trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized.startsWith("merged original") ||
+    normalized.includes("\u5408\u5e76\u539f\u6587") ||
+    normalized.includes("\u622a\u56fe\u539f\u6599") ||
+    normalized.includes("\u672a\u547d\u540d\u539f\u6587") ||
+    normalized === "readable document"
+  );
 }
 
 function readableProgressMessage(language: Language, current: number, total: number) {

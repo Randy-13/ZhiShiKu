@@ -108,6 +108,16 @@ def test_collect_app_flow_generates_readable_draft_then_saves_to_originals():
     assert "localReadableDocument" not in api_source
 
 
+def test_collect_multi_screenshot_merge_keeps_ai_generated_titles():
+    source = read(WORKBENCH / "src" / "hooks" / "useCollectFlow.ts")
+
+    assert "const title = mergedReadableDraftTitle(drafts, items, language);" in source
+    assert "function firstDistinctSpecificTitle" in source
+    assert 'normalized.includes("\\u5408\\u5e76\\u539f\\u6587")' in source
+    assert '`${title}\\u7b49${drafts.length}\\u6761\\u539f\\u6587`' in source
+    assert 'const title = language === "zh" ? `\\u5408\\u5e76\\u539f\\u6587' not in source
+
+
 def test_collect_raw_draft_save_prefers_raw_file_and_falls_back_to_raw_markdown():
     api_source = read(WORKBENCH / "src" / "apiCollect.ts")
 
@@ -122,8 +132,9 @@ def test_create_workspace_requires_explicit_topic_confirmation():
 
     assert "pendingTopic" in topic_section
     assert "onPendingTopicChange(topic)" in topic_section
-    assert "onSelectTopic(pendingTopic)" in topic_section
-    assert "Confirm topic" in topic_section
+    assert "onSelectTopic(pendingTopic)" in source
+    assert "Confirm topic" in source
+    assert "step === \"topics\" && !pendingTopic" in source
     assert "onClick={() => onSelectTopic(topic)}" not in topic_section
 
 
@@ -134,18 +145,22 @@ def test_create_workspace_removes_current_guidance_and_shows_image_suggestions_i
     assert "<WorkflowGuideCard" not in source
     assert "function WorkflowGuideCard" not in source
     assert "workflow-guide-card" not in styles
-    assert "hasImageSuggestions ? (" in source
+    assert "const hasImageSuggestions = Boolean(" in source
+    assert "hasSuggestions={hasImageSuggestions}" in source
     assert "prompt-grid" in source
-    assert "image-error-list" in source
+    assert "image-recovery-banner" in source
+    assert "image-task-list" in source
 
 
 def test_create_workspace_design_step_layout_and_html_preview_controls():
     source = read(WORKBENCH / "src" / "workspaces" / "CreateWorkspace.tsx")
     styles = read(WORKBENCH / "src" / "styles.css")
 
-    assert 'nextAction === "format_article") return "designed"' in source
+    assert 'if (step === "images") return imagesConfirmed ? "design" : "images";' in source
+    assert 'if (stage === "design") return "designed";' in source
     assert "visibleStep={visibleStep}" in source
-    assert "DesignStrategySelect" in source
+    assert "ProjectStrategyPanel" in source
+    assert "designStrategyPresets.map" in source
     assert "function DesignStrategyEditor" not in source
     assert "stage-stack" in source
     assert "HtmlPreviewControls" in source
@@ -159,40 +174,41 @@ def test_create_workspace_design_step_layout_and_html_preview_controls():
 def test_learn_workspace_adds_originals_to_queue_from_queue_header():
     source = read(WORKBENCH / "src" / "workspaces" / "LearnWorkspace.tsx")
     app_source = read(WORKBENCH / "src" / "App.tsx")
-    api_source = read(WORKBENCH / "src" / "api.ts")
+    rail_source = read(WORKBENCH / "src" / "hooks" / "useLibraryRail.ts")
+    flow_source = read(WORKBENCH / "src" / "hooks" / "useLearningFlow.ts")
 
     assert 't("learn.addToQueue")' in source
     assert "onAddSelectedOriginalsToQueue" in source
     assert "addToQueueDisabledReason" in source
-    assert "const selectedRailOriginals = useMemo(" in app_source
-    assert "const addSelectedOriginalsToLearningQueue = useCallback(" in app_source
-    assert 'item.markdownPath?.startsWith("raw_materials/")' in app_source
-    assert 'return firstString(value).replace(/\\\\/g, "/");' in api_source
-    assert 'status: "queued" as const' in app_source
+    assert "selectedRailOriginals" in app_source
+    assert "const selectedRailOriginals = useMemo(" in rail_source
+    assert 'libraryRailBucket === "original"' in rail_source
+    assert "const addSelectedOriginalsToLearningQueue = useCallback(" in flow_source
+    assert 'status: "queued" as const' in flow_source
 
 
 def test_learn_workspace_generates_and_saves_focus_files_only():
     source = read(WORKBENCH / "src" / "workspaces" / "LearnWorkspace.tsx")
-    app_source = read(WORKBENCH / "src" / "App.tsx")
-    api_source = read(WORKBENCH / "src" / "api.ts")
+    flow_source = read(WORKBENCH / "src" / "hooks" / "useLearningFlow.ts")
+    api_source = read(WORKBENCH / "src" / "apiCollect.ts")
 
     assert 't("learn.primaryFocus")' in source
     assert 't("learn.previewFocus")' in source
     assert 't("learn.commitFocus")' in source
-    assert "const refined = await api.refineKnowledgeCluster(rawPaths);" in app_source
-    assert "setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: \"queued\", error: undefined } : item)))" in app_source
-    assert "setLearningQueue((current) => current.filter((queueItem) => !sourceIdSet.has(queueItem.source)))" in app_source
-    assert "await api.saveFocusFile(knowledgeDraft.sourceIds, knowledgeDraft.body, knowledgeDraft.title)" in app_source
+    assert "const refined = await collectApi.refineKnowledgeCluster(rawPaths);" in flow_source
+    assert "setLearningQueue((current) => current.map((item) => (idSet.has(item.id) ? { ...item, status: \"queued\", error: undefined } : item)))" in flow_source
+    assert "setLearningQueue((current) => current.filter((queueItem) => !sourceIdSet.has(queueItem.source)))" in flow_source
+    assert "await collectApi.saveFocusFile(knowledgeDraft.sourceIds, knowledgeDraft.body, knowledgeDraft.title)" in flow_source
     assert '"/api/v2/learn/refine-knowledge-cluster"' in api_source
     assert '"/api/v2/learn/focus-file"' in api_source
 
 
 def test_library_workspace_reads_and_updates_v2_library_markdown_files():
     app_source = read(WORKBENCH / "src" / "App.tsx")
-    api_source = read(WORKBENCH / "src" / "api.ts")
+    api_source = read(WORKBENCH / "src" / "apiLibrary.ts")
 
-    assert "api.readLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath)" in app_source
-    assert "api.updateLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath, trimmed)" in app_source
+    assert "libraryApi.readLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath)" in app_source
+    assert "libraryApi.updateLibraryFile(selectedKnowledge.library, selectedKnowledge.markdownPath, trimmed)" in app_source
     assert "readLibraryFile(library: LibraryKind, markdownPath: string)" in api_source
     assert "updateLibraryFile(" in api_source
     assert "body: firstString(raw.markdown)," in api_source

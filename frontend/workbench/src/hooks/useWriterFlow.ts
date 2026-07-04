@@ -79,9 +79,9 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   const createWriterProject = useCallback(
     (name: string, projectType: string, libraryFiles: WriterLibraryFileInput[] = [], writingStrategy = "", designStrategy = "") => {
       selectWorkspace("create");
-      runWriterAction(language === "zh" ? "创建创作项目" : "Create writing project", () =>
+      runWriterAction(language === "zh" ? "创建公众号文章项目" : "Create WeChat article project", () =>
         writerApi.createWriterProject(
-          name || (language === "zh" ? "未命名创作项目" : "Untitled writing project"),
+          name || (language === "zh" ? "未命名公众号文章项目" : "Untitled WeChat article project"),
           [],
           projectType,
           libraryFiles,
@@ -238,12 +238,6 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     [language, requireProjectId, runWriterAction],
   );
 
-  const sanitizeWriterPublishHtml = useCallback(() => {
-    runWriterAction(language === "zh" ? "重新清洗发布版" : "Sanitize publish HTML", () =>
-      writerApi.sanitizeWriterProjectPublishHtml(requireProjectId()),
-    );
-  }, [language, requireProjectId, runWriterAction]);
-
   const confirmWriterDesign = useCallback(() => {
     runWriterAction(language === "zh" ? "确认美编预览" : "Confirm design preview", () => writerApi.confirmWriterProjectDesign(requireProjectId()));
   }, [language, requireProjectId, runWriterAction]);
@@ -279,7 +273,6 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     generateWriterImages,
     retryWriterImageItems,
     formatWriterProject,
-    sanitizeWriterPublishHtml,
     confirmWriterDesign,
     preflightWriterProject,
     publishWriterProject,

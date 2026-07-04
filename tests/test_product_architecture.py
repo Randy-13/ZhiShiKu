@@ -30,7 +30,7 @@ def test_create_area_is_separate_from_perspective_mining():
     create_ids = {item.id for item in capabilities_for_frontend_area("create")}
     mining_ids = {item.id for item in capabilities_for_frontend_area("mine")}
 
-    assert create_ids == {"create_content"}
+    assert create_ids == {"create_wechat_article"}
     assert mining_ids == {"interpret_perspectives"}
 
 

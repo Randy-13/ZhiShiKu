@@ -5,6 +5,7 @@ import {
   ExternalLink,
   FolderOpen,
   KeyRound,
+  Palette,
   Plug,
   RefreshCw,
   Save,
@@ -198,19 +199,23 @@ const storageFields: Array<{
 export function SettingsWorkspace({
   t,
   language,
+  visualTheme,
   textExtractionMode,
   activities,
   rightRail,
   onLanguageChange,
+  onVisualThemeChange,
   onTextExtractionModeChange,
   onSave,
 }: {
   t: Translator;
   language: Language;
+  visualTheme: "dark" | "light";
   textExtractionMode: TextExtractionMode;
   activities: ActivityEvent[];
   rightRail: ReactNode;
   onLanguageChange: (language: Language) => void;
+  onVisualThemeChange: (theme: "dark" | "light") => void;
   onTextExtractionModeChange: (mode: TextExtractionMode) => void;
   onSave: () => void;
 }) {
@@ -524,6 +529,50 @@ export function SettingsWorkspace({
         </PrimaryTaskPanel>
 
         <section className="content-panel settings-grid">
+          <div className="style-settings-card">
+            <div className="dependency-check-title">
+              <Palette size={17} />
+              <h2>{language === "zh" ? "风格设置" : "Style settings"}</h2>
+            </div>
+            <p className="hint">
+              {language === "zh"
+                ? "选择工作台整体配色。深色使用 Civitas 深青底，浅色恢复之前的浅绿色纸面。"
+                : "Choose the workbench palette. Dark uses the Civitas deep teal base; light restores the earlier pale green paper style."}
+            </p>
+            <div className="theme-option-grid" role="radiogroup" aria-label={language === "zh" ? "工作台风格" : "Workbench style"}>
+              <button
+                className={visualTheme === "dark" ? "theme-option selected" : "theme-option"}
+                type="button"
+                role="radio"
+                aria-checked={visualTheme === "dark"}
+                onClick={() => onVisualThemeChange("dark")}
+              >
+                <span className="theme-swatch theme-swatch-dark" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <strong>{language === "zh" ? "深色 Civitas" : "Dark Civitas"}</strong>
+                <small>{language === "zh" ? "深青背景，浅色控件与金色提示" : "Deep teal base with light controls and gold cues"}</small>
+              </button>
+              <button
+                className={visualTheme === "light" ? "theme-option selected" : "theme-option"}
+                type="button"
+                role="radio"
+                aria-checked={visualTheme === "light"}
+                onClick={() => onVisualThemeChange("light")}
+              >
+                <span className="theme-swatch theme-swatch-light" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <strong>{language === "zh" ? "浅色纸面" : "Light paper"}</strong>
+                <small>{language === "zh" ? "浅绿色纸面，低边框与墨色文字" : "Pale green paper surfaces with quiet borders"}</small>
+              </button>
+            </div>
+          </div>
+
           <div className="settings-action-card">
             <div>
               <h2>{t("settings.api")}</h2>

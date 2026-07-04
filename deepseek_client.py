@@ -158,12 +158,41 @@ def parse_json_model(
     }
     try:
         content = sdk_chat_completion([system, *messages], json_mode=True, setting=resolved)
-        return model_type.model_validate_json(_normalize_json_response_text(content))
+        return _validate_json_model_response(model_type, content)
+    except ValidationError as exc:
+        try:
+            repaired = sdk_chat_completion(
+                [
+                    system,
+                    *messages,
+                    {
+                        "role": "assistant",
+                        "content": str(content or "")[:12000],
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一条回复不是合法 JSON，应用无法解析。请只返回一个完整、合法、可被 json.loads "
+                            "解析的 JSON 对象，不要 Markdown，不要解释，不要截断。"
+                            f"\n解析错误：{exc}"
+                        ),
+                    },
+                ],
+                json_mode=True,
+                setting=resolved,
+            )
+            return _validate_json_model_response(model_type, repaired)
+        except Exception as repair_exc:
+            raise RuntimeError(explain_error(repair_exc, resolved)) from repair_exc
     except APIConnectionError:
         content = curl_chat_completion([system, *messages], json_mode=True, setting=resolved)
-        return model_type.model_validate_json(_normalize_json_response_text(content))
+        return _validate_json_model_response(model_type, content)
     except Exception as exc:
         raise RuntimeError(explain_error(exc, resolved)) from exc
+
+
+def _validate_json_model_response(model_type: type[BaseModel], content: str) -> BaseModel:
+    return model_type.model_validate_json(_normalize_json_response_text(content))
 
 
 def _normalize_json_response_text(content: str) -> str:
@@ -504,7 +533,7 @@ Hard requirements:
    - deep_analysis
    - risks_and_questions
    - conclusion_and_actions
-3. core_facts and deep_analysis must use evidence_refs such as S1/S2/S3.
+3. core_facts and deep_analysis may use evidence_refs such as S1/S2/S3 internally for traceability, but user-facing interpretation text must not include visible citation labels like "引用：S1".
 4. deep_analysis must go beyond paraphrase. It should explain causal links, hidden tensions, decision tradeoffs, scenario implications, and what the material suggests but does not fully state.
 5. You may add limited contextual inference, but only when it is clearly derived from the sources. Do not invent outside facts. When something is inference rather than explicit fact, say so plainly in the interpretation text.
 6. risks_and_questions should capture uncertainty, missing evidence, contradictory signals, and what must be verified next.
@@ -551,6 +580,94 @@ Materials:
             "source_text": chr(10).join(source_text),
         },
     )
+    return parse_json_model(PerspectiveInterpretationResult, [{"role": "user", "content": prompt}], setting=setting)
+
+
+def expand_perspective_interpretation(
+    material_blocks: list[dict[str, str]],
+    perspective: dict[str, Any],
+    current_markdown: str,
+    external_sources: list[dict[str, str]],
+    expansion_instruction: str = "",
+    setting: dict[str, Any] | None = None,
+) -> PerspectiveInterpretationResult:
+    source_text = []
+    for index, item in enumerate(material_blocks, start=1):
+        source_text.append(
+            "\n".join(
+                [
+                    f"[S{index}: {item.get('title') or item.get('relative_path')}]",
+                    f"Library: {item.get('library')}",
+                    f"Path: {item.get('relative_path')}",
+                    "",
+                    str(item.get("text") or "")[:9000],
+                ]
+            )
+        )
+    evidence_text = []
+    for index, item in enumerate(external_sources, start=1):
+        evidence_text.append(
+            "\n".join(
+                [
+                    f"[E{index}: {item.get('title') or item.get('url')}]",
+                    f"Authority: {item.get('authority') or 'supplemental'}",
+                    f"URL: {item.get('url') or item.get('relative_path')}",
+                    f"Search query: {item.get('query') or ''}",
+                    "",
+                    str(item.get("text") or "")[:7000],
+                ]
+            )
+        )
+    prompt = f"""
+You are expanding a saved perspective interpretation for Knowledge Cool Research OS.
+
+Perspective name: {perspective.get("name", "")}
+Positioning: {perspective.get("positioning") or perspective.get("role", "")}
+Core goal: {perspective.get("core_goal") or perspective.get("purpose", "")}
+Stance: {perspective.get("stance") or perspective.get("evidence_rule", "")}
+Focus dimensions: {json.dumps(perspective.get("focus_dimensions", []), ensure_ascii=False)}
+Analysis questions: {json.dumps(perspective.get("analysis_questions", []), ensure_ascii=False)}
+User expansion command: {expansion_instruction.strip() or "补全信息链条、加强官方或权威证据、修正不充分的论据。"}
+
+Hard requirements:
+1. Keep the original RTFC discipline: Rule, Target, Fact, Conclusion.
+2. Keep the same fixed five-part output logic: criteria, core_facts, deep_analysis, risks_and_questions, conclusion_and_actions.
+3. Use original material refs as S1/S2/S3 and external evidence refs as E1/E2/E3 internally for traceability. Do not put visible citation labels like "引用：S1" or "引用：E1" in user-facing interpretation text.
+4. Follow the user expansion command first when choosing what to strengthen, verify, compare, or question.
+5. Expand the existing interpretation by strengthening the evidence chain. Do not discard useful judgments from the current draft.
+6. External sources are official-first. Treat authority=official as strongest evidence, authority=authoritative_supplement as supporting context, and authority=supplemental as weak context.
+7. Clearly distinguish facts stated by sources from your inference. Do not invent facts beyond S* and E*.
+8. Output Chinese user-facing text only.
+
+Current draft to overwrite with an enhanced version:
+{current_markdown[:18000]}
+
+Original source materials:
+{chr(10).join(source_text)}
+
+External expansion evidence:
+{chr(10).join(evidence_text)}
+
+Return JSON with this shape:
+{{
+  "title": "string",
+  "perspective_name": "string",
+  "tags": ["string"],
+  "summary": "short paragraph",
+  "criteria": "the perspective's judging standard",
+  "core_facts": [
+    {{"dimension": "string", "interpretation": "string", "evidence_refs": ["S1", "E1"]}}
+  ],
+  "deep_analysis": [
+    {{"dimension": "string", "interpretation": "string", "evidence_refs": ["S1", "E1", "E2"]}}
+  ],
+  "risks_and_questions": ["string"],
+  "conclusion_and_actions": ["string"],
+  "findings": [],
+  "writing_implications": [],
+  "risks_and_limits": []
+}}
+"""
     return parse_json_model(PerspectiveInterpretationResult, [{"role": "user", "content": prompt}], setting=setting)
 
 

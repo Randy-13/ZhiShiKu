@@ -96,6 +96,11 @@ def settings_page() -> HTMLResponse:
     return react_app_response()
 
 
+@router.get("/docs", response_class=HTMLResponse)
+def docs_page() -> HTMLResponse:
+    return react_app_response()
+
+
 @router.get("/collect/media", response_class=HTMLResponse)
 def collect_media_page() -> HTMLResponse:
     return _static_page("media.html", active_section="collect")
@@ -109,6 +114,7 @@ def create_page() -> HTMLResponse:
 @router.get("/collect", response_class=HTMLResponse)
 @router.get("/learn", response_class=HTMLResponse)
 @router.get("/mine", response_class=HTMLResponse)
+@router.get("/library", response_class=HTMLResponse)
 def app_workspace_alias(request: Request) -> HTMLResponse:
     return react_app_response()
 

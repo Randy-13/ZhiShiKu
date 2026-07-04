@@ -110,9 +110,9 @@ export function AuthGate({ children }: AuthGateProps) {
   return (
     <main className="auth-screen auth-screen--paper">
       <section className="auth-intro" aria-label="\u77e5\u8bc6\u9177\u4ecb\u7ecd">
-        <p className="auth-kicker">FigureLearning Workbench</p>
-        <h2>{"\u77e5\u8bc6\u9177"}</h2>
-        <p>{"\u628a\u6536\u96c6\u3001\u5b66\u4e60\u3001\u6316\u6398\u548c\u521b\u4f5c\u653e\u5728\u4e00\u4e2a\u5b89\u9759\u53ef\u4fe1\u7684\u7f51\u9875\u5de5\u4f5c\u53f0\u91cc\u3002"}</p>
+        <p className="auth-kicker">AI LONGFORM WORKBENCH</p>
+        <h2>{"\u628a\u7d20\u6750\u53d8\u6210\u53ef\u53d1\u5e03\u7684\u6df1\u5ea6\u6587\u7ae0"}</h2>
+        <p className="auth-tagline">{"\u4ece\u7d20\u6750\u6574\u7406\u5230\u6df1\u5ea6\u6587\u7ae0\uff0c\u4e00\u6761\u94fe\u8def\u5b8c\u6210"}</p>
       </section>
 
       <section className="auth-panel" aria-labelledby="auth-title">
@@ -120,7 +120,7 @@ export function AuthGate({ children }: AuthGateProps) {
           <div className="brand-mark">{"\u77e5"}</div>
           <div>
             <strong>{"\u77e5\u8bc6\u9177"}</strong>
-            <span>{"\u4e2a\u4eba\u77e5\u8bc6\u5e93\u4e0e\u521b\u4f5c\u5de5\u4f5c\u53f0"}</span>
+            <span>{"\u4e2d\u6587\u77e5\u8bc6\u521b\u4f5c\u8005\u7684 AI \u957f\u6587\u5de5\u4f5c\u53f0"}</span>
           </div>
         </div>
         <div className="auth-heading">

@@ -18,12 +18,14 @@ def test_primary_sections_match_mature_app_shell_order():
         "learn",
         "mine",
         "create",
+        "library",
         "settings",
+        "docs",
     ]
 
 
 def test_primary_sections_carry_navigation_copy():
-    assert [section.nav_label for section in PRIMARY_SECTIONS] == ["收集", "学习", "挖掘", "创作", "设置中心"]
+    assert [section.nav_label for section in PRIMARY_SECTIONS] == ["收集", "学习", "挖掘", "公众号文章创作", "知识库", "设置中心", "文档"]
     assert all(section.nav_description for section in PRIMARY_SECTIONS)
 
 
@@ -34,7 +36,8 @@ def test_input_methods_are_not_primary_sections():
     assert "document" not in section_ids
     assert "media" not in section_ids
     assert "link" not in section_ids
-    assert "library" not in section_ids
+    assert "library" in section_ids
+    assert "docs" in section_ids
 
 
 def test_global_libraries_are_right_sidebar_resources_not_primary_sections():
@@ -48,7 +51,8 @@ def test_workspace_entries_model_mature_route_hierarchy():
     assert "collect-media" in entry_ids
     assert entry_by_id("collect-media").route == "/collect/media"
     assert entry_by_id("collect-media").shell_section == "collect"
-    assert entry_by_id("create-content").route == "/create"
+    assert entry_by_id("create-wechat-article").route == "/create"
+    assert entry_by_id("docs-help").route == "/docs"
 
 
 def test_collect_section_owns_general_and_specialized_intake():
@@ -78,10 +82,17 @@ def test_strategy_learning_lives_in_mine():
 
 
 def test_create_section_uses_linear_creation_stage():
-    placement = placement_for_capability("create_content")
+    placement = placement_for_capability("create_wechat_article")
 
     assert placement.shell_section == "create"
-    assert placement.interaction_stage == "quote_libraries_to_publishable_content"
+    assert placement.interaction_stage == "quote_libraries_to_wechat_article"
+
+
+def test_docs_section_uses_read_only_help_stage():
+    placement = placement_for_capability("read_documentation")
+
+    assert placement.shell_section == "docs"
+    assert placement.interaction_stage == "read_help_and_troubleshoot"
 
 
 def test_unknown_section_and_capability_raise_key_error():

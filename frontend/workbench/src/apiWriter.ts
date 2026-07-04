@@ -171,13 +171,6 @@ export const writerApi = {
     });
   },
 
-  sanitizeWriterProjectPublishHtml(projectId: string) {
-    return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish/sanitize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  },
-
   confirmWriterProjectDesign(projectId: string, confirmed = true) {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/confirm-design`, {
       method: "POST",
@@ -190,7 +183,7 @@ export const writerApi = {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish/preflight`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, author: "Bobo", digest, cover_path: coverPath }),
+      body: JSON.stringify({ title, digest, cover_path: coverPath }),
     });
   },
 
@@ -198,7 +191,7 @@ export const writerApi = {
     return requestJson<WriterProjectState>(`/api/writer/projects/${encodeURIComponent(projectId)}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, author: "Bobo", digest, cover_path: coverPath }),
+      body: JSON.stringify({ title, digest, cover_path: coverPath }),
     });
   },
 

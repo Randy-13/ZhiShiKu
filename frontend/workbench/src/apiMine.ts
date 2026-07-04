@@ -33,6 +33,36 @@ type MineInterpretPayload = {
   markdown?: string;
   source_files?: Array<Record<string, string>>;
   perspective?: PerspectivePayload;
+  external_sources?: ExpansionExternalSource[];
+  search_report?: ExpansionSearchReport;
+  warning?: string;
+};
+
+export type ExpansionExternalSource = {
+  library: string;
+  title: string;
+  relative_path: string;
+  url: string;
+  authority: string;
+  query: string;
+  text: string;
+  snippet: string;
+  read_status: string;
+};
+
+export type ExpansionSearchReport = {
+  queries?: string[];
+  errors?: string[];
+  candidates?: number;
+  readable?: number;
+};
+
+export type PerspectiveExpansionPreview = {
+  title: string;
+  externalSources: ExpansionExternalSource[];
+  sourceFiles: Array<Record<string, string>>;
+  searchReport: ExpansionSearchReport;
+  warning: string;
 };
 
 export const mineApi = {
@@ -75,6 +105,86 @@ export const mineApi = {
     const data = assertV2Ok(payload);
     return {
       title: firstString(data.title, `${perspective.name}视角解读`),
+      markdown: firstString(data.markdown),
+      sourceFiles: data.source_files ?? [],
+      perspective: toPerspectiveProfile(data.perspective ?? toPerspectivePayload(perspective)),
+    };
+  },
+
+  async expandPerspective(
+    sources: KnowledgeItem[],
+    perspective: PerspectiveProfile,
+    currentMarkdown: string,
+    expansionInstruction = "",
+  ): Promise<PerspectiveDraft> {
+    const payload = await requestJson<V2Payload<MineInterpretPayload>>("/api/v2/mine/expand-interpretation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: sources.map(toMineSource),
+        perspective: toPerspectivePayload(perspective),
+        current_markdown: currentMarkdown,
+        expansion_instruction: expansionInstruction,
+        official_scope: "official_first",
+      }),
+    });
+    const data = assertV2Ok(payload);
+    return {
+      title: firstString(data.title, `${perspective.name}拓展解读`),
+      markdown: firstString(data.markdown),
+      sourceFiles: data.source_files ?? [],
+      perspective: toPerspectiveProfile(data.perspective ?? toPerspectivePayload(perspective)),
+    };
+  },
+
+  async previewPerspectiveExpansion(
+    sources: KnowledgeItem[],
+    perspective: PerspectiveProfile,
+    currentMarkdown: string,
+    expansionInstruction = "",
+  ): Promise<PerspectiveExpansionPreview> {
+    const payload = await requestJson<V2Payload<MineInterpretPayload>>("/api/v2/mine/expand-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: sources.map(toMineSource),
+        perspective: toPerspectivePayload(perspective),
+        current_markdown: currentMarkdown,
+        expansion_instruction: expansionInstruction,
+        official_scope: "official_first",
+      }),
+    });
+    const data = assertV2Ok(payload);
+    return {
+      title: firstString(data.title, `${perspective.name}拓展来源预览`),
+      externalSources: (data.external_sources ?? []).map(toExpansionExternalSource),
+      sourceFiles: data.source_files ?? [],
+      searchReport: normalizeSearchReport(data.search_report),
+      warning: firstString(data.warning),
+    };
+  },
+
+  async mergePerspectiveExpansion(
+    sources: KnowledgeItem[],
+    perspective: PerspectiveProfile,
+    currentMarkdown: string,
+    externalSources: ExpansionExternalSource[],
+    expansionInstruction = "",
+  ): Promise<PerspectiveDraft> {
+    const payload = await requestJson<V2Payload<MineInterpretPayload>>("/api/v2/mine/expand-merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: sources.map(toMineSource),
+        perspective: toPerspectivePayload(perspective),
+        current_markdown: currentMarkdown,
+        external_sources: externalSources,
+        expansion_instruction: expansionInstruction,
+      }),
+    });
+    const data = assertV2Ok(payload);
+    return {
+      title: firstString(data.title, `${perspective.name}拓展解读`),
       markdown: firstString(data.markdown),
       sourceFiles: data.source_files ?? [],
       perspective: toPerspectiveProfile(data.perspective ?? toPerspectivePayload(perspective)),
@@ -168,4 +278,29 @@ function firstString(...values: unknown[]) {
     if (typeof value === "number" && Number.isFinite(value)) return String(value);
   }
   return "";
+}
+
+function toExpansionExternalSource(raw: Record<string, unknown>): ExpansionExternalSource {
+  return {
+    library: firstString(raw.library, "external"),
+    title: firstString(raw.title, raw.url, raw.relative_path),
+    relative_path: firstString(raw.relative_path, raw.url),
+    url: firstString(raw.url, raw.relative_path),
+    authority: firstString(raw.authority, "supplemental"),
+    query: firstString(raw.query),
+    text: firstString(raw.text),
+    snippet: firstString(raw.snippet, raw.text).slice(0, 600),
+    read_status: firstString(raw.read_status, raw.text ? "readable" : "unreadable"),
+  };
+}
+
+function normalizeSearchReport(raw: unknown): ExpansionSearchReport {
+  if (!raw || typeof raw !== "object") return {};
+  const value = raw as Record<string, unknown>;
+  return {
+    queries: Array.isArray(value.queries) ? value.queries.map(String) : [],
+    errors: Array.isArray(value.errors) ? value.errors.map(String) : [],
+    candidates: typeof value.candidates === "number" ? value.candidates : undefined,
+    readable: typeof value.readable === "number" ? value.readable : undefined,
+  };
 }

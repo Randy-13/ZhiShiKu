@@ -9,13 +9,6 @@ import type { Translator } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
 import { Stepper } from "../components/Stepper";
 
-const projectTypes = [
-  { id: "article", zh: "公众号文章", en: "WeChat article" },
-  { id: "image_text", zh: "小红书图文", en: "Xiaohongshu post" },
-  { id: "short_video", zh: "抖音短视频", en: "Douyin short video" },
-  { id: "long_video", zh: "哔站长视频", en: "Bilibili long video" },
-];
-
 const designStrategyPresets = [
   {
     id: "wechat",
@@ -129,7 +122,6 @@ type Props = {
   ) => void;
   onRetryImageItems: (tasks: WriterImageRetryTask[], onProgress?: (done: number, total: number) => void) => void;
   onFormat: (markdown?: string, designStrategy?: string, writingStrategy?: string, theme?: string) => void;
-  onSanitizePublishHtml: () => void;
   onConfirmDesign: () => void;
   onPreflight: () => void;
   onPublish: () => void;
@@ -198,13 +190,11 @@ export function CreateWorkspace({
   onGenerateImages,
   onRetryImageItems,
   onFormat,
-  onSanitizePublishHtml,
   onConfirmDesign,
   onPreflight,
   onPublish,
 }: Props) {
   const [projectName, setProjectName] = useState("");
-  const [projectType, setProjectType] = useState("article");
   const [createMode, setCreateMode] = useState(!writerState?.project);
   const [writingStrategy, setWritingStrategy] = useState("");
   const [designStrategy, setDesignStrategy] = useState("");
@@ -402,7 +392,7 @@ export function CreateWorkspace({
     <section className="create-project-layout">
       <aside className="content-panel project-list-panel">
         <div className="panel-heading">
-          <h2>{language === "zh" ? "创作项目" : "Projects"}</h2>
+          <h2>{language === "zh" ? "公众号文章创作" : "WeChat article writing"}</h2>
           <button className="secondary-button" type="button" disabled={isRunning} onClick={() => setCreateMode(true)}>
             <FolderPlus size={16} />
             {language === "zh" ? "新建" : "New"}
@@ -423,7 +413,7 @@ export function CreateWorkspace({
             ))
           ) : (
             <EmptyState
-              title={language === "zh" ? "还没有创作项目" : "No projects yet"}
+              title={language === "zh" ? "还没有公众号文章项目" : "No WeChat article projects yet"}
               body={language === "zh" ? "先创建一个公众号文章项目，后续素材和产物都会保存在项目目录里。" : "Create a WeChat article project first."}
             />
           )}
@@ -435,15 +425,13 @@ export function CreateWorkspace({
           <ProjectSetup
             language={language}
             name={projectName}
-            projectType={projectType}
             selectedFiles={selectedLibraryFiles}
             isRunning={isRunning}
             hasOpenProject={Boolean(project)}
             onNameChange={setProjectName}
-            onTypeChange={setProjectType}
             onCancel={() => setCreateMode(false)}
             onCreate={() => {
-              onCreateProject(projectName.trim(), projectType, selectedLibraryFiles, "", "");
+              onCreateProject(projectName.trim(), "article", selectedLibraryFiles, "", "");
               setProjectName("");
             }}
           />
@@ -523,7 +511,6 @@ export function CreateWorkspace({
                 onSuggestImages(articleMarkdown, contentImageCount, imageStylePreset);
               }}
               onContinueFormat={() => onFormat(articleMarkdown, designStrategy, writingStrategy, designTheme)}
-              onSanitizePublishHtml={onSanitizePublishHtml}
               onRetryImageTasks={runRetryFailedImages}
               onImportKnowledge={() => onImportKnowledge(selectedLibraryFiles)}
               onSaveStrategies={onSaveStrategies}
@@ -600,7 +587,6 @@ function ProjectStageWorkspace({
   onPrimaryAction,
   onSuggestImages,
   onContinueFormat,
-  onSanitizePublishHtml,
   onRetryImageTasks,
   onImportKnowledge,
   onSaveStrategies,
@@ -655,7 +641,6 @@ function ProjectStageWorkspace({
   onPrimaryAction: () => void;
   onSuggestImages: () => void;
   onContinueFormat: () => void;
-  onSanitizePublishHtml: () => void;
   onRetryImageTasks: (tasks?: WriterImageRetryTask[]) => void;
   onImportKnowledge: () => void;
   onSaveStrategies: (writingStrategy: string, designStrategy: string) => void;
@@ -825,14 +810,13 @@ function ProjectStageWorkspace({
             designTheme={designTheme}
             onDesignThemeChange={onDesignThemeChange}
             onReformat={() => onContinueFormat()}
-            onSanitizePublishHtml={onSanitizePublishHtml}
             disabled={isRunning}
           />
         </div>
       ) : null}
 
       {visibleStage === "publish" ? (
-        <PublishSection language={language} project={project} onSanitizePublishHtml={onSanitizePublishHtml} disabled={isRunning} />
+        <PublishSection language={language} project={project} />
       ) : null}
     </div>
   );
@@ -933,7 +917,6 @@ function DesignStagePanel({
   designTheme,
   onDesignThemeChange,
   onReformat,
-  onSanitizePublishHtml,
   disabled,
 }: {
   language: "zh" | "en";
@@ -942,7 +925,6 @@ function DesignStagePanel({
   designTheme: string;
   onDesignThemeChange: (value: string) => void;
   onReformat: () => void;
-  onSanitizePublishHtml: () => void;
   disabled?: boolean;
 }) {
   return (
@@ -984,9 +966,6 @@ function DesignStagePanel({
             <button className="secondary-button" type="button" disabled={disabled} onClick={onReformat}>
               <Sparkles size={16} />
               {language === "zh" ? "重新美编但保留图片位置" : "Reformat, keep images"}
-            </button>
-            <button className="secondary-button" type="button" disabled={disabled} onClick={onSanitizePublishHtml}>
-              {language === "zh" ? "只重新清洗发布版" : "Sanitize publish HTML"}
             </button>
           </div>
         </>
@@ -1059,54 +1038,34 @@ function DesignCompatibilityPanel({ language, project }: { language: "zh" | "en"
 function ProjectSetup({
   language,
   name,
-  projectType,
   selectedFiles,
   isRunning,
   hasOpenProject,
   onNameChange,
-  onTypeChange,
   onCancel,
   onCreate,
 }: {
   language: "zh" | "en";
   name: string;
-  projectType: string;
   selectedFiles: WriterLibraryFileInput[];
   isRunning: boolean;
   hasOpenProject: boolean;
   onNameChange: (value: string) => void;
-  onTypeChange: (value: string) => void;
   onCancel: () => void;
   onCreate: () => void;
 }) {
-  const unsupported = projectType !== "article";
   return (
     <section className="content-panel project-setup-guide">
       <div className="setup-copy">
-        <span>{language === "zh" ? "创建项目" : "Create project"}</span>
-        <h2>{language === "zh" ? "先从公众号文章项目开始" : "Start with a WeChat article project"}</h2>
+        <span>{language === "zh" ? "公众号文章创作" : "WeChat article writing"}</span>
+        <h2>{language === "zh" ? "创建专用公众号文章项目" : "Create a dedicated WeChat article project"}</h2>
       </div>
       <div className="setup-form-grid">
         <label>
           <span>{language === "zh" ? "项目名称" : "Project name"}</span>
           <input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder={language === "zh" ? "例如：AI 芯片公众号文章" : "Example: AI chip article"} />
         </label>
-        <label>
-          <span>{language === "zh" ? "项目类型" : "Project type"}</span>
-          <select value={projectType} onChange={(event) => onTypeChange(event.target.value)}>
-            {projectTypes.map((item) => (
-              <option key={item.id} value={item.id}>
-                {language === "zh" ? item.zh : item.en}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
-      {unsupported ? (
-        <p className="disabled-reason">
-          {language === "zh" ? "目前先实现公众号文章项目，其他类型会保留为后续扩展。" : "Only WeChat article projects are implemented first; other types are reserved."}
-        </p>
-      ) : null}
       <section className="project-section setup-selected-files">
         <div className="section-heading">
           <h2>{language === "zh" ? "选中文件列表" : "Selected files"}</h2>
@@ -1126,7 +1085,7 @@ function ProjectSetup({
         )}
       </section>
       <div className="setup-actions">
-        <button className="primary-cta" type="button" disabled={isRunning || !name.trim() || unsupported} onClick={onCreate}>
+        <button className="primary-cta" type="button" disabled={isRunning || !name.trim()} onClick={onCreate}>
           <strong>{language === "zh" ? "创建并进入工作流" : "Create and start"}</strong>
         </button>
         {hasOpenProject ? (
@@ -1941,13 +1900,9 @@ function ImageSection({
 function PublishSection({
   language,
   project,
-  onSanitizePublishHtml,
-  disabled,
 }: {
   language: "zh" | "en";
   project: WriterProject;
-  onSanitizePublishHtml: () => void;
-  disabled?: boolean;
 }) {
   const checks = project.preflight?.checks ?? [];
   return (
@@ -1957,13 +1912,6 @@ function PublishSection({
         <span>{project.preflight?.ok ? (language === "zh" ? "预检通过" : "Passed") : language === "zh" ? "待检查" : "Pending"}</span>
       </div>
       {project.html_path ? <HtmlPreviewControls language={language} htmlPath={project.html_path} /> : null}
-      {project.html_path ? (
-        <div className="design-action-row">
-          <button className="secondary-button" type="button" disabled={disabled} onClick={onSanitizePublishHtml}>
-            {language === "zh" ? "只重新清洗发布版" : "Sanitize publish HTML"}
-          </button>
-        </div>
-      ) : null}
       {checks.length ? (
         <div className="preflight-list">
           {checks.map((item) => (
@@ -2415,8 +2363,8 @@ function text(...values: unknown[]) {
 }
 
 function projectTypeLabel(value: unknown, language: "zh" | "en") {
-  const match = projectTypes.find((item) => item.id === value);
-  return match ? (language === "zh" ? match.zh : match.en) : String(value || (language === "zh" ? "公众号文章" : "WeChat article"));
+  if (!value || value === "article") return language === "zh" ? "公众号文章创作" : "WeChat article writing";
+  return language === "zh" ? "公众号文章创作" : "WeChat article writing";
 }
 
 function libraryLabel(value: unknown, language: "zh" | "en") {
