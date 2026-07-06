@@ -5372,6 +5372,113 @@ textarea {
   color: var(--ink);
 }
 
+:root:not([data-theme="light"]) .api-settings-modal {
+  border-color: var(--info-tile-border);
+  background:
+    linear-gradient(180deg, rgba(22, 49, 51, 0.98), rgba(13, 39, 41, 0.98)),
+    #163133;
+  color: var(--info-tile-value);
+  box-shadow: 0 24px 70px rgba(8, 24, 25, 0.38);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .modal-title-row span:first-child,
+:root:not([data-theme="light"]) .api-settings-modal .api-form-grid label > span,
+:root:not([data-theme="light"]) .api-settings-modal .inline-check,
+:root:not([data-theme="light"]) .api-settings-modal .field-hint,
+:root:not([data-theme="light"]) .api-settings-modal .api-form-mode-hint,
+:root:not([data-theme="light"]) .api-settings-modal .hint,
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row span,
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row small,
+:root:not([data-theme="light"]) .api-settings-modal .api-template-button span,
+:root:not([data-theme="light"]) .api-settings-modal .api-test-result span,
+:root:not([data-theme="light"]) .api-settings-modal .dependency-meta {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .modal-title-row h2,
+:root:not([data-theme="light"]) .api-settings-modal .api-template-list h3,
+:root:not([data-theme="light"]) .api-settings-modal .api-settings-list h3,
+:root:not([data-theme="light"]) .api-settings-modal .api-settings-form h3,
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row strong,
+:root:not([data-theme="light"]) .api-settings-modal .api-template-button strong,
+:root:not([data-theme="light"]) .api-settings-modal .api-test-result strong {
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .icon-button,
+:root:not([data-theme="light"]) .api-settings-modal .api-settings-form,
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row,
+:root:not([data-theme="light"]) .api-settings-modal .api-template-button,
+:root:not([data-theme="light"]) .api-settings-modal .api-test-result div {
+  border-color: var(--workbench-row-border);
+  background: var(--workbench-row-bg);
+  color: var(--workbench-field-ink);
+  box-shadow: none;
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row.selected {
+  border-color: var(--workbench-row-selected-border);
+  background: var(--workbench-row-selected-bg);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .api-setting-row.selected::before {
+  background: var(--workbench-row-track);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .api-template-list,
+:root:not([data-theme="light"]) .api-settings-modal .api-test-result {
+  border-color: var(--workbench-row-border);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .api-template-select {
+  border-color: var(--workbench-row-hover-border);
+  background: rgba(255, 247, 232, 0.08);
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal input,
+:root:not([data-theme="light"]) .api-settings-modal textarea,
+:root:not([data-theme="light"]) .api-settings-modal select {
+  border-color: var(--workbench-field-border);
+  background: var(--workbench-field-bg);
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal input::placeholder,
+:root:not([data-theme="light"]) .api-settings-modal textarea::placeholder {
+  color: rgba(255, 247, 232, 0.42);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal input:focus,
+:root:not([data-theme="light"]) .api-settings-modal textarea:focus,
+:root:not([data-theme="light"]) .api-settings-modal select:focus {
+  border-color: var(--workbench-row-selected-border);
+  background: rgba(255, 247, 232, 0.1);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .status-badge {
+  border-color: var(--workbench-row-border);
+  background: rgba(255, 247, 232, 0.08);
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .status-badge.done {
+  border-color: rgba(250, 210, 140, 0.34);
+  background: rgba(250, 210, 140, 0.14);
+  color: var(--gold-soft);
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .status-badge.error,
+:root:not([data-theme="light"]) .api-settings-modal .disabled-reason {
+  color: #f0a79d;
+}
+
+:root:not([data-theme="light"]) .api-settings-modal .danger-button {
+  border-color: rgba(166, 61, 50, 0.36);
+  background: rgba(166, 61, 50, 0.08);
+  color: #f0a79d;
+}
+
 .error-text {
   color: var(--error) !important;
 }
