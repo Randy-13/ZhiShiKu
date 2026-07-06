@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 
-export type WorkspaceId = "collect" | "learn" | "mine" | "create" | "library" | "settings" | "docs";
+export type WorkspaceId = "collect" | "learn" | "mine" | "create" | "xhs" | "library" | "settings" | "docs";
 export type LegacyStageId =
   | "overview"
   | "inbox"
@@ -92,6 +92,7 @@ export type WriterStep =
   | "knowledge_confirmed"
   | "topics"
   | "topic"
+  | "topic_configured"
   | "draft"
   | "images"
   | "designed"
@@ -117,6 +118,7 @@ export type WriterProject = {
   design_confirmed?: boolean;
   topics?: Array<Record<string, unknown>>;
   topic?: Record<string, unknown> | null;
+  image_text_config?: Record<string, unknown>;
   title?: string;
   digest?: string;
   cover_prompt?: string;
@@ -180,6 +182,149 @@ export type WriterStrategyPreset = {
   readonly?: boolean;
   created_at?: string;
   updated_at?: string;
+};
+
+export type XhsStep =
+  | "created"
+  | "knowledge_confirmed"
+  | "topics"
+  | "topic"
+  | "topic_configured"
+  | "draft"
+  | "images"
+  | "publish_check"
+  | "publish_ready"
+  | "published";
+
+export type XhsSlidePlan = {
+  index?: number;
+  role?: string;
+  title?: string;
+  body?: string;
+  visual_prompt?: string;
+};
+
+export type XhsPublishPreflight = {
+  ok?: boolean;
+  checks?: Array<{
+    key?: string;
+    label?: string;
+    ok?: boolean;
+    detail?: string;
+  }>;
+  blocking?: Array<Record<string, unknown>>;
+  title?: string;
+  title_path?: string;
+  content_path?: string;
+  image_paths?: string[];
+  tags?: string[];
+  login?: Record<string, unknown>;
+};
+
+export type XhsLoginStatus = {
+  ok?: boolean;
+  logged_in?: boolean;
+  login_method?: string;
+  qrcode_image_url?: string;
+  qrcode_path?: string;
+  qr_login_url?: string;
+  message?: string;
+  error?: string;
+};
+
+export type XhsAccountProfile = {
+  id: string;
+  name: string;
+  account_name?: string;
+  positioning: string;
+  target_audience: string;
+  audience_pain_points?: string[];
+  content_pillars: string[];
+  tone?: string;
+  value_promise?: string;
+  content_formats?: string[];
+  tag_strategy?: {
+    broad_tags?: string[];
+    niche_tags?: string[];
+    trend_tags?: string[];
+    branded_tags?: string[];
+  };
+  avoid_topics?: string[];
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type XhsCarouselStrategy = {
+  id: string;
+  name: string;
+  description?: string;
+  config: Record<string, unknown>;
+  readonly?: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type XhsProject = {
+  id: string;
+  name: string;
+  type?: "image_text" | string;
+  status?: string;
+  workspace: string;
+  created_at?: string;
+  updated_at?: string;
+  account_profile_id?: string;
+  account_profile?: XhsAccountProfile;
+  library_files?: Array<{
+    library?: "original" | "focus" | "perspective" | string;
+    title?: string;
+    knowledge_id?: number;
+    markdown_path?: string;
+  }>;
+  topics?: Array<Record<string, unknown>>;
+  topic?: Record<string, unknown> | null;
+  title?: string;
+  content?: string;
+  tags?: string[];
+  cover_prompt?: string;
+  content_image_prompts?: string[];
+  image_suggestion_rationale?: string;
+  draft_confirmed?: boolean;
+  image_suggestions_confirmed?: boolean;
+  slide_plan?: XhsSlidePlan[];
+  images?: {
+    cover?: { path?: string; prompt?: string; index?: number };
+    content_images?: Array<{ path?: string; prompt?: string; index?: number }>;
+    items?: Array<{ path?: string; prompt?: string; index?: number }>;
+    errors?: Array<{ kind?: string; index?: number; message?: string }>;
+    partial?: boolean;
+    ok?: boolean;
+  };
+  preflight?: XhsPublishPreflight;
+  publish_result?: Record<string, unknown>;
+  export_package?: {
+    ok?: boolean;
+    package_path?: string;
+    filename?: string;
+    title?: string;
+    image_count?: number;
+    tags?: string[];
+    manifest?: Record<string, unknown>;
+    guide?: string[];
+  };
+};
+
+export type XhsProjectState = {
+  project: XhsProject;
+  step: XhsStep;
+  next_action: string;
+};
+
+export type XhsRunningTask = {
+  id: string;
+  label: string;
+  runningLabel: string;
+  startedAt: number;
 };
 
 export type KnowledgeDraft = {

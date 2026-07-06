@@ -10,7 +10,7 @@ const legacyMap: Record<LegacyStageId, WorkspaceId> = {
   review: "create",
 };
 
-const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "library", "settings", "docs"];
+const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "xhs", "library", "settings", "docs"];
 
 function resolveWorkspaceRoute(route: string): WorkspaceId | undefined {
   if (workspaceOrder.includes(route as WorkspaceId)) return route as WorkspaceId;

@@ -967,3 +967,4 @@ export { mineApi } from "./apiMine";
 export { quotaApi } from "./apiQuota";
 export { settingsApi } from "./apiSettings";
 export { writerApi } from "./apiWriter";
+export { xhsApi } from "./apiXhs";

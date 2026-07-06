@@ -31,6 +31,7 @@ def test_react_shell_uses_workbench_app_with_docs_workspace_and_library_rail():
         "LearnWorkspace",
         "MineWorkspace",
         "CreateWorkspace",
+        "XhsWorkspace",
         "LibraryWorkspace",
         "SettingsWorkspace",
         "DocsWorkspace",
@@ -40,6 +41,7 @@ def test_react_shell_uses_workbench_app_with_docs_workspace_and_library_rail():
     assert 'const { activeWorkspace, selectWorkspace } = useWorkspaceRoute("collect");' in source
     assert 'const libraryKinds: LibraryKind[] = ["original", "focus", "perspective"];' in source
     assert "KnowledgeLibraryRail" in source
+    assert 'case "xhs":' in source
     assert 'case "docs":' in source
 
 
@@ -53,7 +55,9 @@ def test_react_shell_places_docs_navigation_at_sidebar_bottom():
     assert 'item.id === "docs"' in sidebar_source
     assert 'className="sidebar-bottom-nav"' in sidebar_source
     assert '"docs"' in route_source
+    assert '"xhs"' in route_source
     assert "BookMarked" in shell_source
+    assert "Images" in shell_source
     assert ".sidebar-bottom-nav" in styles
 
 
@@ -171,6 +175,7 @@ def test_react_workspaces_keep_module_boundaries_visible():
     assert "LearnWorkspace" in app_source
     assert "MineWorkspace" in app_source
     assert "CreateWorkspace" in app_source
+    assert "XhsWorkspace" in app_source
     assert "LibraryWorkspace" in app_source
     assert "SettingsWorkspace" in app_source
     assert "DocsWorkspace" in app_source

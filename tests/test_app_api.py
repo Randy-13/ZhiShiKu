@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import urllib.error
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ import ocr_client
 import storage
 import workbench_settings
 import writer_tools
+import xhs_tools
 import src.api_v2 as api_v2
 from src.auth import bootstrap_admin
 from schemas import (
@@ -58,11 +60,38 @@ def setup_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "MINING_DIR", runtime_root / "mining")
     monkeypatch.setattr(storage, "RAW_MATERIAL_DIR", runtime_root / "raw_materials")
     monkeypatch.setattr(storage, "WRITER_DIR", runtime_root / "writer")
+    monkeypatch.setattr(storage, "XHS_DIR", runtime_root / "xhs")
     monkeypatch.setattr(storage, "TRASH_DIR", runtime_root / "trash")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "knowledge.db")
     monkeypatch.setattr(workbench_settings, "SETTINGS_PATH", tmp_path / "workbench_settings.json")
     monkeypatch.setattr(writer_tools, "WRITER_DIR", runtime_root / "writer")
     storage.init_storage()
+
+
+def xhs_profile_payload(name="知识酷产业观察"):
+    return {
+        "name": name,
+        "account_name": "知识酷",
+        "positioning": "面向职场人的产业趋势图文账号",
+        "target_audience": "关注产业、就业和科技趋势的职场人",
+        "audience_pain_points": ["看不懂政策影响", "缺少结构化行业判断"],
+        "content_pillars": ["产业趋势", "政策解读", "就业观察"],
+        "tone": "克制、清晰、像可信赖的研究助理",
+        "value_promise": "把复杂产业信息讲成能收藏的判断框架",
+        "content_formats": ["清单", "避坑", "对比"],
+        "tag_strategy": {
+            "broad_tags": ["职场"],
+            "niche_tags": ["产业趋势", "政策解读"],
+            "trend_tags": ["就业"],
+            "branded_tags": ["知识酷笔记"],
+        },
+        "avoid_topics": ["无来源预测", "情绪化唱衰"],
+        "notes": "优先做可收藏的图文轮播",
+    }
+
+
+def create_xhs_profile(name="知识酷产业观察"):
+    return xhs_tools.create_account_profile(xhs_profile_payload(name))
 
 
 def test_public_beta_info_pages_and_favicon_are_available():
@@ -3969,3 +3998,378 @@ def test_writer_workspace_directory_status_and_resume(tmp_path, monkeypatch):
     assert body["article_markdown"].startswith("# Resume Article")
     assert body["html"].startswith("<html>")
     assert body["publish_result"]["media_id"] == "draft-media-id"
+
+
+def test_xhs_preflight_blocks_project_without_images(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(xhs_tools, "login_status", lambda: {"ok": True, "logged_in": True})
+
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("小红书测试", account_profile_id=profile["id"])
+    draft = xhs_tools.XhsDraftResult(
+        title="测试标题",
+        content="正文内容",
+        tags=["知识酷"],
+        cover_prompt="封面提示词",
+        content_image_prompts=["正文图提示词"],
+    )
+    xhs_tools.save_draft_artifacts(project["id"], draft)
+    xhs_tools.confirm_draft(project["id"])
+    xhs_tools.confirm_image_suggestions(project["id"])
+
+    result = xhs_tools.publish_preflight(project["id"])
+
+    assert result["ok"] is False
+    assert any(item["key"] == "images" for item in result["blocking"])
+    project_after_preflight = xhs_tools.load_project(project["id"])
+    assert xhs_tools.project_step(project_after_preflight) == "publish_check"
+    assert xhs_tools.next_action(project_after_preflight) == "run_preflight"
+
+
+def test_xhs_generate_images_falls_back_to_saved_prompts_and_persists_failures(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs image failure test", account_profile_id=profile["id"])
+    draft = xhs_tools.XhsDraftResult(
+        title="Test title",
+        content="Body",
+        tags=["tag"],
+        cover_prompt="cover prompt",
+        content_image_prompts=["content prompt"],
+    )
+    xhs_tools.save_draft_artifacts(project["id"], draft)
+    xhs_tools.confirm_draft(project["id"])
+    xhs_tools.confirm_image_suggestions(project["id"])
+
+    def fake_generate_image(prompt, output_path, setting=None):
+        raise RuntimeError("upstream image service failed")
+
+    monkeypatch.setattr(writer_tools, "generate_image", fake_generate_image)
+    client = TestClient(app.app)
+
+    response = client.post(f"/api/xhs/projects/{project['id']}/images", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["step"] == "images"
+    assert payload["project"]["images"]["ok"] is False
+    assert len(payload["project"]["images"]["errors"]) == 2
+    assert "upstream image service failed" in payload["project"]["images"]["errors"][0]["message"]
+    assert (xhs_tools.resolve_project_workspace(project["id"]) / "image_metadata.json").exists()
+
+
+def test_xhs_generate_images_returns_400_without_prompts(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs no prompt test", account_profile_id=profile["id"])
+    client = TestClient(app.app)
+
+    response = client.post(f"/api/xhs/projects/{project['id']}/images", json={})
+
+    assert response.status_code == 400
+    assert "配图提示词" in response.json()["detail"]
+
+
+def test_xhs_draft_and_image_suggestion_confirmations_gate_generation(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs staged image flow", account_profile_id=profile["id"])
+    draft = xhs_tools.XhsDraftResult(
+        title="Test title",
+        content="Body",
+        tags=["tag"],
+        cover_prompt="old cover prompt",
+        content_image_prompts=["old content prompt"],
+    )
+    xhs_tools.save_draft_artifacts(project["id"], draft)
+    client = TestClient(app.app)
+
+    loaded = client.get(f"/api/xhs/projects/{project['id']}")
+    assert loaded.status_code == 200
+    assert loaded.json()["step"] == "draft"
+    assert loaded.json()["next_action"] == "confirm_draft"
+
+    blocked_suggestion = client.post(f"/api/xhs/projects/{project['id']}/image-suggestions", json={})
+    assert blocked_suggestion.status_code == 400
+    assert "确认图文草稿" in blocked_suggestion.json()["detail"]
+
+    confirmed_draft = client.post(f"/api/xhs/projects/{project['id']}/draft/confirm")
+    assert confirmed_draft.status_code == 200
+    assert confirmed_draft.json()["step"] == "images"
+    assert confirmed_draft.json()["next_action"] == "suggest_images"
+
+    monkeypatch.setattr(
+        deepseek_client,
+        "parse_json_model",
+        lambda model, messages, setting=None: xhs_tools.XhsImageSuggestionResult(
+            cover_prompt="new cover prompt",
+            content_image_prompts=["new content prompt"],
+            rationale="image rationale",
+        ),
+    )
+    suggested = client.post(f"/api/xhs/projects/{project['id']}/image-suggestions", json={})
+    assert suggested.status_code == 200
+    assert suggested.json()["step"] == "images"
+    assert suggested.json()["next_action"] == "confirm_image_suggestions"
+    assert suggested.json()["project"]["image_suggestions_confirmed"] is False
+
+    blocked_generation = client.post(f"/api/xhs/projects/{project['id']}/images", json={})
+    assert blocked_generation.status_code == 400
+    assert "确认配图建议" in blocked_generation.json()["detail"]
+
+    confirmed_suggestions = client.post(f"/api/xhs/projects/{project['id']}/image-suggestions/confirm")
+    assert confirmed_suggestions.status_code == 200
+    assert confirmed_suggestions.json()["step"] == "images"
+    assert confirmed_suggestions.json()["next_action"] == "generate_images"
+    assert confirmed_suggestions.json()["project"]["image_suggestions_confirmed"] is True
+
+
+def test_xhs_fill_publish_uses_files_and_absolute_image_paths(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(xhs_tools, "login_status", lambda: {"ok": True, "logged_in": True})
+    calls = []
+
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("小红书测试", account_profile_id=profile["id"])
+    draft = xhs_tools.XhsDraftResult(
+        title="测试标题",
+        content="正文内容",
+        tags=["知识酷"],
+        cover_prompt="封面提示词",
+        content_image_prompts=[],
+    )
+    xhs_tools.save_draft_artifacts(project["id"], draft)
+    project_dir = xhs_tools.resolve_project_workspace(project["id"])
+    image_path = project_dir / "cover.png"
+    image_path.write_bytes(PNG_1X1)
+    xhs_tools._write_json(
+        project_dir / "image_metadata.json",
+        {
+            "cover": {"path": storage.storage_relative(image_path), "prompt": "封面提示词"},
+            "content_images": [],
+            "items": [],
+            "errors": [],
+        },
+    )
+
+    def fake_run(args, timeout=120):
+        calls.append(args)
+        return {"ok": True, "args": args}
+
+    monkeypatch.setattr(xhs_tools, "_run_xhs_cli", fake_run)
+
+    result = xhs_tools.fill_publish(project["id"])
+
+    assert result["ok"] is True
+    args = calls[-1]
+    assert args[0] == "fill-publish"
+    assert "--title-file" in args
+    assert "--content-file" in args
+    assert "--images" in args
+    assert str(image_path.resolve()) in args
+    assert "测试标题" not in args
+    assert "正文内容" not in args
+    assert (project_dir / "publish_result.json").exists()
+
+
+
+def test_xhs_export_package_contains_publish_assets(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs export package", account_profile_id=profile["id"])
+    draft = xhs_tools.XhsDraftResult(
+        title="Export title",
+        content="Export body",
+        tags=["tag1", "tag2"],
+        cover_prompt="cover prompt",
+        content_image_prompts=[],
+    )
+    xhs_tools.save_draft_artifacts(project["id"], draft)
+    project_dir = xhs_tools.resolve_project_workspace(project["id"])
+    image_path = project_dir / "cover.png"
+    image_path.write_bytes(PNG_1X1)
+    xhs_tools._write_json(
+        project_dir / "image_metadata.json",
+        {"cover": {"path": storage.storage_relative(image_path), "prompt": "cover prompt"}, "content_images": [], "items": [], "errors": []},
+    )
+    client = TestClient(app.app)
+
+    response = client.post(f"/api/xhs/projects/{project['id']}/export-package")
+
+    assert response.status_code == 200
+    package = response.json()["export_package"]
+    package_path = storage.resolve_root_path(package["package_path"])
+    assert package_path and package_path.exists()
+    with zipfile.ZipFile(package_path) as archive:
+        names = set(archive.namelist())
+        assert {"title.txt", "content.txt", "tags.txt", "publish_guide.md", "manifest.json", "images/01.png"} <= names
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        assert manifest["project_id"] == project["id"]
+        assert manifest["images"][0]["filename"] == "images/01.png"
+        assert archive.read("title.txt").decode("utf-8").strip() == "Export title"
+
+
+def test_xhs_export_package_requires_title_content_and_images(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs export missing assets", account_profile_id=profile["id"])
+    client = TestClient(app.app)
+
+    response = client.post(f"/api/xhs/projects/{project['id']}/export-package")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]
+
+
+def test_cloud_member_can_export_xhs_package_but_not_use_bridge_publish(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    client, _payload = _register_app_cloud_member("XHS-EXPORT", "xhs-export@example.test", "xhs_export")
+
+    def forbidden_cli(*args, **kwargs):
+        raise AssertionError("XHS bridge CLI should not be called for cloud members")
+
+    monkeypatch.setattr(xhs_tools, "_run_xhs_cli", forbidden_cli)
+    profile_response = client.post("/api/xhs/account-profiles", json=xhs_profile_payload("XHS ????"))
+    assert profile_response.status_code == 200
+    profile = profile_response.json()["profile"]
+    project_response = client.post("/api/xhs/projects", json={"name": "??????", "account_profile_id": profile["id"]})
+    assert project_response.status_code == 200
+    project_id = project_response.json()["project"]["id"]
+    draft = xhs_tools.XhsDraftResult(title="Cloud export", content="Cloud body", tags=["cloud"], cover_prompt="cover")
+    xhs_tools.save_draft_artifacts(project_id, draft)
+    project_dir = xhs_tools.resolve_project_workspace(project_id)
+    image_path = project_dir / "cover.png"
+    image_path.write_bytes(PNG_1X1)
+    xhs_tools._write_json(
+        project_dir / "image_metadata.json",
+        {"cover": {"path": storage.storage_relative(image_path), "prompt": "cover"}, "content_images": [], "items": [], "errors": []},
+    )
+
+    assert client.get("/api/xhs/auth/status").status_code == 403
+    preflight = client.post("/api/xhs/publish/preflight", json={"project_id": project_id})
+    assert preflight.status_code == 200
+    assert preflight.json()["preflight"]["login"]["skipped"] is True
+    exported = client.post(f"/api/xhs/projects/{project_id}/export-package")
+    assert exported.status_code == 200
+    assert exported.json()["export_package"]["image_count"] == 1
+    assert client.post(f"/api/xhs/projects/{project_id}/publish/fill").status_code == 403
+    assert client.post(f"/api/xhs/projects/{project_id}/publish/confirm").status_code == 403
+    assert client.post(f"/api/xhs/projects/{project_id}/publish/save-draft").status_code == 403
+
+def test_xhs_account_profile_crud_uses_local_json_storage(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+
+    profile = xhs_tools.create_account_profile(xhs_profile_payload("产业图文号"))
+    profile_path = xhs_tools.xhs_profiles_dir() / profile["id"] / "profile.json"
+
+    assert profile_path.exists()
+    assert storage.XHS_DIR in profile_path.resolve().parents
+    assert storage.WRITER_DIR not in profile_path.resolve().parents
+    assert xhs_tools.list_account_profiles()[0]["id"] == profile["id"]
+
+    updated = xhs_tools.update_account_profile(profile["id"], {**xhs_profile_payload("产业图文号升级"), "tone": "更直接、更像研究员"})
+
+    assert updated["name"] == "产业图文号升级"
+    assert updated["tone"] == "更直接、更像研究员"
+
+    xhs_tools.delete_account_profile(profile["id"])
+
+    assert not xhs_tools.list_account_profiles()
+
+
+def test_xhs_projects_and_strategies_use_dedicated_xhs_storage(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+
+    profile = xhs_tools.create_account_profile(xhs_profile_payload("小红书专用目录"))
+    project = xhs_tools.create_project("目录归类测试", account_profile_id=profile["id"])
+    saved_strategy = xhs_tools.save_carousel_strategy(
+        "目录策略",
+        xhs_tools.default_image_text_config({"note_format": "清单轮播"}),
+    )
+
+    project_path = xhs_tools.resolve_project_workspace(project["id"]) / "project.json"
+    strategy_path = xhs_tools.xhs_carousel_strategies_file()
+
+    assert project_path.exists()
+    assert strategy_path.exists()
+    assert storage.XHS_DIR in project_path.resolve().parents
+    assert storage.XHS_DIR in strategy_path.resolve().parents
+    assert storage.WRITER_DIR not in project_path.resolve().parents
+    assert storage.WRITER_DIR not in strategy_path.resolve().parents
+    assert Path(xhs_tools.load_project(project["id"])["workspace"]).parts[:2] == ("xhs", "projects")
+    assert any(item["id"] == saved_strategy["id"] for item in xhs_tools.list_carousel_strategies()["items"])
+
+
+def test_xhs_project_creation_requires_and_snapshots_account_profile(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+
+    client = TestClient(app.app)
+    missing_response = client.post("/api/xhs/projects", json={"name": "缺定位项目"})
+
+    assert missing_response.status_code == 400
+
+    profile_response = client.post("/api/xhs/account-profiles", json=xhs_profile_payload("知识酷定位"))
+    assert profile_response.status_code == 200
+    profile = profile_response.json()["profile"]
+
+    project_response = client.post(
+        "/api/xhs/projects",
+        json={"name": "有定位项目", "account_profile_id": profile["id"], "library_files": []},
+    )
+
+    assert project_response.status_code == 200
+    project = project_response.json()["project"]
+    assert project["account_profile_id"] == profile["id"]
+    assert project["account_profile"]["positioning"] == profile["positioning"]
+
+    client.put(
+        f"/api/xhs/account-profiles/{profile['id']}",
+        json={**xhs_profile_payload("知识酷定位新版"), "positioning": "新版定位"},
+    )
+    loaded = xhs_tools.load_project(project["id"])
+
+    assert loaded["account_profile"]["positioning"] == profile["positioning"]
+
+
+def test_xhs_generate_topics_includes_account_profile_in_prompt(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    source_path = storage.KNOWLEDGE_DIR / "source.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("这是一份关于产业趋势的素材。", encoding="utf-8")
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("小红书测试", account_profile_id=profile["id"])
+    xhs_tools.set_project_library_files(
+        project["id"],
+        [{"library": "original", "title": "产业素材", "markdown_path": storage.storage_relative(source_path)}],
+    )
+    prompts = []
+
+    class FakeTopics:
+        def model_dump(self):
+            return {"suggestions": [{"title": "产业趋势怎么读", "angle": "职场视角"}]}
+
+    def fake_parse(model, messages, setting=None):
+        prompts.append(messages[0]["content"])
+        return FakeTopics()
+
+    monkeypatch.setattr(deepseek_client, "parse_json_model", fake_parse)
+
+    result = xhs_tools.generate_topics(project["id"])
+
+    assert result["suggestions"][0]["title"] == "产业趋势怎么读"
+    prompt = prompts[0]
+    assert "面向职场人的产业趋势图文账号" in prompt
+    assert "关注产业、就业和科技趋势的职场人" in prompt
+    assert "产业趋势" in prompt
+    assert "情绪化唱衰" in prompt
+
+
+def test_xhs_generate_topics_blocks_legacy_project_without_account_profile(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    project = xhs_tools.create_project("小红书测试", account_profile_id=create_xhs_profile()["id"])
+    xhs_tools.update_project(project["id"], account_profile_id="", account_profile={})
+
+    with pytest.raises(ValueError, match="账号定位"):
+        xhs_tools.generate_topics(project["id"])

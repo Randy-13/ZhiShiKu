@@ -23,6 +23,7 @@ import ocr_client
 import storage
 import workbench_settings
 import writer_tools
+import xhs_tools
 from markdown_writer import render_creation_strategy_markdown, render_knowledge_markdown
 from media_transcriber import transcribe_audio, transcribe_audio_url
 from schemas import DocumentPlanResult, DocumentPlanSegment, KnowledgeResult
@@ -477,6 +478,79 @@ class WriterProjectAdvanceRequest(BaseModel):
     cover_path: str | None = None
 
 
+class XhsProjectCreateRequest(BaseModel):
+    name: str = ""
+    description: str = ""
+    account_profile_id: str = ""
+    library_files: list[dict[str, object]] = []
+
+
+class XhsAccountProfileRequest(BaseModel):
+    name: str = ""
+    account_name: str = ""
+    positioning: str = ""
+    target_audience: str = ""
+    audience_pain_points: list[str] = []
+    content_pillars: list[str] = []
+    tone: str = ""
+    value_promise: str = ""
+    content_formats: list[str] = []
+    tag_strategy: dict[str, list[str]] = {}
+    avoid_topics: list[str] = []
+    notes: str = ""
+
+
+class XhsProjectKnowledgeRequest(BaseModel):
+    library_files: list[dict[str, object]] = []
+
+
+class XhsProjectTopicRequest(BaseModel):
+    topic: dict[str, object]
+
+
+class XhsProjectConfigRequest(BaseModel):
+    config: dict[str, object]
+
+
+class XhsCarouselStrategySaveRequest(BaseModel):
+    id: str | None = None
+    name: str
+    description: str = ""
+    config: dict[str, object]
+
+
+class XhsProjectDraftRequest(BaseModel):
+    topic: dict[str, object] | None = None
+    config: dict[str, object] | None = None
+
+
+class XhsProjectReviseRequest(BaseModel):
+    instruction: str
+    content: str | None = None
+
+
+class XhsProjectImageSuggestionsRequest(BaseModel):
+    content: str | None = None
+
+
+class XhsProjectImagesRequest(BaseModel):
+    cover_prompt: str | None = None
+    content_image_prompts: list[str] = []
+    cover_aspect_ratio: str | None = "3:4"
+    content_aspect_ratio: str | None = "3:4"
+
+
+class XhsProjectImageItemRequest(BaseModel):
+    kind: str
+    prompt: str
+    index: int | None = None
+    aspect_ratio: str | None = "3:4"
+
+
+class XhsPublishPreflightRequest(BaseModel):
+    project_id: str
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
@@ -507,6 +581,11 @@ def mine_page() -> HTMLResponse:
 
 @app.get("/create", response_class=HTMLResponse)
 def create_page() -> HTMLResponse:
+    return react_app_response()
+
+
+@app.get("/xhs", response_class=HTMLResponse)
+def xhs_page() -> HTMLResponse:
     return react_app_response()
 
 
@@ -3139,6 +3218,443 @@ def _require_project_materials(project: dict[str, object]) -> list[tuple[str, st
     if not materials:
         raise HTTPException(status_code=400, detail="Please confirm at least one knowledge file")
     return materials
+
+
+def _xhs_project_payload(project_id: str, owner_user_id: str | None = None) -> dict[str, object]:
+    project = xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+    step = xhs_tools.project_step(project)
+    return {"project": project, "step": step, "next_action": xhs_tools.next_action(project, step)}
+
+
+def _xhs_owner_scope(request: Request) -> str | None:
+    return _writer_owner_scope(request)
+
+
+def _xhs_context_ids(request: Request) -> tuple[str | None, str | None, str | None]:
+    with storage.connect() as conn:
+        context = current_context(request, conn)
+    owner_user_id, workspace_id = _context_owner_ids(context)
+    return owner_user_id, workspace_id, _cloud_scoped_owner_id(context)
+
+
+@app.get("/api/xhs/account-profiles")
+def xhs_account_profiles(request: Request) -> dict[str, object]:
+    owner_scope = _xhs_owner_scope(request)
+    return {"items": xhs_tools.list_account_profiles(owner_user_id=owner_scope, include_ownerless=owner_scope is None)}
+
+
+@app.post("/api/xhs/account-profiles")
+def xhs_account_profile_create(payload: XhsAccountProfileRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id, workspace_id, owner_scope = _xhs_context_ids(request)
+        profile = xhs_tools.create_account_profile(payload.model_dump(), owner_user_id=owner_user_id, workspace_id=workspace_id)
+        return {
+            "profile": profile,
+            "items": xhs_tools.list_account_profiles(owner_user_id=owner_scope, include_ownerless=owner_scope is None),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/api/xhs/account-profiles/{profile_id}")
+def xhs_account_profile_update(profile_id: str, payload: XhsAccountProfileRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_scope = _xhs_owner_scope(request)
+        profile = xhs_tools.update_account_profile(profile_id, payload.model_dump(), owner_user_id=owner_scope, include_ownerless=owner_scope is None)
+        return {
+            "profile": profile,
+            "items": xhs_tools.list_account_profiles(owner_user_id=owner_scope, include_ownerless=owner_scope is None),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/xhs/account-profiles/{profile_id}")
+def xhs_account_profile_delete(profile_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_scope = _xhs_owner_scope(request)
+        result = xhs_tools.delete_account_profile(profile_id, owner_user_id=owner_scope, include_ownerless=owner_scope is None)
+        return {
+            **result,
+            "items": xhs_tools.list_account_profiles(owner_user_id=owner_scope, include_ownerless=owner_scope is None),
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/xhs/carousel-strategies")
+def xhs_carousel_strategies() -> dict[str, object]:
+    try:
+        return xhs_tools.list_carousel_strategies()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/carousel-strategies")
+def xhs_carousel_strategy_save(payload: XhsCarouselStrategySaveRequest) -> dict[str, object]:
+    try:
+        item = xhs_tools.save_carousel_strategy(payload.name, payload.config, payload.id, description=payload.description)
+        return {**xhs_tools.list_carousel_strategies(), "item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/xhs/carousel-strategies/{strategy_id}")
+def xhs_carousel_strategy_delete(strategy_id: str) -> dict[str, object]:
+    try:
+        xhs_tools.delete_carousel_strategy(strategy_id)
+        return xhs_tools.list_carousel_strategies()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/xhs/projects")
+def xhs_projects(request: Request) -> dict[str, object]:
+    owner_user_id = _xhs_owner_scope(request)
+    return {"items": xhs_tools.list_projects(owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)}
+
+
+@app.post("/api/xhs/projects")
+def xhs_project_create(payload: XhsProjectCreateRequest, request: Request) -> dict[str, object]:
+    try:
+        with storage.connect() as conn:
+            context = current_context(request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
+        files = _writer_library_files_from_refs(payload.library_files, request) if payload.library_files else []
+        default_name = str(files[0]["title"]) if files else ""
+        project = xhs_tools.create_project(
+            payload.name or default_name or "未命名小红书图文",
+            description=payload.description,
+            account_profile_id=payload.account_profile_id,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
+        )
+        if files:
+            xhs_tools.set_project_library_files(str(project["id"]), files)
+        return _xhs_project_payload(str(project["id"]), owner_user_id=_cloud_scoped_owner_id(context))
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/xhs/projects/{project_id}")
+def xhs_project_read(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        return _xhs_project_payload(project_id, owner_user_id=_xhs_owner_scope(request))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/knowledge")
+def xhs_project_knowledge(project_id: str, payload: XhsProjectKnowledgeRequest, request: Request) -> dict[str, object]:
+    if not payload.library_files:
+        raise HTTPException(status_code=400, detail="请先在右侧知识库勾选至少一个文件")
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        files = _writer_library_files_from_refs(payload.library_files, request)
+        if not files:
+            raise HTTPException(status_code=400, detail="所选知识文件没有可读取的 Markdown 路径")
+        xhs_tools.set_project_library_files(project_id, files)
+        return _xhs_project_payload(project_id, owner_user_id=owner_user_id)
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/topics")
+def xhs_project_topics(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.generate_topics(project_id, setting=deepseek_client.current_setting())
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "topics": result["suggestions"]}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/topic")
+def xhs_project_select_topic(project_id: str, payload: XhsProjectTopicRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        xhs_tools.select_topic(project_id, payload.topic)
+        return _xhs_project_payload(project_id, owner_user_id=owner_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/config")
+def xhs_project_config(project_id: str, payload: XhsProjectConfigRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        xhs_tools.configure_image_text(project_id, payload.config)
+        return _xhs_project_payload(project_id, owner_user_id=owner_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/draft")
+def xhs_project_draft(project_id: str, payload: XhsProjectDraftRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.generate_draft(project_id, topic=payload.topic, config=payload.config, setting=deepseek_client.current_setting())
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "draft": result.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/draft/confirm")
+def xhs_project_confirm_draft(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        xhs_tools.confirm_draft(project_id)
+        return _xhs_project_payload(project_id, owner_user_id=owner_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/revise")
+def xhs_project_revise(project_id: str, payload: XhsProjectReviseRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.revise_draft(project_id, payload.instruction, content=payload.content, setting=deepseek_client.current_setting())
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "revision": result.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/image-suggestions")
+def xhs_project_image_suggestions(project_id: str, payload: XhsProjectImageSuggestionsRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        if payload.content is not None:
+            xhs_tools.update_project(project_id, content=payload.content)
+        result = xhs_tools.suggest_images(project_id, setting=deepseek_client.current_setting())
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "image_suggestions": result.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/image-suggestions/confirm")
+def xhs_project_confirm_image_suggestions(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        xhs_tools.confirm_image_suggestions(project_id)
+        return _xhs_project_payload(project_id, owner_user_id=owner_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/images")
+def xhs_project_images(project_id: str, payload: XhsProjectImagesRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        project = xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        cover_prompt = payload.cover_prompt or project.get("cover_prompt")
+        content_prompts = payload.content_image_prompts or project.get("content_image_prompts") or []
+        if not cover_prompt and not content_prompts:
+            raise HTTPException(status_code=400, detail="请先生成或填写小红书配图提示词")
+        result = xhs_tools.generate_images(
+            project_id,
+            cover_prompt=str(cover_prompt) if cover_prompt else None,
+            content_image_prompts=[str(item) for item in content_prompts],
+            cover_aspect_ratio=payload.cover_aspect_ratio,
+            content_aspect_ratio=payload.content_aspect_ratio,
+        )
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/images/item")
+def xhs_project_image_item(project_id: str, payload: XhsProjectImageItemRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.generate_image_item(project_id, payload.kind, payload.prompt, index=payload.index, aspect_ratio=payload.aspect_ratio)
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "images": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/xhs/auth/status")
+def xhs_auth_status(request: Request) -> dict[str, object]:
+    _require_local_or_cloud_admin(request, "小红书登录检查需要在本机浏览器环境中运行；云端用户请导出图文压缩包后自行上传。")
+    return xhs_tools.login_status()
+
+
+@app.post("/api/xhs/publish/preflight")
+def xhs_publish_preflight(payload: XhsPublishPreflightRequest, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(payload.project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        if _should_redact_local_settings(request):
+            result = xhs_tools.publish_content_preflight(payload.project_id)
+        else:
+            result = xhs_tools.publish_preflight(payload.project_id)
+        return {**_xhs_project_payload(payload.project_id, owner_user_id=owner_user_id), "preflight": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/export-package")
+def xhs_project_export_package(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.export_publish_package(project_id)
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "export_package": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/publish/fill")
+def xhs_project_publish_fill(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        _require_local_or_cloud_admin(request, "小红书自动填入需要本机浏览器和 XHS Bridge；云端用户请导出图文压缩包后自行上传。")
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.fill_publish(project_id)
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "publish": result}
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/publish/confirm")
+def xhs_project_publish_confirm(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        _require_local_or_cloud_admin(request, "小红书确认发布需要本机浏览器和 XHS Bridge；云端用户请导出图文压缩包后自行上传。")
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.confirm_publish(project_id)
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "publish": result}
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/xhs/projects/{project_id}/publish/save-draft")
+def xhs_project_publish_save_draft(project_id: str, request: Request) -> dict[str, object]:
+    try:
+        _require_local_or_cloud_admin(request, "小红书保存草稿需要本机浏览器和 XHS Bridge；云端用户请导出图文压缩包后自行上传。")
+        owner_user_id = _xhs_owner_scope(request)
+        xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=owner_user_id is None)
+        result = xhs_tools.save_publish_draft(project_id)
+        return {**_xhs_project_payload(project_id, owner_user_id=owner_user_id), "publish": result}
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/xhs/file")
+def xhs_file(path: str, request: Request) -> FileResponse:
+    try:
+        file_path = xhs_tools.resolve_xhs_file(path)
+        owner_user_id = _xhs_owner_scope(request)
+        if owner_user_id is not None:
+            relative = file_path.resolve().relative_to(xhs_tools.xhs_projects_dir().resolve())
+            project_id = relative.parts[0] if relative.parts else ""
+            xhs_tools.load_project(project_id, owner_user_id=owner_user_id, include_ownerless=False)
+        return FileResponse(file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/writer/session")

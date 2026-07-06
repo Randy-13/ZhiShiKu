@@ -13,6 +13,7 @@ import { CollectWorkspace } from "./workspaces/CollectWorkspace";
 import { LearnWorkspace } from "./workspaces/LearnWorkspace";
 import { MineWorkspace } from "./workspaces/MineWorkspace";
 import { CreateWorkspace } from "./workspaces/CreateWorkspace";
+import { XhsWorkspace } from "./workspaces/XhsWorkspace";
 import { LibraryWorkspace } from "./workspaces/LibraryWorkspace";
 import { SettingsWorkspace } from "./workspaces/SettingsWorkspace";
 import { DocsWorkspace } from "./workspaces/DocsWorkspace";
@@ -28,6 +29,7 @@ import { useLearningFlow } from "./hooks/useLearningFlow";
 import { useLibraryRail } from "./hooks/useLibraryRail";
 import { useMineFlow } from "./hooks/useMineFlow";
 import { useWriterFlow } from "./hooks/useWriterFlow";
+import { useXhsFlow } from "./hooks/useXhsFlow";
 import { useWorkspaceRoute } from "./hooks/useWorkspaceRoute";
 
 const libraryKinds: LibraryKind[] = ["original", "focus", "perspective"];
@@ -105,6 +107,41 @@ function WorkbenchApp({
     preflightWriterProject,
     publishWriterProject,
   } = useWriterFlow({ language, addActivity, selectWorkspace });
+  const {
+    xhsProjects,
+    xhsState,
+    selectedXhsProjectId,
+    xhsAccountProfiles,
+    xhsCarouselStrategies,
+    selectedXhsAccountProfileId,
+    setSelectedXhsAccountProfileId,
+    isXhsRunning,
+    xhsRunningTask,
+    xhsLoginStatus,
+    saveXhsAccountProfile,
+    deleteXhsAccountProfile,
+    saveXhsCarouselStrategy,
+    deleteXhsCarouselStrategy,
+    createXhsProject,
+    selectXhsProject,
+    importXhsKnowledge,
+    generateXhsTopics,
+    selectXhsTopic,
+    configureXhsImageText,
+    generateXhsDraft,
+    confirmXhsDraft,
+    reviseXhsDraft,
+    suggestXhsImages,
+    confirmXhsImageSuggestions,
+    generateXhsImages,
+    retryXhsImageItems,
+    refreshXhsLoginStatus,
+    preflightXhsPublish,
+    exportXhsPackage,
+    fillXhsPublish,
+    confirmXhsPublish,
+    saveXhsPublishDraft,
+  } = useXhsFlow({ language, addActivity, selectWorkspace });
 
   useEffect(() => {
     document.documentElement.dataset.theme = visualTheme;
@@ -557,6 +594,57 @@ function WorkbenchApp({
             onPublish={publishWriterProject}
           />
         );
+      case "xhs":
+        return (
+          <XhsWorkspace
+            language={language}
+            rightRail={knowledgeRail}
+            selectedKnowledgeFiles={selectedRailKnowledge}
+            projects={xhsProjects}
+            state={xhsState}
+            selectedProjectId={selectedXhsProjectId}
+            accountProfiles={xhsAccountProfiles}
+            carouselStrategies={xhsCarouselStrategies}
+            selectedAccountProfileId={selectedXhsAccountProfileId}
+            isRunning={isXhsRunning}
+            runningTask={xhsRunningTask}
+            isCloudMember={authContext.deploymentMode === "cloud" && authContext.user?.role !== "admin"}
+            loginStatus={xhsLoginStatus}
+            onSelectAccountProfile={setSelectedXhsAccountProfileId}
+            onSaveAccountProfile={saveXhsAccountProfile}
+            onDeleteAccountProfile={deleteXhsAccountProfile}
+            onSaveCarouselStrategy={saveXhsCarouselStrategy}
+            onDeleteCarouselStrategy={deleteXhsCarouselStrategy}
+            onCreateProject={createXhsProject}
+            onSelectProject={selectXhsProject}
+            onImportKnowledge={importXhsKnowledge}
+            onGenerateTopics={generateXhsTopics}
+            onSelectTopic={selectXhsTopic}
+            onConfigureImageText={configureXhsImageText}
+            onGenerateDraft={generateXhsDraft}
+            onConfirmDraft={confirmXhsDraft}
+            onReviseDraft={reviseXhsDraft}
+            onSuggestImages={suggestXhsImages}
+            onConfirmImageSuggestions={confirmXhsImageSuggestions}
+            onGenerateImages={generateXhsImages}
+            onRetryImageItems={retryXhsImageItems}
+            onRefreshLogin={() => {
+              refreshXhsLoginStatus().catch((error) => {
+                addActivity({
+                  title: language === "zh" ? "小红书登录检查失败" : "XHS login check failed",
+                  detail: error instanceof Error ? error.message : "Unable to check XHS login",
+                  workspace: "xhs",
+                  status: "error",
+                });
+              });
+            }}
+            onPreflight={preflightXhsPublish}
+            onExportPackage={exportXhsPackage}
+            onFillPublish={fillXhsPublish}
+            onConfirmPublish={confirmXhsPublish}
+            onSavePublishDraft={saveXhsPublishDraft}
+          />
+        );
       case "library":
         return (
           <LibraryWorkspace
@@ -596,6 +684,7 @@ function WorkbenchApp({
     Number(isMining) +
     Number(isSavingPerspective) +
     Number(isWriting) +
+    Number(isXhsRunning) +
     activities.filter((event) => event.status === "running").length;
   const runningCount = activeJobCount + localRunningCount;
   const logout = useCallback(async () => {

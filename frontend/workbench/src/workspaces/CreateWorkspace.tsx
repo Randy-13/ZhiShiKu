@@ -392,7 +392,7 @@ export function CreateWorkspace({
     <section className="create-project-layout">
       <aside className="content-panel project-list-panel">
         <div className="panel-heading">
-          <h2>{language === "zh" ? "公众号文章创作" : "WeChat article writing"}</h2>
+          <h2>{language === "zh" ? "公众号" : "WeChat article writing"}</h2>
           <button className="secondary-button" type="button" disabled={isRunning} onClick={() => setCreateMode(true)}>
             <FolderPlus size={16} />
             {language === "zh" ? "新建" : "New"}
@@ -1057,7 +1057,7 @@ function ProjectSetup({
   return (
     <section className="content-panel project-setup-guide">
       <div className="setup-copy">
-        <span>{language === "zh" ? "公众号文章创作" : "WeChat article writing"}</span>
+        <span>{language === "zh" ? "公众号" : "WeChat article writing"}</span>
         <h2>{language === "zh" ? "创建专用公众号文章项目" : "Create a dedicated WeChat article project"}</h2>
       </div>
       <div className="setup-form-grid">
@@ -2363,8 +2363,8 @@ function text(...values: unknown[]) {
 }
 
 function projectTypeLabel(value: unknown, language: "zh" | "en") {
-  if (!value || value === "article") return language === "zh" ? "公众号文章创作" : "WeChat article writing";
-  return language === "zh" ? "公众号文章创作" : "WeChat article writing";
+  if (!value || value === "article") return language === "zh" ? "公众号" : "WeChat article writing";
+  return language === "zh" ? "公众号" : "WeChat article writing";
 }
 
 function libraryLabel(value: unknown, language: "zh" | "en") {

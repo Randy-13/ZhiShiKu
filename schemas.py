@@ -126,6 +126,27 @@ class TopicSuggestionsResult(BaseModel):
     suggestions: list[TopicSuggestion] = Field(default_factory=list)
 
 
+class XhsTopicSuggestion(BaseModel):
+    content_pillar: str
+    user_pain_point: str
+    title_hook: str
+    topic_angle: str
+    note_format: str
+    carousel_count: int = Field(default=5, ge=1, le=7)
+    cover_hook: str
+    slide_flow: list[str] = Field(default_factory=list)
+    value_points: list[str] = Field(default_factory=list)
+    material_basis: str
+    reference_files: list[str] = Field(default_factory=list)
+    tag_keywords: list[str] = Field(default_factory=list)
+    cta: str = ""
+    risk_boundary: str = ""
+
+
+class XhsTopicSuggestionsResult(BaseModel):
+    suggestions: list[XhsTopicSuggestion] = Field(default_factory=list)
+
+
 class GraphIngestionResult(BaseModel):
     primary_category: str
     secondary_category: str

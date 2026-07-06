@@ -1,17 +1,18 @@
-import { BookMarked, BookOpen, Boxes, Cog, Feather, Inbox, Pickaxe } from "lucide-react";
+import { BookMarked, BookOpen, Boxes, Cog, Feather, Images, Inbox, Pickaxe } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appShellApi } from "../apiAppShell";
 import type { AppShellPayload, AppShellSection } from "../apiAppShell";
 import type { WorkspaceId, WorkspaceNavItem } from "../domain";
 import type { Translator } from "../i18n";
 
-const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "library", "settings", "docs"];
+const workspaceOrder: WorkspaceId[] = ["collect", "learn", "mine", "create", "xhs", "library", "settings", "docs"];
 const workspaceIds = new Set<string>(workspaceOrder);
 const workspaceIcons = {
   collect: Inbox,
   learn: BookOpen,
   mine: Pickaxe,
   create: Feather,
+  xhs: Images,
   library: Boxes,
   settings: Cog,
   docs: BookMarked,

@@ -120,7 +120,7 @@ def test_create_workspace_integrates_article_workflow_entry():
     create_workspace = soup.find(id="createWorkspace")
 
     assert create_workspace is not None
-    assert create_workspace.get("aria-label") == "公众号文章创作"
+    assert create_workspace.get("aria-label") == "公众号"
     assert "小红书图文" not in create_workspace.get_text(" ", strip=True)
     assert "短视频脚本" not in create_workspace.get_text(" ", strip=True)
     assert "长视频脚本" not in create_workspace.get_text(" ", strip=True)

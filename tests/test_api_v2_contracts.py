@@ -37,6 +37,7 @@ def isolate_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "MINING_DIR", runtime_root / "mining")
     monkeypatch.setattr(storage, "RAW_MATERIAL_DIR", runtime_root / "raw_materials")
     monkeypatch.setattr(storage, "WRITER_DIR", runtime_root / "writer")
+    monkeypatch.setattr(storage, "XHS_DIR", runtime_root / "xhs")
     monkeypatch.setattr(storage, "TRASH_DIR", runtime_root / "trash")
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "knowledge.test.db")
@@ -77,8 +78,8 @@ def test_v2_app_shell_contract():
     sections = payload["data"]["primarySections"]
     entries = payload["data"]["workspaceEntries"]
     libraries = payload["data"]["globalLibraries"]
-    assert [item["id"] for item in sections] == ["collect", "learn", "mine", "create", "library", "settings", "docs"]
-    assert [item["navLabel"] for item in sections] == ["收集", "学习", "挖掘", "公众号文章创作", "知识库", "设置中心", "文档"]
+    assert [item["id"] for item in sections] == ["collect", "learn", "mine", "create", "xhs", "library", "settings", "docs"]
+    assert [item["navLabel"] for item in sections] == ["收集", "学习", "挖掘", "公众号", "小红书", "知识库", "设置中心", "文档"]
     assert [item["id"] for item in libraries] == ["raw", "focus", "perspective"]
     assert [item["label"] for item in libraries] == ["原料库", "重点库", "视角库"]
     assert all(item["navDescription"] for item in sections)

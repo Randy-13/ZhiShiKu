@@ -74,11 +74,20 @@ PRIMARY_SECTIONS: tuple[ShellSection, ...] = (
     ShellSection(
         id="create",
         label="WeChat Article",
-        nav_label="公众号文章创作",
+        nav_label="公众号",
         nav_description="写作、美编与发布检查",
         route="/create",
         priority="P1",
         purpose="Write, design, preflight, and publish-check WeChat public-account articles from all libraries.",
+    ),
+    ShellSection(
+        id="xhs",
+        label="Xiaohongshu",
+        nav_label="小红书",
+        nav_description="图文、轮播图、标签与发布预检",
+        route="/xhs",
+        priority="P1",
+        purpose="Create Xiaohongshu image-text posts with carousel images, tags, preflight, and staged publishing.",
     ),
     ShellSection(
         id="library",
@@ -182,6 +191,15 @@ WORKSPACE_ENTRIES: tuple[WorkspaceEntry, ...] = (
         surface="main_workspace",
     ),
     WorkspaceEntry(
+        id="create-xhs-image-text",
+        label="Xiaohongshu image-text studio",
+        route="/xhs",
+        shell_section="xhs",
+        capability_id="create_xhs_image_text",
+        priority="P1",
+        surface="main_workspace",
+    ),
+    WorkspaceEntry(
         id="library-files",
         label="Knowledge library",
         route="/library",
@@ -253,6 +271,13 @@ WORKSPACE_PLACEMENTS: tuple[WorkspacePlacement, ...] = (
         primary_region="workspace",
         secondary_region="global_library",
         interaction_stage="quote_libraries_to_wechat_article",
+    ),
+    WorkspacePlacement(
+        capability_id="create_xhs_image_text",
+        shell_section="xhs",
+        primary_region="workspace",
+        secondary_region="global_library",
+        interaction_stage="quote_libraries_to_xhs_image_text",
     ),
     WorkspacePlacement(
         capability_id="manage_libraries",

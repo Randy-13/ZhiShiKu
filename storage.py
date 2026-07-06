@@ -36,6 +36,10 @@ def _is_writable_dir(path: Path) -> bool:
         return False
 
 
+def _looks_like_storage_dir(path: Path) -> bool:
+    return path.exists() and path.is_dir() and any((path / name).exists() for name in ("writer", "knowledge", "raw_materials"))
+
+
 def _select_storage_root() -> Path:
     configured = os.getenv("FIGURELEARNING_STORAGE_ROOT")
     if configured:
@@ -45,6 +49,9 @@ def _select_storage_root() -> Path:
         except OSError:
             pass
         return configured_path.resolve()
+    existing_data_root = ROOT.parent.parent / "FigureLearningData"
+    if _looks_like_storage_dir(existing_data_root):
+        return existing_data_root.resolve()
     candidates = [
         PROJECT_DATA_DIR,
         DATA_DIR,
@@ -67,6 +74,7 @@ MEDIA_DIR = STORAGE_ROOT / "media"
 MINING_DIR = STORAGE_ROOT / "mining"
 RAW_MATERIAL_DIR = STORAGE_ROOT / "raw_materials"
 WRITER_DIR = STORAGE_ROOT / "writer"
+XHS_DIR = STORAGE_ROOT / "xhs"
 TRASH_DIR = STORAGE_ROOT / "trash"
 DB_PATH = Path(os.getenv("FIGURELEARNING_DB_PATH", ROOT / "knowledge.db"))
 
@@ -102,6 +110,7 @@ def migrate_legacy_system_storage() -> int:
         (SYSTEM_DATA_DIR / "mining", MINING_DIR),
         (SYSTEM_DATA_DIR / "raw_materials", RAW_MATERIAL_DIR),
         (SYSTEM_DATA_DIR / "writer", WRITER_DIR),
+        (SYSTEM_DATA_DIR / "xhs", XHS_DIR),
     ]
     copied = 0
     for source_root, target_root in directory_pairs:
@@ -132,11 +141,13 @@ def migrate_legacy_system_storage() -> int:
 
 
 def init_storage() -> None:
-    global RAW_MATERIAL_DIR, WRITER_DIR
+    global RAW_MATERIAL_DIR, WRITER_DIR, XHS_DIR
     if ROOT != DEFAULT_ROOT and ROOT.resolve() not in RAW_MATERIAL_DIR.resolve().parents:
         RAW_MATERIAL_DIR = ROOT / "raw_materials"
     if ROOT != DEFAULT_ROOT and ROOT.resolve() not in WRITER_DIR.resolve().parents:
         WRITER_DIR = ROOT / "writer"
+    if ROOT != DEFAULT_ROOT and ROOT.resolve() not in XHS_DIR.resolve().parents:
+        XHS_DIR = ROOT / "xhs"
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,6 +156,7 @@ def init_storage() -> None:
     MINING_DIR.mkdir(parents=True, exist_ok=True)
     RAW_MATERIAL_DIR.mkdir(parents=True, exist_ok=True)
     WRITER_DIR.mkdir(parents=True, exist_ok=True)
+    XHS_DIR.mkdir(parents=True, exist_ok=True)
     TRASH_DIR.mkdir(parents=True, exist_ok=True)
     migrate_legacy_system_storage()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -299,7 +311,7 @@ def init_storage() -> None:
 
 
 def apply_storage_locations(locations: dict[str, str]) -> dict[str, str]:
-    global STORAGE_ROOT, IMAGE_DIR, DOCUMENT_DIR, KNOWLEDGE_DIR, MEDIA_DIR, MINING_DIR, RAW_MATERIAL_DIR, WRITER_DIR, TRASH_DIR
+    global STORAGE_ROOT, IMAGE_DIR, DOCUMENT_DIR, KNOWLEDGE_DIR, MEDIA_DIR, MINING_DIR, RAW_MATERIAL_DIR, WRITER_DIR, XHS_DIR, TRASH_DIR
 
     def clean_path(key: str, fallback: Path) -> Path:
         value = str(locations.get(key) or "").strip()
@@ -313,6 +325,7 @@ def apply_storage_locations(locations: dict[str, str]) -> dict[str, str]:
     KNOWLEDGE_DIR = clean_path("focus_library", STORAGE_ROOT / "knowledge")
     MINING_DIR = clean_path("perspective_library", STORAGE_ROOT / "mining")
     WRITER_DIR = clean_path("writer_projects", STORAGE_ROOT / "writer")
+    XHS_DIR = clean_path("xhs_projects", STORAGE_ROOT / "xhs")
     TRASH_DIR = clean_path("trash", STORAGE_ROOT / "trash")
     init_storage()
     return storage_locations()
@@ -328,6 +341,7 @@ def storage_locations() -> dict[str, str]:
         "focus_library": str(KNOWLEDGE_DIR),
         "perspective_library": str(MINING_DIR),
         "writer_projects": str(WRITER_DIR),
+        "xhs_projects": str(XHS_DIR),
         "trash": str(TRASH_DIR),
         "database": str(DB_PATH),
     }
@@ -1061,7 +1075,7 @@ def resolve_root_path(relative_or_absolute: str | None) -> Path | None:
         if root_candidate.exists():
             return root_candidate
         first_part = path.parts[0] if path.parts else ""
-        if first_part in {"images", "documents", "knowledge", "media", "mining"}:
+        if first_part in {"images", "documents", "knowledge", "media", "mining", "xhs"}:
             return storage_candidate
         return root_candidate
     return path

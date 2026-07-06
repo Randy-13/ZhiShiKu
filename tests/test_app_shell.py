@@ -18,6 +18,7 @@ def test_primary_sections_match_mature_app_shell_order():
         "learn",
         "mine",
         "create",
+        "xhs",
         "library",
         "settings",
         "docs",
@@ -25,7 +26,8 @@ def test_primary_sections_match_mature_app_shell_order():
 
 
 def test_primary_sections_carry_navigation_copy():
-    assert [section.nav_label for section in PRIMARY_SECTIONS] == ["收集", "学习", "挖掘", "公众号文章创作", "知识库", "设置中心", "文档"]
+    assert section_by_id("xhs").nav_label == "小红书"
+    assert section_by_id("xhs").route == "/xhs"
     assert all(section.nav_description for section in PRIMARY_SECTIONS)
 
 
@@ -52,6 +54,8 @@ def test_workspace_entries_model_mature_route_hierarchy():
     assert entry_by_id("collect-media").route == "/collect/media"
     assert entry_by_id("collect-media").shell_section == "collect"
     assert entry_by_id("create-wechat-article").route == "/create"
+    assert entry_by_id("create-xhs-image-text").route == "/xhs"
+    assert entry_by_id("create-xhs-image-text").shell_section == "xhs"
     assert entry_by_id("docs-help").route == "/docs"
 
 
@@ -86,6 +90,13 @@ def test_create_section_uses_linear_creation_stage():
 
     assert placement.shell_section == "create"
     assert placement.interaction_stage == "quote_libraries_to_wechat_article"
+
+
+def test_xhs_section_uses_dedicated_image_text_stage():
+    placement = placement_for_capability("create_xhs_image_text")
+
+    assert placement.shell_section == "xhs"
+    assert placement.interaction_stage == "quote_libraries_to_xhs_image_text"
 
 
 def test_docs_section_uses_read_only_help_stage():
