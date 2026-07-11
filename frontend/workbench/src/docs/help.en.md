@@ -80,6 +80,24 @@ If image generation partly fails, successful images should remain available. If 
 
 [Open Create](#/create)
 
+## Xiaohongshu Image Notes
+
+Xiaohongshu is a separate workspace for image-text and carousel notes. The recommended path is material selection, account profile, content planning, topic, title and body, cover, carousel slides, tags, preflight, fill publish page, then manual confirmation.
+
+### Recommended Flow
+
+- Select saved library files as project material.
+- Confirm the account profile, audience, content pillars, user pain points, and reference style before generating topics.
+- Choose a topic and content format. Tutorials, lists, comparisons, cases, and pitfall posts usually work best as 3-7 slide carousels.
+- Review the title, body, cover prompt, slide plan, image order, and tags before export or publishing.
+- Publishing is step-by-step: login check, optional QR login, fill the publish page, confirm in the browser, then publish or save draft.
+
+### Preflight Checks
+
+Publishing should stop when there are no images, the title is too long, the body is empty, login is missing, or an image path no longer exists. The cover is always the first image, followed by carousel content images.
+
+[Open Xiaohongshu](#/xhs)
+
 ## Library Management
 
 The Library contains Originals, Focus, and Perspectives. The main area is a file editor for title, note, and Markdown body.
@@ -105,6 +123,14 @@ Bilibili subtitle extraction prefers the Netscape cookie file pointed to by `FIG
 Settings checks whether the file exists, is readable, and contains `SESSDATA`, `DedeUserID`, and `bili_jct`. Actual subtitle availability is verified when extraction runs in Collect.
 
 [Open Settings](#/settings)
+
+## Version Management And Local Data
+
+Before large changes, check the current branch, local modifications, and the `origin` remote. If the worktree already has uncommitted changes, keep unrelated edits out of new commits unless they are intentionally included.
+
+Do not commit cookies, local databases, runtime media, screenshots, generated outputs, `.env` secrets, or files under `auth/`. User data such as `knowledge/`, `images/`, `documents/`, `media/`, `writer/`, `raw_materials/`, and `knowledge.db` should stay local and be backed up separately.
+
+Recommended validation before sharing a version: backend syntax check, relevant backend tests, media parser tests when media changed, frontend build when `frontend/workbench` changed, and the encoding check.
 
 ## Troubleshooting
 

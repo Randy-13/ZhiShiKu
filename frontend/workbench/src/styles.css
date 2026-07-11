@@ -4821,6 +4821,52 @@ textarea {
   gap: 12px;
 }
 
+.settings-refresh-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.settings-refresh-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.settings-refresh-copy span {
+  color: var(--workbench-row-track);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-refresh-copy strong {
+  color: #fff7e8;
+  font-size: 15px;
+}
+
+.settings-refresh-copy p {
+  margin: 0;
+  color: rgba(255, 247, 232, 0.72);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-refresh-panel .primary-cta {
+  min-width: 164px;
+}
+
+.spin-icon {
+  animation: spin-icon 0.9s linear infinite;
+}
+
+@keyframes spin-icon {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .settings-grid > div {
   display: grid;
   gap: 8px;
@@ -4839,6 +4885,39 @@ textarea {
 .settings-action-card {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
+}
+
+.dependency-health-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dependency-health-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  border: 1px solid rgba(250, 210, 140, 0.24);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(255, 247, 232, 0.06);
+  color: rgba(255, 247, 232, 0.72);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.dependency-health-pill.ready {
+  border-color: rgba(196, 218, 185, 0.42);
+  background: rgba(196, 218, 185, 0.12);
+  color: #e9f4df;
+}
+
+.dependency-health-pill strong,
+.dependency-health-pill em {
+  font-size: inherit;
+  font-style: normal;
 }
 
 .style-settings-card {
@@ -4963,8 +5042,40 @@ textarea {
   grid-column: span 2;
 }
 
-.wechat-publisher-card {
+.creator-account-entry,
+.local-data-entry {
   grid-column: span 2;
+}
+
+.creator-account-modal,
+.local-data-modal {
+  display: grid;
+  gap: 14px;
+  width: min(1080px, calc(100vw - 32px));
+}
+
+.creator-account-modal-grid,
+.local-data-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.creator-account-modal-grid > section,
+.local-data-modal-grid > section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.wechat-publisher-card {
+  display: grid;
+  gap: 12px;
+}
+
+.xhs-auth-card {
   display: grid;
   gap: 12px;
 }
@@ -4999,6 +5110,39 @@ textarea {
   border-radius: var(--radius-sm);
   padding: 4px 7px;
   background: var(--surface-2);
+}
+
+.xhs-qrcode-panel {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px;
+}
+
+.xhs-qrcode-panel img {
+  width: 112px;
+  height: 112px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.xhs-qrcode-panel div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xhs-qrcode-panel a {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .database-status-grid {
@@ -5264,6 +5408,36 @@ textarea {
   max-width: min(920px, calc(100vw - 32px));
 }
 
+.dependency-modal-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dependency-modal-summary span {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: rgba(255, 247, 232, 0.04);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dependency-modal-summary strong {
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.dependency-group-label {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .dependency-check-title,
 .dependency-actions,
 .dependency-meta {
@@ -5353,6 +5527,41 @@ textarea {
   white-space: nowrap;
 }
 
+.runtime-log-panel .runtime-log-row {
+  border-color: var(--workbench-row-border);
+  background: var(--workbench-row-bg);
+  color: var(--workbench-field-ink);
+  box-shadow: none;
+}
+
+.runtime-log-panel .runtime-log-row.done,
+.runtime-log-panel .runtime-log-row.success {
+  border-color: rgba(250, 210, 140, 0.26);
+  background: rgba(250, 210, 140, 0.08);
+}
+
+.runtime-log-panel .runtime-log-row.error,
+.runtime-log-panel .runtime-log-row.failed {
+  border-color: rgba(166, 61, 50, 0.44);
+  background: rgba(166, 61, 50, 0.12);
+}
+
+.runtime-log-panel .runtime-log-row strong {
+  color: var(--workbench-field-ink);
+}
+
+.runtime-log-panel .runtime-log-row p,
+.runtime-log-panel .runtime-log-row > span {
+  color: var(--workbench-muted-ink);
+}
+
+.runtime-log-panel .runtime-log-row.error strong,
+.runtime-log-panel .runtime-log-row.error p,
+.runtime-log-panel .runtime-log-row.failed strong,
+.runtime-log-panel .runtime-log-row.failed p {
+  color: #f0a79d;
+}
+
 /* Shared light surfaces: keep text dark even when rendered inside the dark shell. */
 .user-menu-popover,
 .modal-panel,
@@ -5372,6 +5581,337 @@ textarea {
   color: var(--ink);
 }
 
+:root:not([data-theme="light"]) .docs-sidebar,
+:root:not([data-theme="light"]) .docs-toc,
+:root:not([data-theme="light"]) .docs-reader,
+:root:not([data-theme="light"]) .runtime-log-row {
+  border-color: var(--info-tile-border);
+  background: var(--info-tile-bg);
+  color: var(--info-tile-value);
+  box-shadow: none;
+}
+
+:root:not([data-theme="light"]) .docs-search,
+:root:not([data-theme="light"]) .docs-markdown pre,
+:root:not([data-theme="light"]) .docs-markdown code,
+:root:not([data-theme="light"]) .runtime-log-row.done {
+  border-color: var(--workbench-row-border);
+  background: var(--workbench-row-bg);
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .docs-search {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .docs-search input {
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .docs-search input::placeholder {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .docs-section-link,
+:root:not([data-theme="light"]) .docs-toc-link,
+:root:not([data-theme="light"]) .docs-toc p,
+:root:not([data-theme="light"]) .docs-reader-header p,
+:root:not([data-theme="light"]) .docs-markdown p,
+:root:not([data-theme="light"]) .docs-markdown ul,
+:root:not([data-theme="light"]) .docs-markdown li,
+:root:not([data-theme="light"]) .runtime-log-row p,
+:root:not([data-theme="light"]) .runtime-log-row > span {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .docs-reader-header,
+:root:not([data-theme="light"]) .docs-markdown pre {
+  border-color: var(--workbench-row-border);
+}
+
+:root:not([data-theme="light"]) .docs-reader-header span,
+:root:not([data-theme="light"]) .docs-reader-header h1,
+:root:not([data-theme="light"]) .docs-markdown h2,
+:root:not([data-theme="light"]) .docs-markdown h3,
+:root:not([data-theme="light"]) .docs-markdown strong,
+:root:not([data-theme="light"]) .docs-toc strong,
+:root:not([data-theme="light"]) .runtime-log-row strong {
+  color: var(--workbench-field-ink);
+}
+
+@media (hover: hover) {
+  :root:not([data-theme="light"]) .docs-section-link:hover,
+  :root:not([data-theme="light"]) .docs-toc-link:hover {
+    background: var(--workbench-row-hover-bg);
+    color: var(--workbench-field-ink);
+  }
+}
+
+:root:not([data-theme="light"]) .docs-section-link.active {
+  border-color: var(--workbench-row-selected-border);
+  background: var(--workbench-row-selected-bg);
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .docs-section-link.active::before {
+  background: var(--workbench-row-track);
+}
+
+:root:not([data-theme="light"]) .docs-markdown a {
+  border-color: rgba(250, 210, 140, 0.34);
+  background: rgba(250, 210, 140, 0.14);
+  color: var(--gold-soft);
+}
+
+:root:not([data-theme="light"]) .docs-markdown pre code {
+  border: 0;
+  background: transparent;
+}
+
+:root:not([data-theme="light"]) .runtime-log-row.error {
+  border-color: rgba(166, 61, 50, 0.44);
+  background: rgba(166, 61, 50, 0.12);
+}
+
+:root:not([data-theme="light"]) .runtime-log-row.error strong,
+:root:not([data-theme="light"]) .runtime-log-row.error p {
+  color: #f0a79d;
+}
+
+:root:not([data-theme="light"]) .runtime-log-row.done {
+  border-color: rgba(250, 210, 140, 0.26);
+}
+
+:root:not([data-theme="light"]) .perspective-modal {
+  border-color: var(--info-tile-border);
+  background:
+    linear-gradient(180deg, rgba(22, 49, 51, 0.98), rgba(13, 39, 41, 0.98)),
+    #163133;
+  color: var(--info-tile-value);
+  box-shadow: 0 24px 70px rgba(8, 24, 25, 0.38);
+}
+
+:root:not([data-theme="light"]) .perspective-modal .panel-heading-row span,
+:root:not([data-theme="light"]) .perspective-modal .perspective-editor label > span,
+:root:not([data-theme="light"]) .perspective-modal .disabled-reason {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .perspective-modal .panel-heading-row h2 {
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .perspective-modal input,
+:root:not([data-theme="light"]) .perspective-modal textarea {
+  border-color: var(--workbench-field-border);
+  background: var(--workbench-field-bg);
+  color: var(--workbench-field-ink);
+  caret-color: var(--workbench-row-track);
+}
+
+:root:not([data-theme="light"]) .perspective-modal input::placeholder,
+:root:not([data-theme="light"]) .perspective-modal textarea::placeholder {
+  color: rgba(255, 247, 232, 0.42);
+}
+
+:root:not([data-theme="light"]) .perspective-modal input:focus,
+:root:not([data-theme="light"]) .perspective-modal textarea:focus {
+  border-color: var(--workbench-row-selected-border);
+  background: rgba(255, 247, 232, 0.1);
+}
+
+:root:not([data-theme="light"]) .perspective-modal .danger-button {
+  border-color: rgba(166, 61, 50, 0.36);
+  background: rgba(166, 61, 50, 0.08);
+  color: #f0a79d;
+}
+
+:root:not([data-theme="light"]) .creator-account-modal,
+:root:not([data-theme="light"]) .local-data-modal,
+:root:not([data-theme="light"]) .dependency-modal-panel,
+:root:not([data-theme="light"]) .trash-modal-panel {
+  border-color: var(--info-tile-border);
+  background:
+    linear-gradient(180deg, rgba(22, 49, 51, 0.98), rgba(13, 39, 41, 0.98)),
+    #163133;
+  color: var(--info-tile-value);
+  box-shadow: 0 24px 70px rgba(8, 24, 25, 0.38);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .modal-title-row span:first-child,
+:root:not([data-theme="light"]) .local-data-modal .modal-title-row span:first-child,
+:root:not([data-theme="light"]) .dependency-modal-panel .modal-title-row span:first-child,
+:root:not([data-theme="light"]) .trash-modal-panel .modal-title-row span:first-child,
+:root:not([data-theme="light"]) .creator-account-modal .hint,
+:root:not([data-theme="light"]) .local-data-modal .hint,
+:root:not([data-theme="light"]) .dependency-modal-panel .hint,
+:root:not([data-theme="light"]) .trash-modal-panel .hint,
+:root:not([data-theme="light"]) .dependency-group-label,
+:root:not([data-theme="light"]) .dependency-path,
+:root:not([data-theme="light"]) .dependency-meta,
+:root:not([data-theme="light"]) .trash-modal-toolbar > span,
+:root:not([data-theme="light"]) .trash-file-row small,
+:root:not([data-theme="light"]) .trash-file-row em {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .modal-title-row h2,
+:root:not([data-theme="light"]) .local-data-modal .modal-title-row h2,
+:root:not([data-theme="light"]) .dependency-modal-panel .modal-title-row h2,
+:root:not([data-theme="light"]) .trash-modal-panel .modal-title-row h2,
+:root:not([data-theme="light"]) .dependency-check-title strong,
+:root:not([data-theme="light"]) .dependency-modal-summary strong,
+:root:not([data-theme="light"]) .trash-file-row strong {
+  color: var(--workbench-field-ink);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .icon-button,
+:root:not([data-theme="light"]) .local-data-modal .icon-button,
+:root:not([data-theme="light"]) .dependency-modal-panel .icon-button,
+:root:not([data-theme="light"]) .trash-modal-panel .icon-button,
+:root:not([data-theme="light"]) .dependency-check-row.compact,
+:root:not([data-theme="light"]) .dependency-modal-summary span,
+:root:not([data-theme="light"]) .trash-file-row {
+  border-color: var(--workbench-row-border);
+  background: var(--workbench-row-bg);
+  color: var(--workbench-field-ink);
+  box-shadow: none;
+}
+
+:root:not([data-theme="light"]) .creator-account-modal input,
+:root:not([data-theme="light"]) .creator-account-modal textarea,
+:root:not([data-theme="light"]) .creator-account-modal select,
+:root:not([data-theme="light"]) .local-data-modal input,
+:root:not([data-theme="light"]) .local-data-modal textarea,
+:root:not([data-theme="light"]) .local-data-modal select,
+:root:not([data-theme="light"]) .dependency-modal-panel input,
+:root:not([data-theme="light"]) .dependency-modal-panel textarea,
+:root:not([data-theme="light"]) .dependency-modal-panel select,
+:root:not([data-theme="light"]) .trash-modal-panel input,
+:root:not([data-theme="light"]) .trash-modal-panel textarea,
+:root:not([data-theme="light"]) .trash-modal-panel select {
+  border-color: var(--workbench-field-border);
+  background: var(--workbench-field-bg);
+  color: var(--workbench-field-ink);
+  caret-color: var(--workbench-row-track);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal input::placeholder,
+:root:not([data-theme="light"]) .creator-account-modal textarea::placeholder,
+:root:not([data-theme="light"]) .local-data-modal input::placeholder,
+:root:not([data-theme="light"]) .local-data-modal textarea::placeholder {
+  color: rgba(255, 247, 232, 0.42);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .status-badge,
+:root:not([data-theme="light"]) .local-data-modal .status-badge,
+:root:not([data-theme="light"]) .dependency-modal-panel .status-badge,
+:root:not([data-theme="light"]) .trash-modal-panel .status-badge {
+  border-color: var(--workbench-row-border);
+  background: rgba(255, 247, 232, 0.08);
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .status-badge.done,
+:root:not([data-theme="light"]) .local-data-modal .status-badge.done,
+:root:not([data-theme="light"]) .dependency-modal-panel .status-badge.done,
+:root:not([data-theme="light"]) .trash-modal-panel .status-badge.done {
+  border-color: rgba(250, 210, 140, 0.34);
+  background: rgba(250, 210, 140, 0.14);
+  color: var(--gold-soft);
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .status-badge.error,
+:root:not([data-theme="light"]) .local-data-modal .status-badge.error,
+:root:not([data-theme="light"]) .dependency-modal-panel .status-badge.error,
+:root:not([data-theme="light"]) .trash-modal-panel .status-badge.error,
+:root:not([data-theme="light"]) .creator-account-modal .inline-error,
+:root:not([data-theme="light"]) .local-data-modal .inline-error,
+:root:not([data-theme="light"]) .dependency-modal-panel .inline-error,
+:root:not([data-theme="light"]) .trash-modal-panel .inline-error {
+  color: #f0a79d;
+}
+
+:root:not([data-theme="light"]) .creator-account-modal .danger-button,
+:root:not([data-theme="light"]) .local-data-modal .danger-button,
+:root:not([data-theme="light"]) .dependency-modal-panel .danger-button,
+:root:not([data-theme="light"]) .trash-modal-panel .danger-button {
+  border-color: rgba(166, 61, 50, 0.36);
+  background: rgba(166, 61, 50, 0.08);
+  color: #f0a79d;
+}
+
+:root:not([data-theme="light"]) .settings-grid > div,
+:root:not([data-theme="light"]) .creator-account-modal-grid > section,
+:root:not([data-theme="light"]) .local-data-modal-grid > section,
+:root:not([data-theme="light"]) .trash-maintenance-panel {
+  border-color: var(--info-tile-border);
+  background: var(--info-tile-bg);
+  color: var(--info-tile-value);
+}
+
+:root:not([data-theme="light"]) .settings-grid > div h2,
+:root:not([data-theme="light"]) .settings-grid > div h3,
+:root:not([data-theme="light"]) .settings-grid > div strong,
+:root:not([data-theme="light"]) .creator-account-modal-grid h3,
+:root:not([data-theme="light"]) .creator-account-modal-grid strong,
+:root:not([data-theme="light"]) .local-data-modal-grid h3,
+:root:not([data-theme="light"]) .local-data-modal-grid strong,
+:root:not([data-theme="light"]) .quota-metric strong,
+:root:not([data-theme="light"]) .quota-limit-row strong,
+:root:not([data-theme="light"]) .storage-location-row strong,
+:root:not([data-theme="light"]) .trash-maintenance-panel strong,
+:root:not([data-theme="light"]) .database-metric strong,
+:root:not([data-theme="light"]) .database-table-counts strong {
+  color: var(--info-tile-value);
+}
+
+:root:not([data-theme="light"]) .settings-grid > div p,
+:root:not([data-theme="light"]) .settings-grid > div small,
+:root:not([data-theme="light"]) .settings-grid > div label > span,
+:root:not([data-theme="light"]) .settings-grid > div .hint,
+:root:not([data-theme="light"]) .settings-grid > div .muted-line,
+:root:not([data-theme="light"]) .xhs-qrcode-panel a,
+:root:not([data-theme="light"]) .wechat-publisher-form span,
+:root:not([data-theme="light"]) .wechat-publisher-meta,
+:root:not([data-theme="light"]) .quota-metric div,
+:root:not([data-theme="light"]) .quota-limit-row,
+:root:not([data-theme="light"]) .storage-location-row small,
+:root:not([data-theme="light"]) .trash-maintenance-panel small,
+:root:not([data-theme="light"]) .database-metric span,
+:root:not([data-theme="light"]) .database-table-counts em,
+:root:not([data-theme="light"]) .runtime-log-row p,
+:root:not([data-theme="light"]) .runtime-log-row > span {
+  color: var(--info-tile-label);
+}
+
+:root:not([data-theme="light"]) .settings-grid input,
+:root:not([data-theme="light"]) .settings-grid textarea,
+:root:not([data-theme="light"]) .settings-grid select,
+:root:not([data-theme="light"]) .storage-location-row.readonly input {
+  border-color: var(--workbench-field-border);
+  background: var(--workbench-field-bg);
+  color: var(--workbench-field-ink);
+  caret-color: var(--workbench-row-track);
+}
+
+:root:not([data-theme="light"]) .settings-grid input::placeholder,
+:root:not([data-theme="light"]) .settings-grid textarea::placeholder {
+  color: var(--workbench-muted-ink);
+}
+
+:root:not([data-theme="light"]) .wechat-publisher-meta span,
+:root:not([data-theme="light"]) .xhs-qrcode-panel,
+:root:not([data-theme="light"]) .database-metric,
+:root:not([data-theme="light"]) .database-table-counts span {
+  border-color: var(--info-tile-border);
+  background: var(--info-tile-bg);
+  color: var(--info-tile-value);
+}
+
+:root:not([data-theme="light"]) .quota-metric progress {
+  accent-color: var(--workbench-row-track);
+}
 :root:not([data-theme="light"]) .api-settings-modal {
   border-color: var(--info-tile-border);
   background:
@@ -5721,6 +6261,45 @@ textarea {
   color: var(--ink);
 }
 
+:root[data-theme="light"] .settings-refresh-copy span {
+  color: var(--accent);
+}
+
+:root[data-theme="light"] .settings-refresh-copy strong {
+  color: var(--ink);
+}
+
+:root[data-theme="light"] .settings-refresh-copy p {
+  color: var(--muted);
+}
+
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row.done,
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row.success {
+  border-color: rgba(27, 127, 75, 0.22);
+  background: var(--surface);
+}
+
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row.error,
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row.failed {
+  border-color: rgba(180, 35, 24, 0.26);
+  background: #f7e5df;
+}
+
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row strong {
+  color: var(--ink);
+}
+
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row p,
+:root[data-theme="light"] .runtime-log-panel .runtime-log-row > span {
+  color: var(--muted);
+}
+
 :root[data-theme="light"] .object-row,
 :root[data-theme="light"] .queue-row,
 :root[data-theme="light"] .perspective-row {
@@ -6051,17 +6630,37 @@ textarea {
   }
 
   .database-settings-card,
+  .creator-account-entry,
+  .local-data-entry,
   .style-settings-card,
+  .xhs-auth-card,
   .wechat-publisher-card,
   .storage-settings-card {
     grid-column: span 1;
   }
 
+  .settings-refresh-panel {
+    align-items: stretch;
+  }
+
+  .settings-refresh-panel .primary-cta {
+    justify-content: center;
+    width: 100%;
+  }
+
   .database-status-grid,
+  .creator-account-modal-grid,
+  .local-data-modal-grid,
+  .xhs-qrcode-panel,
   .wechat-publisher-form,
   .theme-option-grid,
   .database-table-counts {
     grid-template-columns: 1fr;
+  }
+
+  .xhs-qrcode-panel img {
+    width: 104px;
+    height: 104px;
   }
 
   .stage-panel-heading,
@@ -6328,7 +6927,7 @@ textarea {
   padding: 14px;
 }
 
-.xhs-topic-context span {
+.xhs-topic-context > div > span {
   color: var(--info-tile-label);
   display: block;
   font-size: 12px;
@@ -6394,18 +6993,19 @@ textarea {
   min-width: 188px;
 }
 
-.xhs-stage-actions span {
+.xhs-stage-actions > span {
   color: var(--workbench-muted-ink);
   font-size: 13px;
 }
 
 .xhs-running-label {
-  align-items: baseline;
+  align-items: center;
   color: inherit;
   display: inline-flex;
   font: inherit;
   gap: 6px;
   line-height: inherit;
+  min-width: max-content;
   white-space: nowrap;
 }
 
@@ -6919,6 +7519,28 @@ textarea {
 .xhs-preview-details {
   display: grid;
   gap: 12px;
+}
+
+.xhs-image-progress {
+  align-items: center;
+  background: var(--info-tile-bg);
+  border: 1px solid var(--info-tile-border);
+  border-radius: var(--radius-md);
+  color: var(--info-tile-value);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.xhs-image-progress span {
+  color: var(--info-tile-label);
+  font-size: 13px;
+}
+
+.xhs-image-progress strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
 }
 
 .xhs-preview-inline {

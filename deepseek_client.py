@@ -313,6 +313,8 @@ def curl_chat_completion(
     setting: dict[str, Any] | None = None,
 ) -> str:
     resolved = ensure_credentials(setting)
+    provider = resolved.get("provider") or "API"
+    model = resolved.get("model") or "unknown"
     payload: dict[str, Any] = {
         "model": resolved["model"],
         "messages": messages,
@@ -341,36 +343,40 @@ def curl_chat_completion(
         "--data-binary",
         "@-",
     ]
-    completed = subprocess.run(
-        command,
-        input=body,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        timeout=float(resolved.get("timeout") or config.LLM_TIMEOUT),
-        check=False,
-    )
+    timeout_seconds = float(resolved.get("timeout") or config.LLM_TIMEOUT)
+    try:
+        completed = subprocess.run(
+            command,
+            input=body,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{provider} 模型 {model} 请求超过 {timeout_seconds:g} 秒未返回，请尝试更换模型或调大超时秒数。") from exc
     raw_output = completed.stdout or ""
     response_text, _, status_text = raw_output.rpartition("\nHTTP_STATUS:")
     status_code = status_text.strip() if status_text else "000"
     if completed.returncode != 0:
         raise RuntimeError(
-            f"DeepSeek curl 请求失败 rc={completed.returncode} status={status_code}: "
+            f"{provider} 模型 {model} curl 请求失败 rc={completed.returncode} status={status_code}: "
             f"{completed.stderr or response_text}"
         )
     if not status_code.startswith("2"):
-        raise RuntimeError(f"DeepSeek HTTP {status_code}: {response_text[:1000]}")
+        raise RuntimeError(f"{provider} 模型 {model} HTTP {status_code}: {response_text[:1000]}")
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"DeepSeek 返回了非 JSON 内容：{response_text[:500]}") from exc
+        raise RuntimeError(f"{provider} 模型 {model} 返回了非 JSON 内容：{response_text[:500]}") from exc
     if "error" in data:
-        raise RuntimeError(f"DeepSeek API 错误：{data['error']}")
+        raise RuntimeError(f"{provider} 模型 {model} API 错误：{data['error']}")
     try:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"DeepSeek 返回结构异常：{response_text[:500]}") from exc
+        raise RuntimeError(f"{provider} 模型 {model} 返回结构异常：{response_text[:500]}") from exc
 
 
 def generate_knowledge(raw_text: str, setting: dict[str, Any] | None = None) -> KnowledgeResult:

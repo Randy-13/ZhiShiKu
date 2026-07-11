@@ -106,8 +106,8 @@ WECHAT_TOKEN_CACHE_FILE = Path(os.path.expanduser("~/.wechat-publisher/token_cac
 WECHAT_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 WECHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 IMAGE_PROMPT_RETRY_MAX_CHARS = 1200
-CONTENT_IMAGE_NAME_RE = re.compile(r"^content[_-]?(\d+)(\.[A-Za-z0-9]+)$", re.I)
-CONTENT_IMAGE_MARKDOWN_RE = re.compile(r"\n*!\[[^\]]*\]\([^\)]*content[_-]?\d+\.[^\)]*\)\n*", re.I)
+CONTENT_IMAGE_NAME_RE = re.compile(r"^(?:content|image)[_-]?(\d+)(\.[A-Za-z0-9]+)$", re.I)
+CONTENT_IMAGE_MARKDOWN_RE = re.compile(r"\n*!\[[^\]]*\]\([^\)]*(?:content|image)[_-]?\d+\.[^\)]*\)\n*", re.I)
 EMPHASIS_PATTERNS = (
     "关键变化",
     "关键变量",
@@ -2415,6 +2415,24 @@ def strip_existing_content_images(markdown_text: str) -> str:
     return text.strip() + "\n"
 
 
+def strip_unresolved_local_markdown_images(markdown_text: str, base_dir: Path) -> str:
+    def replace(match: re.Match[str]) -> str:
+        src = match.group("src").strip()
+        if not src or src.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+        if resolve_html_image_src(src, base_dir):
+            return match.group(0)
+        return "\n"
+
+    text = re.sub(
+        r"\n*!\[[^\]]*\]\((?P<src>[^)\s]+)(?:\s+['\"][^)]*['\"])?\)\n*",
+        replace,
+        markdown_text or "",
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() + "\n"
+
+
 def best_image_insert_line(lines: list[str], keywords: list[str], used_lines: set[int], fallback_ratio: float) -> int:
     candidates = []
     for index, line in enumerate(lines):
@@ -2443,7 +2461,7 @@ def ensure_content_images_in_markdown(workspace: Path, markdown_text: str) -> st
     items = content_image_items(workspace)
     if not items:
         return markdown_text
-    text = strip_existing_content_images(markdown_text)
+    text = strip_unresolved_local_markdown_images(strip_existing_content_images(markdown_text), workspace)
     lines = text.splitlines()
     used_lines: set[int] = set()
     insertions: list[tuple[int, str]] = []

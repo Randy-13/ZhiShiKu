@@ -8,6 +8,7 @@ import pytest
 
 import graph_core
 import app as legacy_app
+import media_parser
 import storage
 import src.api_v2 as api_v2
 from src.auth import bootstrap_admin
@@ -252,6 +253,59 @@ def test_cloud_mode_blocks_api_writes_without_session(monkeypatch):
 
     assert response.status_code == 401
     assert "登录" in response.json()["detail"]
+
+
+def test_cloud_member_cannot_manage_system_api_settings(monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    client, _payload = _register_cloud_member("SETTINGS-API-FORBID", "settings-api@example.test", "settings_api")
+
+    endpoints = [
+        ("GET", "/api/v2/settings/api", None),
+        ("POST", "/api/v2/settings/api", {"provider": "compatible", "base_url": "https://example.test/v1", "model": "test", "api_key": "secret"}),
+        ("POST", "/api/v2/settings/api/active", {"id": "default"}),
+        ("DELETE", "/api/v2/settings/api/default", None),
+        ("POST", "/api/v2/settings/api/test", {"provider": "compatible", "base_url": "https://example.test/v1", "model": "test", "api_key": "secret"}),
+        ("GET", "/api/v2/settings/image", None),
+        ("POST", "/api/v2/settings/image", {"provider": "compatible", "base_url": "https://image.example.test/v1", "model": "image", "api_key": "secret"}),
+        ("POST", "/api/v2/settings/image/active", {"id": "default"}),
+        ("DELETE", "/api/v2/settings/image/default", None),
+        ("POST", "/api/v2/settings/image/test", {"provider": "compatible", "base_url": "https://image.example.test/v1", "model": "image", "api_key": "secret"}),
+        ("GET", "/api/v2/settings/asr", None),
+        ("POST", "/api/v2/settings/asr", {"provider": "compatible", "base_url": "https://asr.example.test/v1", "model": "asr", "api_key": "secret"}),
+        ("POST", "/api/v2/settings/asr/active", {"id": "default"}),
+        ("DELETE", "/api/v2/settings/asr/default", None),
+        ("POST", "/api/v2/settings/asr/test", {"provider": "compatible", "base_url": "https://asr.example.test/v1", "model": "asr", "api_key": "secret"}),
+    ]
+
+    for method, url, body in endpoints:
+        response = client.request(method, url, json=body)
+        assert response.status_code == 403, f"{method} {url}: {response.text}"
+
+
+def test_cloud_admin_can_manage_system_api_settings(monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    storage.init_storage()
+    with storage.connect() as conn:
+        result = bootstrap_admin(
+            conn,
+            email="settings-admin@example.test",
+            username="settings_admin",
+            password="password-123",
+            invite_max_uses=1,
+        )
+
+    client = TestClient(create_app(), base_url="http://testserver")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"identifier": result["admin"]["email"], "password": "password-123"},
+    )
+    assert login_response.status_code == 200
+
+    assert client.get("/api/v2/settings/api").status_code == 200
+    assert client.get("/api/v2/settings/image").status_code == 200
+    assert client.get("/api/v2/settings/asr").status_code == 200
 
 
 def test_jobs_contract_creates_lists_reads_and_cancels_local_job(monkeypatch):
@@ -1325,7 +1379,35 @@ def test_v2_settings_center_reads_and_saves_web_api_and_asr_settings():
     asr_payload = asr_response.json()["data"]
     assert asr_payload["ok"] is True, asr_payload
     assert asr_payload["item"]["configured"] is True
+    assert asr_payload["active_id"] == asr_payload["item"]["id"]
+    assert asr_payload["items"][0]["id"] == asr_payload["item"]["id"]
     assert "asr-secret-key" not in str(asr_payload)
+
+    second_asr_response = client.post(
+        "/api/v2/settings/asr",
+        json={
+            "name": "ASR Backup",
+            "provider": "compatible",
+            "base_url": "https://asr-backup.example.test/v1",
+            "model": "backup-asr",
+            "api_key": "asr-backup-secret",
+            "timeout": 90,
+            "make_active": False,
+        },
+    )
+    assert second_asr_response.status_code == 200
+    second_asr_payload = second_asr_response.json()["data"]
+    second_asr_id = second_asr_payload["item"]["id"]
+    assert second_asr_payload["active_id"] == asr_payload["item"]["id"]
+    assert len(second_asr_payload["items"]) == 2
+
+    activated_asr = client.post("/api/v2/settings/asr/active", json={"id": second_asr_id})
+    assert activated_asr.status_code == 200
+    assert activated_asr.json()["data"]["active_id"] == second_asr_id
+
+    deleted_asr = client.delete(f"/api/v2/settings/asr/{second_asr_id}")
+    assert deleted_asr.status_code == 200
+    assert deleted_asr.json()["data"]["active_id"] == asr_payload["item"]["id"]
 
     image_response = client.post(
         "/api/v2/settings/image",
@@ -1429,6 +1511,39 @@ def test_v2_asr_test_route_supports_minimax_local_audio_probe(monkeypatch):
     assert captured["path"].suffix == ".wav"
     assert captured["setting"]["provider"] == "minimax"
     assert captured["setting"]["base_url"] == "https://api.minimaxi.com/v1"
+
+
+def test_v2_asr_test_route_supports_local_whisper_without_api_key(monkeypatch):
+    client = TestClient(create_app())
+    captured = {}
+
+    def fake_transcribe_audio(path: Path):
+        captured["path"] = path
+        captured["setting"] = dict(api_v2.asr_settings.active_setting())
+        return "ok"
+
+    monkeypatch.setattr(api_v2, "transcribe_audio", fake_transcribe_audio)
+
+    tested = client.post(
+        "/api/v2/settings/asr/test",
+        json={
+            "provider": "local",
+            "base_url": "",
+            "model": "base",
+            "api_key": "",
+            "timeout": 30,
+        },
+    )
+
+    assert tested.status_code == 200
+    payload = tested.json()["data"]
+    assert payload["ok"] is True
+    assert payload["item"]["provider"] == "local"
+    assert payload["item"]["configured"] is True
+    assert payload["item"]["api_key_masked"] == ""
+    assert captured["path"].suffix == ".wav"
+    assert captured["setting"]["provider"] == "local"
+    assert captured["setting"]["model"] == "base"
 
 
 def test_v2_create_article_project_uses_library_files_and_writer_flow(monkeypatch):
@@ -1716,7 +1831,6 @@ def test_v2_collect_raw_file_saves_markdown_and_manual_note():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["data"]["ok"] is True, payload
     item = payload["data"]["item"]
     path = storage.ROOT / item["markdown_path"]
     assert path.exists()
@@ -2572,6 +2686,7 @@ def test_v2_collect_text_saves_raw_markdown():
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["data"]["ok"] is True, payload
     item = payload["data"]["item"]
     path = storage.ROOT / item["markdown_path"]
     assert payload["data"]["ok"] is True
@@ -3271,6 +3386,87 @@ def test_v2_collect_raw_markdown_transcribes_uploaded_subtitle_media():
     assert "subtitle raw text" in path.read_text(encoding="utf-8")
 
 
+def test_v2_collect_readable_draft_blocks_local_media_when_dashscope_is_active():
+    client = TestClient(create_app())
+    saved = client.post(
+        "/api/v2/settings/asr",
+        json={
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/api/v1",
+            "model": "paraformer-v2",
+            "api_key": "dashscope-secret",
+            "timeout": 30,
+        },
+    )
+    assert saved.status_code == 200
+
+    upload = client.post(
+        "/api/media/upload",
+        files={"files": ("local-audio.mp3", b"fake mp3 bytes", "audio/mpeg")},
+    )
+    assert upload.status_code == 200
+    media_id = upload.json()["items"][0]["id"]
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={"material_type": "media", "items": [{"id": media_id, "title": "local-audio.mp3"}]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is False
+    assert "DashScope Fun-ASR" in payload["error"]
+    assert "本地上传文件" in payload["error"]
+    refreshed = storage.get_media_source(media_id)
+    assert refreshed["status"] == "error"
+    assert "OpenAI-compatible" in refreshed["error_message"]
+
+
+def test_v2_collect_readable_draft_uses_local_asr_for_uploaded_media(monkeypatch):
+    client = TestClient(create_app())
+    saved = client.post(
+        "/api/v2/settings/asr",
+        json={
+            "provider": "local",
+            "base_url": "",
+            "model": "base",
+            "api_key": "",
+            "timeout": 30,
+        },
+    )
+    assert saved.status_code == 200
+
+    captured = {}
+
+    def fake_local_transcribe(path: Path, provider: str = "local") -> str:
+        captured["path"] = path
+        captured["provider"] = provider
+        return "local asr transcript text"
+
+    monkeypatch.setattr(api_v2.media_parser, "transcribe_audio", fake_local_transcribe)
+    monkeypatch.setattr(api_v2.deepseek_client, "polish_raw_material", lambda *_args, **_kwargs: None)
+    upload = client.post(
+        "/api/media/upload",
+        files={"files": ("local-audio.mp3", b"fake mp3 bytes", "audio/mpeg")},
+    )
+    assert upload.status_code == 200
+    media_id = upload.json()["items"][0]["id"]
+
+    response = client.post(
+        "/api/v2/collect/readable-draft",
+        json={"material_type": "media", "items": [{"id": media_id, "title": "local-audio.mp3"}]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["ok"] is True, payload
+    assert "local asr transcript text" in payload["markdown"]
+    assert captured["path"].suffix == ".mp3"
+    refreshed = storage.get_media_source(media_id)
+    assert refreshed["status"] == "ready"
+    assert refreshed["transcript_kind"] == "asr"
+
+
 def test_v2_collect_raw_markdown_imports_douyin_detail_for_media_queue(monkeypatch):
     calls = {"ensure": 0, "import": 0}
 
@@ -3310,6 +3506,52 @@ def test_v2_collect_raw_markdown_imports_douyin_detail_for_media_queue(monkeypat
     assert calls == {"ensure": 2, "import": 1}
     assert item["title"] == "media queue douyin transcript"
     assert "media queue douyin transcript" in text
+
+
+def test_v2_collect_raw_markdown_uses_douyin_cli_after_browser_import_fails(monkeypatch):
+    calls = {"ensure": 0, "browser": 0, "cli": 0}
+
+    def fake_ensure_transcript(item: dict) -> tuple[str, str]:
+        calls["ensure"] += 1
+        raise RuntimeError("SDK and direct audio failed")
+
+    def fake_browser_import(video_id: str, url: str):
+        calls["browser"] += 1
+        raise RuntimeError("No captured Douyin aweme/detail response found")
+
+    def fake_cli(item: dict, previous_errors=None):
+        calls["cli"] += 1
+        assert previous_errors
+        media_parser.write_transcript(item, "douyin cli transcript", "asr")
+        return "douyin cli transcript"
+
+    monkeypatch.setattr(api_v2.media_parser, "ensure_transcript", fake_ensure_transcript)
+    monkeypatch.setattr(api_v2, "_import_douyin_detail_with_browser", fake_browser_import)
+    monkeypatch.setattr(api_v2.media_parser, "transcript_from_douyin_cli", fake_cli)
+    media_item = storage.create_remote_media_source(
+        platform="douyin",
+        source_url="https://v.douyin.com/hdsMHiD-gSw/",
+        canonical_url="https://www.douyin.com/video/7645662793240815025",
+        title="Douyin 7645662793240815025",
+        status="resolved",
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v2/collect/raw-markdown",
+        json={"material_type": "media", "items": [{"id": media_item["id"], "title": media_item["title"]}]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["ok"] is True, payload
+    item = payload["data"]["item"]
+    path = storage.ROOT / item["markdown_path"]
+    refreshed = storage.get_media_source(media_item["id"])
+    assert calls == {"ensure": 1, "browser": 1, "cli": 1}
+    assert refreshed["transcript_kind"] == "asr"
+    assert refreshed["transcript_path"].startswith("media")
+    assert "douyin cli transcript" in path.read_text(encoding="utf-8")
 
 
 def test_agent_browser_connection_timeout_falls_back_to_project_edge(monkeypatch):

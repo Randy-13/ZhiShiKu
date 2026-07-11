@@ -294,6 +294,13 @@ def _int_between(value: Any, default: int, low: int, high: int) -> int:
     return max(low, min(high, number))
 
 
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def default_image_text_config(topic: dict[str, Any] | None = None) -> dict[str, Any]:
     source = topic if isinstance(topic, dict) else {}
     note_format = str(source.get("note_format") or "")
@@ -591,13 +598,17 @@ def create_project(
     account_profile_id: str = "",
     owner_user_id: str | None = None,
     workspace_id: str | None = None,
+    include_ownerless: bool | None = None,
+    restrict_account_profile_owner: bool = True,
 ) -> dict[str, Any]:
     if not account_profile_id:
         raise ValueError("请先选择或新建账号定位")
+    if include_ownerless is None:
+        include_ownerless = owner_user_id is None
     account_profile = load_account_profile(
         account_profile_id,
-        owner_user_id=owner_user_id,
-        include_ownerless=owner_user_id is None,
+        owner_user_id=owner_user_id if restrict_account_profile_owner else None,
+        include_ownerless=include_ownerless,
     )
     title = (name or "").strip() or "未命名小红书图文"
     project_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{_safe_slug(title, 'xhs')}-{uuid4().hex[:6]}"
@@ -882,7 +893,6 @@ def generate_draft(
     prompt = f"账号定位：\n{profile_text}\n\n账号定位约束：标题、正文、封面、轮播图、标签都必须符合账号定位、目标人群、内容支柱、语气人设、价值承诺、标签策略和避让边界。\n\n{prompt}"
     result = deepseek_client.parse_json_model(XhsDraftResult, [{"role": "user", "content": prompt}], setting=setting)
     result.tags = _clean_tags(result.tags)
-    result.content_image_prompts = result.content_image_prompts[:4]
     save_draft_artifacts(project_id, result)
     return result
 
@@ -923,13 +933,12 @@ def revise_draft(
     prompt = f"账号定位：\n{profile_text}\n\n修订约束：修订后的标题、正文、封面、轮播图、标签都必须继续符合账号定位、目标人群、内容支柱、语气人设、价值承诺、标签策略和避让边界。\n\n{prompt}"
     result = deepseek_client.parse_json_model(XhsRevisionResult, [{"role": "user", "content": prompt}], setting=setting)
     result.tags = _clean_tags(result.tags)
-    result.content_image_prompts = result.content_image_prompts[:4]
     draft = XhsDraftResult(
         title=result.title or str(project.get("title") or project.get("name") or ""),
         content=result.content,
         tags=result.tags,
-        cover_prompt=result.cover_prompt or str(project.get("cover_prompt") or ""),
-        content_image_prompts=result.content_image_prompts or list(project.get("content_image_prompts") or []),
+        cover_prompt="",
+        content_image_prompts=[],
         slide_plan=result.slide_plan,
         rationale=result.change_summary,
     )
@@ -953,8 +962,8 @@ def save_draft_artifacts(project_id: str, result: XhsDraftResult) -> dict[str, A
         title=title,
         content=content,
         tags=tags,
-        cover_prompt=result.cover_prompt,
-        content_image_prompts=result.content_image_prompts[:4],
+        cover_prompt="",
+        content_image_prompts=[],
         image_suggestion_rationale="",
         draft_confirmed=False,
         image_suggestions_confirmed=False,
@@ -972,6 +981,10 @@ def suggest_images(project_id: str, setting: dict[str, Any] | None = None) -> Xh
         raise ValueError("请先生成小红书图文草稿")
     if not project.get("draft_confirmed"):
         raise ValueError("请先确认图文草稿，再生成配图建议")
+    slide_status = slide_plan_status(project)
+    if not slide_status["ok"]:
+        detail = "; ".join(str(item.get("detail") or item.get("label")) for item in slide_status["blocking"])
+        raise ValueError(f"slide_plan invalid: {detail}")
     topic = project.get("topic") if isinstance(project.get("topic"), dict) else None
     image_text_config = normalize_image_text_config(project.get("image_text_config"), topic)
     slide_count = _int_between(image_text_config.get("slide_count"), 5, 1, 7)
@@ -1023,6 +1036,10 @@ def confirm_draft(project_id: str) -> dict[str, Any]:
     project = load_project(project_id)
     if not str(project.get("content") or "").strip():
         raise ValueError("请先生成或填写小红书图文草稿")
+    slide_status = slide_plan_status(project)
+    if not slide_status["ok"]:
+        detail = "; ".join(str(item.get("detail") or item.get("label")) for item in slide_status["blocking"])
+        raise ValueError(f"slide_plan invalid: {detail}")
     clear_image_metadata(resolve_project_workspace(project_id))
     return update_project(
         project_id,
@@ -1037,6 +1054,10 @@ def confirm_draft(project_id: str) -> dict[str, Any]:
 
 def confirm_image_suggestions(project_id: str) -> dict[str, Any]:
     project = load_project(project_id)
+    suggestion_status = image_suggestion_status(project)
+    if not suggestion_status["ok"]:
+        detail = "; ".join(str(item.get("detail") or item.get("label")) for item in suggestion_status["blocking"])
+        raise ValueError(f"image suggestions invalid: {detail}")
     cover_prompt = str(project.get("cover_prompt") or "").strip()
     content_prompts = [str(item).strip() for item in project.get("content_image_prompts") or [] if str(item).strip()]
     rationale = str(project.get("image_suggestion_rationale") or "").strip()
@@ -1095,35 +1116,97 @@ def load_image_metadata(workspace: Path) -> dict[str, Any]:
     return writer_tools.load_writer_image_metadata(workspace)
 
 
-def images_need_retry(project: dict[str, Any]) -> bool:
-    images = project.get("images")
-    if not isinstance(images, dict):
-        return False
-    errors = images.get("errors") if isinstance(images.get("errors"), list) else []
-    if not errors:
-        return False
+def expected_slide_count(project: dict[str, Any]) -> int:
+    topic = project.get("topic") if isinstance(project.get("topic"), dict) else None
+    config = normalize_image_text_config(project.get("image_text_config") if isinstance(project.get("image_text_config"), dict) else {}, topic)
+    return _int_between(config.get("slide_count"), 5, 1, 7)
+
+
+def slide_plan_status(project: dict[str, Any]) -> dict[str, Any]:
+    expected = expected_slide_count(project)
+    slides = project.get("slide_plan") if isinstance(project.get("slide_plan"), list) else []
+    blocking: list[dict[str, Any]] = []
+    if len(slides) != expected:
+        blocking.append({"key": "slide_plan", "label": "轮播脚本", "ok": False, "detail": f"需要 {expected} 张，当前 {len(slides)} 张"})
+    for index in range(1, expected + 1):
+        slide = slides[index - 1] if index - 1 < len(slides) and isinstance(slides[index - 1], dict) else {}
+        has_copy = any(str(slide.get(key) or "").strip() for key in ("title", "body", "visual_prompt", "role"))
+        if not has_copy:
+            blocking.append({"key": f"slide:{index}", "label": f"第 {index} 张轮播文案", "ok": False, "detail": "缺少标题、正文要点或视觉提示"})
+    return {"ok": not blocking, "expected": expected, "actual": len(slides), "blocking": blocking}
+
+
+def image_suggestion_status(project: dict[str, Any]) -> dict[str, Any]:
+    expected_slides = expected_slide_count(project)
+    expected_content = max(0, expected_slides - 1)
     cover_prompt = str(project.get("cover_prompt") or "").strip()
-    cover_missing = cover_prompt and not (isinstance(images.get("cover"), dict) and images["cover"].get("path"))
-    if cover_missing:
-        return True
-    expected_content_count = len([str(item).strip() for item in project.get("content_image_prompts") or [] if str(item).strip()])
-    content_images = images.get("content_images") if isinstance(images.get("content_images"), list) else []
-    existing_indexes = {
-        int(item.get("index") or 0)
-        for item in content_images
-        if isinstance(item, dict) and item.get("path")
+    content_prompts = [str(item).strip() for item in project.get("content_image_prompts") or [] if str(item).strip()]
+    blocking: list[dict[str, Any]] = []
+    if not cover_prompt:
+        blocking.append({"key": "cover_prompt", "label": "封面配图建议", "ok": False, "detail": "缺少封面图提示词"})
+    if len(content_prompts) != expected_content:
+        blocking.append({"key": "content_image_prompts", "label": "轮播配图建议", "ok": False, "detail": f"需要 {expected_content} 条，当前 {len(content_prompts)} 条"})
+    return {
+        "ok": not blocking,
+        "expected_slides": expected_slides,
+        "expected_content": expected_content,
+        "cover_prompt": cover_prompt,
+        "content_prompts": content_prompts,
+        "blocking": blocking,
     }
-    content_missing = any(index not in existing_indexes for index in range(1, expected_content_count + 1))
-    if content_missing:
-        return True
-    return any(
-        isinstance(error, dict)
-        and (
-            (error.get("kind") == "cover" and cover_missing)
-            or (error.get("kind") == "content" and int(error.get("index") or 0) not in existing_indexes)
-        )
-        for error in errors
-    )
+
+
+def image_completion_status(project: dict[str, Any]) -> dict[str, Any]:
+    suggestion = image_suggestion_status(project)
+    workspace = resolve_project_workspace(str(project["id"]))
+    metadata = load_image_metadata(workspace)
+    blocking: list[dict[str, Any]] = []
+    if not suggestion["ok"]:
+        blocking.extend(suggestion["blocking"])
+    cover = metadata.get("cover") if isinstance(metadata.get("cover"), dict) else {}
+    cover_path = storage.resolve_root_path(cover.get("path")) if cover.get("path") else None
+    if not cover_path or not cover_path.exists() or cover_path.suffix.lower() not in XHS_IMAGE_EXTENSIONS:
+        blocking.append({"key": "image:cover", "label": "封面图", "ok": False, "detail": "缺少已生成的封面图"})
+    content_images = metadata.get("content_images") if isinstance(metadata.get("content_images"), list) else []
+    by_index = {
+        _int_value(item.get("index")): item
+        for item in content_images
+        if isinstance(item, dict) and _int_value(item.get("index")) > 0
+    }
+    for index in range(1, int(suggestion["expected_content"]) + 1):
+        item = by_index.get(index) or {}
+        image_path = storage.resolve_root_path(item.get("path")) if item.get("path") else None
+        if not image_path or not image_path.exists() or image_path.suffix.lower() not in XHS_IMAGE_EXTENSIONS:
+            blocking.append({"key": f"image:content:{index}", "label": f"轮播图 {index + 1}", "ok": False, "detail": f"缺少第 {index + 1} 张轮播图"})
+    errors = metadata.get("errors") if isinstance(metadata.get("errors"), list) else []
+    if errors:
+        blocking.append({"key": "image_errors", "label": "图片生成失败项", "ok": False, "detail": f"{len(errors)} 个失败项待重试"})
+    return {
+        "ok": not blocking,
+        "expected": 1 + int(suggestion["expected_content"]),
+        "actual": len(ordered_image_paths(project)),
+        "blocking": blocking,
+        "metadata": metadata,
+    }
+
+
+def images_need_retry(project: dict[str, Any]) -> bool:
+    if not project.get("image_suggestions_confirmed"):
+        return False
+    status = image_completion_status(project)
+    metadata = status.get("metadata") if isinstance(status.get("metadata"), dict) else {}
+    errors = metadata.get("errors") if isinstance(metadata.get("errors"), list) else []
+    return not bool(status.get("ok")) and bool(errors)
+
+
+def has_image_prompts(project: dict[str, Any]) -> bool:
+    cover_prompt = str(project.get("cover_prompt") or "").strip()
+    content_prompts = [
+        str(item).strip()
+        for item in project.get("content_image_prompts") or []
+        if str(item).strip()
+    ]
+    return bool(cover_prompt or content_prompts)
 
 
 def _has_generated_image(metadata: dict[str, Any], kind: str, index: int | None = None) -> bool:
@@ -1226,10 +1309,11 @@ def publish_content_preflight(project_id: str) -> dict[str, Any]:
     title = shorten_title(str(project.get("title") or project.get("name") or ""))
     content = str(project.get("content") or "").strip()
     images = ordered_image_paths(project)
+    image_status = image_completion_status(project)
     checks = [
         {"key": "title", "label": "标题", "ok": bool(title) and xhs_title_units(title) <= 20, "detail": f"{xhs_title_units(title):.1f}/20"},
         {"key": "content", "label": "正文", "ok": bool(content), "detail": f"{len(content)} 字"},
-        {"key": "images", "label": "图片", "ok": bool(images), "detail": f"{len(images)} 张"},
+        {"key": "images", "label": "图片", "ok": bool(image_status["ok"]), "detail": f"{len(images)} / {image_status['expected']} 张"},
     ]
     for image in images:
         checks.append(
@@ -1240,6 +1324,7 @@ def publish_content_preflight(project_id: str) -> dict[str, Any]:
                 "detail": str(image),
             }
         )
+    checks.extend(image_status["blocking"])
     result = {
         "ok": all(item["ok"] for item in checks),
         "checks": checks,
@@ -1306,14 +1391,14 @@ def next_action(project: dict[str, Any], step: str | None = None) -> str:
     if current == "draft":
         return "confirm_draft"
     if current == "images":
-        if project.get("image_suggestions_confirmed") and images_need_retry(project):
-            return "retry_failed_images"
-        if ordered_image_paths(project):
-            return "run_preflight"
-        if not str(project.get("image_suggestion_rationale") or "").strip():
+        if not str(project.get("image_suggestion_rationale") or "").strip() and not has_image_prompts(project):
             return "suggest_images"
         if not project.get("image_suggestions_confirmed"):
             return "confirm_image_suggestions"
+        if images_need_retry(project):
+            return "retry_failed_images"
+        if image_completion_status(project)["ok"]:
+            return "run_preflight"
         return "generate_images"
     if current == "publish_check":
         return "fill_publish" if project.get("preflight", {}).get("ok") else "run_preflight"
@@ -1361,7 +1446,39 @@ def _run_xhs_cli(args: list[str], timeout: float = 180) -> dict[str, Any]:
 
 
 def login_status() -> dict[str, Any]:
-    return _run_xhs_cli(["check-login"], timeout=60)
+    result = _run_xhs_cli(["check-login"], timeout=60)
+    if result.get("logged_in") is True and not result.get("message"):
+        result["message"] = "小红书已登录"
+    elif result.get("logged_in") is False and not result.get("message"):
+        result["message"] = str(result.get("hint") or result.get("error") or "小红书未登录")
+    return result
+
+
+def logout_auth() -> dict[str, Any]:
+    result = _run_xhs_cli(["delete-cookies"], timeout=120)
+    if "ok" not in result:
+        result["ok"] = bool(result.get("success"))
+    result.setdefault("message", "小红书已退出登录" if result.get("ok") else "小红书退出登录失败")
+    return result
+
+
+def auth_qrcode() -> dict[str, Any]:
+    result = _run_xhs_cli(["get-qrcode"], timeout=90)
+    if result.get("logged_in") is True and not result.get("message"):
+        result["message"] = "小红书已登录"
+    elif result.get("logged_in") is False and not result.get("message"):
+        result["message"] = "请使用小红书 App 扫码登录"
+    return result
+
+
+def wait_login(timeout: int = 120) -> dict[str, Any]:
+    safe_timeout = max(10, min(int(timeout or 120), 180))
+    result = _run_xhs_cli(["wait-login", "--timeout", str(safe_timeout)], timeout=safe_timeout + 30)
+    if result.get("logged_in") is True and not result.get("message"):
+        result["message"] = "小红书登录成功"
+    elif result.get("logged_in") is False and not result.get("message"):
+        result["message"] = "等待扫码登录超时"
+    return result
 
 
 def publish_preflight(project_id: str, check_login: bool = True) -> dict[str, Any]:
@@ -1370,11 +1487,12 @@ def publish_preflight(project_id: str, check_login: bool = True) -> dict[str, An
     title = shorten_title(str(project.get("title") or project.get("name") or ""))
     content = str(project.get("content") or "").strip()
     images = ordered_image_paths(project)
+    image_status = image_completion_status(project)
     login = login_status() if check_login else {"logged_in": True, "ok": True, "skipped": True}
     checks = [
         {"key": "title", "label": "标题", "ok": bool(title) and xhs_title_units(title) <= 20, "detail": f"{xhs_title_units(title):.1f}/20"},
         {"key": "content", "label": "正文", "ok": bool(content), "detail": f"{len(content)} 字"},
-        {"key": "images", "label": "图片", "ok": bool(images), "detail": f"{len(images)} 张"},
+        {"key": "images", "label": "图片", "ok": bool(image_status["ok"]), "detail": f"{len(images)} / {image_status['expected']} 张"},
         {"key": "login", "label": "小红书登录", "ok": bool(login.get("logged_in") or login.get("ok") and login.get("skipped")), "detail": str(login.get("message") or login.get("error") or "")},
     ]
     for image in images:
@@ -1386,6 +1504,7 @@ def publish_preflight(project_id: str, check_login: bool = True) -> dict[str, An
                 "detail": str(image),
             }
         )
+    checks.extend(image_status["blocking"])
     result = {
         "ok": all(item["ok"] for item in checks),
         "checks": checks,

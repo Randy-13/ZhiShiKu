@@ -40,6 +40,61 @@ def test_frontend_dist_pointer_selects_latest_build(tmp_path, monkeypatch):
     assert frontend_app.current_frontend_path("index.html") == served / "index.html"
 
 
+def test_react_app_response_disables_html_cache(tmp_path, monkeypatch):
+    workbench_root = tmp_path / "workbench"
+    served = workbench_root / "dist-served-2"
+    served.mkdir(parents=True)
+    (served / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    (workbench_root / ".served-dist").write_text("dist-served-2\n", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_app, "WORKBENCH_ROOT", workbench_root)
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST", workbench_root / "dist")
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST_POINTER", workbench_root / ".served-dist")
+    monkeypatch.setattr(frontend_app, "LEGACY_FRONTEND_DIST", tmp_path / "legacy")
+
+    response = frontend_app.react_app_response()
+
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+
+
+def test_frontend_asset_response_falls_back_to_previous_served_dist(tmp_path, monkeypatch):
+    workbench_root = tmp_path / "workbench"
+    current = workbench_root / "dist-served-2"
+    previous = workbench_root / "dist-served-1"
+    (current / "assets").mkdir(parents=True)
+    (previous / "assets").mkdir(parents=True)
+    (current / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    (previous / "assets" / "index-old.js").write_text("console.log('old')", encoding="utf-8")
+    (workbench_root / ".served-dist").write_text("dist-served-2\n", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_app, "WORKBENCH_ROOT", workbench_root)
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST", workbench_root / "dist")
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST_POINTER", workbench_root / ".served-dist")
+    monkeypatch.setattr(frontend_app, "LEGACY_FRONTEND_DIST", tmp_path / "legacy")
+
+    path = frontend_app.current_frontend_asset_path("assets/index-old.js")
+
+    assert path == previous / "assets" / "index-old.js"
+
+
+def test_missing_hashed_frontend_entry_returns_reload_module(tmp_path, monkeypatch):
+    workbench_root = tmp_path / "workbench"
+    current = workbench_root / "dist-served-2"
+    (current / "assets").mkdir(parents=True)
+    (current / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    (workbench_root / ".served-dist").write_text("dist-served-2\n", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_app, "WORKBENCH_ROOT", workbench_root)
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST", workbench_root / "dist")
+    monkeypatch.setattr(frontend_app, "WORKBENCH_DIST_POINTER", workbench_root / ".served-dist")
+    monkeypatch.setattr(frontend_app, "LEGACY_FRONTEND_DIST", tmp_path / "legacy")
+
+    response = frontend_app.frontend_file_response("assets/index-stale.js")
+
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert "window.location.replace" in response.body.decode("utf-8")
+
+
 def test_mature_workspace_alias_routes_are_served_by_new_app_factory():
     client = TestClient(create_app())
 
@@ -131,3 +186,17 @@ def test_settings_script_reads_v2_overview():
 
     assert 'requestJson("/api/v2/settings/overview")' in script
     assert "function renderSettingsOverview" in script
+
+
+def test_react_settings_center_scopes_cloud_member_controls():
+    source = (ROOT / "frontend" / "workbench" / "src" / "workspaces" / "SettingsWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "const canManageSystemSettings = authContext" in source
+    assert 'authContext.deploymentMode !== "cloud" || authContext.user?.role === "admin"' in source
+    assert "const canViewRuntimeLog = Boolean(authContext?.authenticated)" in source
+    assert "{canManageSystemSettings ? (" in source
+    assert '<h2>{t("settings.api")}</h2>' in source
+    assert "{apiModalOpen && canManageSystemSettings ? <ApiSettingsModal" in source
+    assert "{canViewRuntimeLog ? (" in source
+    assert 'className="content-panel runtime-log-panel"' in source
+    assert 't("settings.runtimeLog.empty")' in source

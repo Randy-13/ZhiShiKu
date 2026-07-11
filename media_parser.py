@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import asyncio
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +27,7 @@ AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".aac", ".flac"}
 YTDLP_COOKIES_FILE_ENV = "FIGURELEARNING_YTDLP_COOKIES_FILE"
 YTDLP_COOKIES_FROM_BROWSER_ENV = "FIGURELEARNING_YTDLP_COOKIES_FROM_BROWSER"
 REQUIRED_BILIBILI_COOKIE_NAMES = ("SESSDATA", "DedeUserID", "bili_jct")
+DOUYIN_DOWNLOAD_SUFFIXES = {".mp4", ".m4a", ".mp3", ".wav", ".aac"}
 
 
 @dataclass(frozen=True)
@@ -353,6 +356,10 @@ def resolve_bilibili_url(url: str) -> ResolvedMedia:
 def resolve_douyin_url(url: str) -> ResolvedMedia:
     canonical_url = follow_redirect(url)
     video_id = extract_douyin_video_id(canonical_url) or extract_douyin_video_id(url)
+    if not video_id:
+        video_id = extract_douyin_video_id_from_page(canonical_url)
+        if video_id:
+            canonical_url = f"https://www.douyin.com/video/{video_id}"
     title = f"Douyin {video_id}" if video_id else "Douyin video"
     duration = None
     if video_id:
@@ -402,6 +409,18 @@ def extract_douyin_video_id(url: str) -> str | None:
     return None
 
 
+def extract_douyin_video_id_from_page(url: str) -> str | None:
+    if not url:
+        return None
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyin.com/"})
+    try:
+        with urlopen(request, timeout=12) as response:
+            html = response.read(600_000).decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+    return extract_douyin_video_id(html)
+
+
 def ytdlp_dump_json(url: str) -> dict | None:
     command = ytdlp_command()
     if not command:
@@ -427,7 +446,17 @@ def ytdlp_dump_json(url: str) -> dict | None:
 def ensure_transcript(item: dict) -> tuple[str, str]:
     existing_path = storage.resolve_root_path(item.get("transcript_path"))
     if existing_path and existing_path.exists():
-        return existing_path.read_text(encoding="utf-8", errors="ignore"), str(item.get("transcript_kind") or "none")
+        existing_text = existing_path.read_text(encoding="utf-8", errors="replace")
+        if not looks_like_garbled_transcript(existing_text):
+            return existing_text, str(item.get("transcript_kind") or "none")
+        storage.update_media_source(
+            int(item["id"]),
+            transcript_path=None,
+            transcript_kind="none",
+            status="uploaded" if item.get("source_kind") == "local_file" else "resolved",
+            error_message="已丢弃不可读的转写缓存，将重新识别。",
+        )
+        item = storage.get_media_source(int(item["id"]))
 
     file_path = storage.resolve_root_path(item.get("file_path"))
     suffix = file_path.suffix.lower() if file_path else ""
@@ -436,7 +465,7 @@ def ensure_transcript(item: dict) -> tuple[str, str]:
         return text, "uploaded_subtitle"
 
     if item.get("source_kind") == "local_file" and file_path:
-        return transcript_from_local_media(file_path)
+        return transcript_from_local_media_item(item, file_path)
 
     if item.get("platform") == "bilibili" and item.get("source_url"):
         text = transcript_from_bilibili(item)
@@ -448,7 +477,7 @@ def ensure_transcript(item: dict) -> tuple[str, str]:
             return text, "asr"
 
     if file_path:
-        return transcript_from_local_media(file_path)
+        return transcript_from_local_media_item(item, file_path)
 
     raise RuntimeError(
         "No transcript is available. For WeChat Channels v1, upload a local media file or subtitle file."
@@ -463,6 +492,14 @@ def transcript_from_local_media(file_path: Path) -> tuple[str, str]:
         audio_path = extract_audio(file_path)
         return transcribe_audio(audio_path), "asr"
     raise RuntimeError("Unsupported local media type. Upload audio, video, or subtitle files.")
+
+
+def transcript_from_local_media_item(item: dict, file_path: Path) -> tuple[str, str]:
+    transcript, kind = transcript_from_local_media(file_path)
+    if looks_like_garbled_transcript(transcript):
+        raise RuntimeError("本地 ASR 返回了不可读文本，已阻止写入转写缓存。请确认上传的是音视频文件并重新识别。")
+    write_transcript(item, transcript, kind)
+    return transcript, kind
 
 
 def transcript_from_subtitle_file(item: dict, path: Path) -> str:
@@ -517,27 +554,64 @@ def transcript_from_bilibili(item: dict) -> str:
 
 
 def transcript_from_douyin(item: dict) -> str:
+    errors: list[str] = []
     detail = douyin_detail_from_cache(item)
     if not detail:
-        raise RuntimeError(
-            "Douyin full subtitles are not exposed by this page. Open the Douyin video in the browser first, "
-            "then import the captured aweme/detail JSON, or configure ASR and provide a downloadable audio URL."
-        )
-    subtitle = extract_douyin_platform_subtitle(detail)
-    if subtitle:
-        write_transcript(item, subtitle, "platform_subtitle")
-        return subtitle
+        try:
+            detail = fetch_douyin_detail_with_scraper(str(item.get("source_url") or item.get("canonical_url") or ""))
+        except Exception as exc:
+            errors.append(f"SDK解析失败：{exc}")
+    if not detail:
+        video_id = extract_douyin_video_id(str(item.get("canonical_url") or item.get("source_url") or ""))
+        if video_id:
+            try:
+                detail = fetch_douyin_detail_with_downloader_api(video_id)
+            except Exception as exc:
+                errors.append(f"下载器API解析失败：{exc}")
+    if not detail:
+        return transcript_from_douyin_cli(item, errors)
+
+    try:
+        subtitle = extract_douyin_platform_subtitle(detail)
+        if subtitle:
+            write_transcript(item, subtitle, "platform_subtitle")
+            return subtitle
+    except Exception as exc:
+        errors.append(f"字幕提取失败：{exc}")
+
     audio_url = extract_douyin_audio_url(detail)
-    if not audio_url:
-        raise RuntimeError("Douyin detail JSON did not contain a downloadable audio URL.")
-    provider = (asr_settings.load_setting().get("provider") or "").lower()
-    if provider == "dashscope":
-        transcript = transcribe_audio_url(audio_url)
+    if audio_url:
+        try:
+            audio_path = download_douyin_audio(item, audio_url)
+            transcript = transcribe_audio(audio_path)
+            write_transcript(item, transcript, "asr")
+            return transcript
+        except Exception as exc:
+            errors.append(f"音频直链转写失败：{exc}")
+            provider = (asr_settings.load_setting().get("provider") or "").lower()
+            if provider == "dashscope":
+                try:
+                    transcript = transcribe_audio_url(audio_url)
+                    write_transcript(item, transcript, "asr")
+                    return transcript
+                except Exception as url_exc:
+                    errors.append(f"远程音频 URL 转写失败：{url_exc}")
     else:
-        audio_path = download_douyin_audio(item, audio_url)
-        transcript = transcribe_audio(audio_path)
-    write_transcript(item, transcript, "asr")
-    return transcript
+        errors.append("SDK/缓存 detail 中没有可下载音频或视频 URL")
+
+    return transcript_from_douyin_cli(item, errors)
+
+
+def transcript_from_douyin_cli(item: dict, previous_errors: list[str] | None = None) -> str:
+    errors = list(previous_errors or [])
+    try:
+        media_path = download_douyin_media_with_cli(item)
+        transcript, _ = transcript_from_local_media(media_path)
+        write_transcript(item, transcript, "asr")
+        return transcript
+    except Exception as exc:
+        errors.append(f"下载器兜底失败：{exc}")
+    raise RuntimeError(explain_douyin_transcript_error(errors))
 
 
 def douyin_detail_from_cache(item: dict) -> dict | None:
@@ -545,6 +619,132 @@ def douyin_detail_from_cache(item: dict) -> dict | None:
     if not video_id:
         return None
     return douyin_detail_from_video_id(video_id)
+
+
+def fetch_douyin_detail_with_scraper(url: str) -> dict:
+    url = url.strip()
+    if not url:
+        raise RuntimeError("抖音链接为空，无法调用 SDK 解析。")
+    try:
+        from douyin_tiktok_scraper.scraper import Scraper
+    except Exception as exc:
+        raise RuntimeError(f"未找到 douyin_tiktok_scraper SDK：{exc}") from exc
+
+    async def _parse() -> dict:
+        scraper = Scraper()
+        return await scraper.hybrid_parsing(url)
+
+    try:
+        data = asyncio.run(_parse())
+    except RuntimeError as exc:
+        raise RuntimeError(f"douyin_tiktok_scraper 运行失败：{exc}") from exc
+    if not isinstance(data, dict) or data.get("status") != "success":
+        raise RuntimeError(str(data.get("message") if isinstance(data, dict) else data) or "SDK 未返回成功结果")
+    detail = normalize_douyin_scraper_detail(data)
+    video_id = str(detail.get("aweme_id") or data.get("aweme_id") or extract_douyin_video_id(url) or "").strip()
+    if not video_id:
+        raise RuntimeError("SDK 已返回数据，但缺少 aweme_id。")
+    write_douyin_detail_cache(video_id, detail)
+    return detail
+
+
+def normalize_douyin_scraper_detail(data: dict) -> dict:
+    video_data = data.get("video_data") if isinstance(data.get("video_data"), dict) else {}
+    music = data.get("music") if isinstance(data.get("music"), dict) else {}
+    detail = {
+        "aweme_id": data.get("aweme_id"),
+        "desc": data.get("desc"),
+        "create_time": data.get("create_time"),
+        "author": data.get("author") if isinstance(data.get("author"), dict) else {},
+        "music": music,
+        "statistics": data.get("statistics") if isinstance(data.get("statistics"), dict) else {},
+        "text_extra": data.get("hashtags") if isinstance(data.get("hashtags"), list) else [],
+        "duration": data.get("duration"),
+        "video": {
+            "play_addr": {
+                "url_list": compact_url_list(
+                    [
+                        video_data.get("nwm_video_url"),
+                        video_data.get("nwm_video_url_HQ"),
+                        video_data.get("wm_video_url"),
+                        video_data.get("wm_video_url_HQ"),
+                    ]
+                )
+            }
+        },
+        "_figurelearning_scraper_payload": data,
+    }
+    cover_data = data.get("cover_data") if isinstance(data.get("cover_data"), dict) else {}
+    if cover_data:
+        detail["video"].update({key: value for key, value in cover_data.items() if value})
+    return detail
+
+
+def compact_url_list(urls: list[object]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in urls:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def write_douyin_detail_cache(video_id: str, detail: dict) -> Path:
+    cache_dir = storage.MEDIA_DIR / "douyin_detail"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{video_id}.json"
+    path.write_text(json.dumps({"aweme_detail": detail}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def fetch_douyin_detail_with_downloader_api(video_id: str) -> dict:
+    cookies = douyin_cookie_dict()
+    if not cookies:
+        raise RuntimeError("没有可用的 auth/douyin.cookies.txt Cookie。")
+    try:
+        DouyinAPIClient = load_douyin_api_client_class()
+    except Exception as exc:
+        raise RuntimeError(f"未找到 douyin-downloader API client：{exc}") from exc
+
+    async def _fetch() -> dict | None:
+        async with DouyinAPIClient(cookies) as client:
+            return await client.get_video_detail(video_id, suppress_error=True)
+
+    detail = asyncio.run(_fetch())
+    if not isinstance(detail, dict) or not detail:
+        raise RuntimeError(f"douyin-downloader API 未返回 aweme detail：{video_id}")
+    write_douyin_detail_cache(video_id, detail)
+    return detail
+
+
+def load_douyin_api_client_class():
+    module_path = Path(sys.executable).resolve().parent.parent / "Lib" / "site-packages" / "core" / "api_client.py"
+    if not module_path.exists():
+        raise RuntimeError(f"api_client.py 不存在：{module_path}")
+    spec = importlib.util.spec_from_file_location("figurelearning_douyin_api_client", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载 api_client.py：{module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.DouyinAPIClient
+
+
+def douyin_cookie_dict() -> dict[str, str]:
+    cookie_file = storage.ROOT / "auth" / "douyin.cookies.txt"
+    if not cookie_file.exists():
+        return {}
+    cookies: dict[str, str] = {}
+    for raw_line in cookie_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and re.search(r"douyin\.com|iesdouyin\.com|bytedance\.com", parts[0]):
+            cookies[parts[5]] = parts[6]
+    return cookies
 
 
 def douyin_detail_from_video_id(video_id: str) -> dict | None:
@@ -613,6 +813,90 @@ def download_douyin_audio(item: dict, audio_url: str) -> Path:
         target.write_bytes(response.read())
     storage.update_media_source(media_id, file_path=storage.storage_relative(target), content_type="audio/mp4")
     return target
+
+
+def download_douyin_media_with_cli(item: dict) -> Path:
+    script = storage.ROOT / "tools" / "run_douyin_downloader.ps1"
+    config = storage.ROOT / "auth" / "douyin_downloader.config.yml"
+    downloader = Path(sys.executable).resolve().parent / ("douyin-dl.exe" if sys.platform.startswith("win") else "douyin-dl")
+    if not script.exists():
+        raise RuntimeError(f"未找到抖音下载包装脚本：{script}")
+    if not downloader.exists():
+        raise RuntimeError(f"未找到 douyin-downloader 可执行文件：{downloader}")
+    if not config.exists():
+        raise RuntimeError(f"未找到抖音下载配置：{config}")
+    url = str(item.get("source_url") or item.get("canonical_url") or "").strip()
+    if not url:
+        raise RuntimeError("媒体记录没有抖音链接，无法调用下载器。")
+
+    video_id = extract_douyin_video_id(str(item.get("canonical_url") or item.get("source_url") or "")) or ""
+    before = time.time()
+    completed = subprocess.run(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script), "-u", url, "--show-warnings"],
+        cwd=str(storage.ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=420,
+        check=False,
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"douyin-downloader 退出码 {completed.returncode}：{message[-800:]}")
+    media_path = find_douyin_downloaded_media(video_id, before)
+    if not media_path:
+        output = (completed.stdout or completed.stderr or "").strip()
+        raise RuntimeError(f"douyin-downloader 已运行但未找到下载产物。输出：{output[-800:]}")
+    content_type = "audio/mpeg" if media_path.suffix.lower() in AUDIO_SUFFIXES else "video/mp4"
+    storage.update_media_source(int(item["id"]), file_path=storage.storage_relative(media_path), content_type=content_type)
+    return media_path
+
+
+def find_douyin_downloaded_media(video_id: str = "", since: float = 0) -> Path | None:
+    download_dir = storage.MEDIA_DIR / "douyin_downloads"
+    if not download_dir.exists():
+        return None
+    files = [
+        path
+        for path in download_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in DOUYIN_DOWNLOAD_SUFFIXES
+        and path.stat().st_size > 0
+        and (not video_id or video_id in path.name or video_id in str(path.parent))
+        and path.stat().st_mtime >= since - 5
+    ]
+    if not files and video_id:
+        files = [
+            path
+            for path in download_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in DOUYIN_DOWNLOAD_SUFFIXES
+            and path.stat().st_size > 0
+            and (video_id in path.name or video_id in str(path.parent))
+        ]
+    if not files:
+        files = [
+            path
+            for path in download_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in DOUYIN_DOWNLOAD_SUFFIXES
+            and path.stat().st_size > 0
+            and path.stat().st_mtime >= since - 5
+        ]
+    return max(files, key=lambda path: path.stat().st_mtime) if files else None
+
+
+def explain_douyin_transcript_error(errors: list[str]) -> str:
+    detail = "；".join(error for error in errors if error)
+    if detail:
+        detail = f" 已尝试：{detail}。"
+    return (
+        "抖音链接暂时没有提取到可生成原文的文本。"
+        f"{detail}"
+        "请检查抖音登录状态、auth/douyin_downloader.config.yml 下载器配置、ASR 设置，"
+        "或上传本地视频/音频文件后再生成原文。"
+    )
 
 
 def format_milliseconds(value: object) -> str:
@@ -714,6 +998,30 @@ def write_transcript(item: dict, transcript: str, kind: str) -> Path:
         error_message=None,
     )
     return path
+
+
+def looks_like_garbled_transcript(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    sample = stripped[:4000]
+    replacement_count = sample.count("\ufffd")
+    if replacement_count >= 8 and replacement_count / max(len(sample), 1) > 0.03:
+        return True
+    printable = 0
+    suspicious = 0
+    for char in sample:
+        if char.isspace():
+            printable += 1
+            continue
+        category = __import__("unicodedata").category(char)
+        if category.startswith(("L", "N", "P", "S")):
+            printable += 1
+        elif category.startswith("C"):
+            suspicious += 1
+    if len(sample) >= 80 and printable / len(sample) < 0.65:
+        return True
+    return suspicious >= 12 and suspicious / max(len(sample), 1) > 0.05
 
 
 def to_readable_transcript(transcript: str) -> str:

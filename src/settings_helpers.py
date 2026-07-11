@@ -87,26 +87,55 @@ def resolve_image_api_test_setting(
     return image_api_settings.active_setting()
 
 
+def resolve_asr_test_setting(payload: dict[str, object]) -> dict[str, object]:
+    nested = payload.get("setting")
+    if isinstance(nested, dict):
+        resolved = dict(nested)
+        if resolved.get("id") and not resolved.get("api_key"):
+            existing = asr_settings.get_setting(str(resolved["id"]))
+            if existing:
+                resolved["api_key"] = existing.get("api_key")
+        return resolved
+    setting_id = payload.get("id")
+    has_inline_fields = any(payload.get(key) for key in ("base_url", "model", "api_key", "name"))
+    if setting_id and not has_inline_fields:
+        setting = asr_settings.get_setting(str(setting_id))
+        if setting is None:
+            raise ValueError("ASR setting not found")
+        return setting
+    resolved = dict(payload)
+    if resolved.get("id") and not resolved.get("api_key"):
+        existing = asr_settings.get_setting(str(resolved["id"]))
+        if existing:
+            resolved["api_key"] = existing.get("api_key")
+    return resolved
+
+
 def test_asr_setting_payload(
     payload: dict[str, object],
     *,
     transcribe_audio_url_fn: Callable[[str, dict[str, Any]], object],
     transcribe_audio_fn: Callable[[Path], object] | None = None,
 ) -> dict[str, object]:
-    if not payload.get("api_key"):
+    payload = resolve_asr_test_setting(payload)
+    if payload.get("provider") != "local" and not payload.get("api_key"):
         payload["api_key"] = asr_settings.load_setting().get("api_key")
     saved = asr_settings.save_setting(payload)
     setting = asr_settings.active_setting()
     if setting.get("provider") == "dashscope":
         sample_url = "https://dashscope.oss-cn-beijing.aliyuncs.com/samples/audio/paraformer/hello_world_female2.wav"
         transcribe_audio_url_fn(sample_url, setting)
-    elif setting.get("provider") == "minimax":
+    elif setting.get("provider") in {"minimax", "local"}:
         if transcribe_audio_fn is None:
-            raise RuntimeError("MiniMax ASR test requires a local audio transcription probe.")
+            raise RuntimeError("This ASR provider requires a local audio transcription probe.")
         with tempfile.TemporaryDirectory() as temp_dir:
             sample_path = Path(temp_dir) / "asr_probe.wav"
             _write_silent_wav(sample_path)
-            transcribe_audio_fn(sample_path)
+            try:
+                transcribe_audio_fn(sample_path)
+            except RuntimeError as exc:
+                if setting.get("provider") != "local" or "没有识别到文字" not in str(exc):
+                    raise
     asr_settings.mark_test_result(True, "ASR API verified with a real transcription request.")
     return {
         "ok": True,

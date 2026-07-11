@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { LibraryKind, WriterLibraryFileInput } from "../api";
 import { writerApi } from "../apiWriter";
-import type { WriterImageRetryTask } from "../hooks/useWriterFlow";
+import type { WriterImageRetryTask, WriterRunningTask } from "../hooks/useWriterFlow";
 import type { KnowledgeItem, WriterProject, WriterProjectState, WriterStep, WriterStrategyPreset } from "../domain";
 import type { Translator } from "../i18n";
 import { EmptyState } from "../components/EmptyState";
@@ -99,6 +99,7 @@ type Props = {
   selectedProjectId?: string;
   selectedKnowledgeFiles: KnowledgeItem[];
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   onCreateProject: (
     name: string,
     projectType: string,
@@ -131,6 +132,42 @@ type ImageProgress = {
   done: number;
   total: number;
 } | null;
+
+function formatElapsedTime(totalSeconds: number) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`;
+}
+
+function WriterRunningButtonLabel({
+  runningTask,
+  children,
+}: {
+  runningTask?: WriterRunningTask;
+  children: ReactNode;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!runningTask) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [runningTask?.startedAt]);
+
+  if (!runningTask) return <>{children}</>;
+
+  const elapsedSeconds = (now - runningTask.startedAt) / 1000;
+  return (
+    <span className="xhs-running-label">
+      <span>{runningTask.runningLabel}</span>
+      <span className="xhs-running-time">{formatElapsedTime(elapsedSeconds)}</span>
+    </span>
+  );
+}
 
 function CreateSummaryBar({
   eyebrow,
@@ -178,6 +215,7 @@ export function CreateWorkspace({
   selectedProjectId,
   selectedKnowledgeFiles,
   isRunning,
+  runningTask,
   onCreateProject,
   onSelectProject,
   onImportKnowledge,
@@ -427,6 +465,7 @@ export function CreateWorkspace({
             name={projectName}
             selectedFiles={selectedLibraryFiles}
             isRunning={isRunning}
+            runningTask={runningTask}
             hasOpenProject={Boolean(project)}
             onNameChange={setProjectName}
             onCancel={() => setCreateMode(false)}
@@ -485,6 +524,7 @@ export function CreateWorkspace({
               strategyDirty={strategyDirty}
               selectedLibraryFiles={selectedLibraryFiles}
               isRunning={isRunning}
+              runningTask={runningTask}
               writingStrategy={writingStrategy}
               designStrategy={designStrategy}
               designTheme={designTheme}
@@ -565,6 +605,7 @@ function ProjectStageWorkspace({
   strategyDirty,
   selectedLibraryFiles,
   isRunning,
+  runningTask,
   writingStrategy,
   designStrategy,
   designTheme,
@@ -619,6 +660,7 @@ function ProjectStageWorkspace({
   strategyDirty: boolean;
   selectedLibraryFiles: WriterLibraryFileInput[];
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   writingStrategy: string;
   designStrategy: string;
   designTheme: string;
@@ -686,11 +728,15 @@ function ProjectStageWorkspace({
             onClick={onPrimaryAction}
           >
             <Sparkles size={16} />
-            <strong>{primaryAction.label}</strong>
+            <strong>
+              <WriterRunningButtonLabel runningTask={runningTask}>{primaryAction.label}</WriterRunningButtonLabel>
+            </strong>
           </button>
           {visibleStage === actualStage && visibleStep === "images" && backendNextAction === "retry_failed_images" ? (
             <button className="secondary-button" type="button" disabled={isRunning} onClick={onContinueFormat}>
-              {language === "zh" ? "继续美编" : "Continue to HTML"}
+              <WriterRunningButtonLabel runningTask={runningTask}>
+                {language === "zh" ? "继续美编" : "Continue to HTML"}
+              </WriterRunningButtonLabel>
             </button>
           ) : null}
           {primaryAction.disabled && primaryAction.reason ? (
@@ -711,6 +757,7 @@ function ProjectStageWorkspace({
             onDesignThemeChange={onDesignThemeChange}
           onSave={onSaveStrategies}
           saveDisabled={isRunning}
+          runningTask={runningTask}
           writingStrategyPresets={writingStrategyPresets}
           defaultWritingStrategyId={defaultWritingStrategyId}
           writingStrategyLibraryError={writingStrategyLibraryError}
@@ -734,6 +781,7 @@ function ProjectStageWorkspace({
           files={project.library_files ?? []}
           selectedFiles={selectedLibraryFiles}
           isRunning={isRunning}
+          runningTask={runningTask}
           onImport={onImportKnowledge}
         />
       ) : null}
@@ -744,6 +792,7 @@ function ProjectStageWorkspace({
           project={project}
           pendingTopic={pendingTopic}
           disabled={isRunning}
+          runningTask={runningTask}
           onPendingTopicChange={onPendingTopicChange}
           onSelectTopic={onSelectTopic}
         />
@@ -757,6 +806,7 @@ function ProjectStageWorkspace({
           markdown={articleMarkdown}
           revision={revision}
           disabled={!articleMarkdown.trim() || !revision.trim() || isRunning}
+          runningTask={runningTask}
           onMarkdownChange={onMarkdownChange}
           onRevisionChange={onRevisionChange}
           onRevise={onRevise}
@@ -771,6 +821,7 @@ function ProjectStageWorkspace({
           coverAspectRatio={coverImageAspectRatio}
           contentAspectRatio={contentImageAspectRatio}
           isRunning={isRunning}
+          runningTask={runningTask}
           hasSuggestions={hasSuggestions}
           onChange={onContentImageCountChange}
           onImageStylePresetChange={onImageStylePresetChange}
@@ -795,6 +846,7 @@ function ProjectStageWorkspace({
           errors={imageErrors}
           hasSuggestions={hasSuggestions}
           isRunning={isRunning}
+          runningTask={runningTask}
           onCoverPromptChange={onCoverPromptChange}
           onContentPromptsTextChange={onContentPromptsTextChange}
           onRetryTasks={onRetryImageTasks}
@@ -1040,6 +1092,7 @@ function ProjectSetup({
   name,
   selectedFiles,
   isRunning,
+  runningTask,
   hasOpenProject,
   onNameChange,
   onCancel,
@@ -1049,6 +1102,7 @@ function ProjectSetup({
   name: string;
   selectedFiles: WriterLibraryFileInput[];
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   hasOpenProject: boolean;
   onNameChange: (value: string) => void;
   onCancel: () => void;
@@ -1086,7 +1140,11 @@ function ProjectSetup({
       </section>
       <div className="setup-actions">
         <button className="primary-cta" type="button" disabled={isRunning || !name.trim()} onClick={onCreate}>
-          <strong>{language === "zh" ? "创建并进入工作流" : "Create and start"}</strong>
+          <strong>
+            <WriterRunningButtonLabel runningTask={runningTask}>
+              {language === "zh" ? "创建并进入工作流" : "Create and start"}
+            </WriterRunningButtonLabel>
+          </strong>
         </button>
         {hasOpenProject ? (
           <button className="secondary-button" type="button" disabled={isRunning} onClick={onCancel}>
@@ -1109,6 +1167,7 @@ function ProjectStrategyPanel({
   onDesignThemeChange,
   onSave,
   saveDisabled,
+  runningTask,
   writingStrategyPresets,
   defaultWritingStrategyId,
   writingStrategyLibraryError,
@@ -1126,6 +1185,7 @@ function ProjectStrategyPanel({
   onDesignThemeChange?: (value: string) => void;
   onSave?: (writingStrategy: string, designStrategy: string) => void;
   saveDisabled?: boolean;
+  runningTask?: WriterRunningTask;
   writingStrategyPresets?: WriterStrategyPreset[];
   defaultWritingStrategyId?: string;
   writingStrategyLibraryError?: string;
@@ -1451,7 +1511,9 @@ function ProjectStrategyPanel({
                 onClick={applyStrategies}
               >
                 <Save size={16} />
-                {onSave ? (language === "zh" ? "保存并应用到项目" : "Save to project") : (language === "zh" ? "应用到当前创建" : "Apply to setup")}
+                <WriterRunningButtonLabel runningTask={runningTask}>
+                  {onSave ? (language === "zh" ? "保存并应用到项目" : "Save to project") : (language === "zh" ? "应用到当前创建" : "Apply to setup")}
+                </WriterRunningButtonLabel>
               </button>
             </div>
           </div>
@@ -1466,12 +1528,14 @@ function ProjectKnowledge({
   files,
   selectedFiles,
   isRunning,
+  runningTask,
   onImport,
 }: {
   language: "zh" | "en";
   files: WriterProject["library_files"];
   selectedFiles: WriterLibraryFileInput[];
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   onImport: () => void;
 }) {
   return (
@@ -1486,7 +1550,9 @@ function ProjectKnowledge({
         </span>
         <button className="secondary-button" type="button" disabled={isRunning || !selectedFiles.length} onClick={onImport}>
           <Save size={16} />
-          {language === "zh" ? "导入勾选文件" : "Import checked"}
+          <WriterRunningButtonLabel runningTask={runningTask}>
+            {language === "zh" ? "导入勾选文件" : "Import checked"}
+          </WriterRunningButtonLabel>
         </button>
       </div>
       {files?.length ? (
@@ -1560,6 +1626,7 @@ function ArticleEditor({
   markdown,
   revision,
   disabled,
+  runningTask,
   onMarkdownChange,
   onRevisionChange,
   onRevise,
@@ -1570,6 +1637,7 @@ function ArticleEditor({
   markdown: string;
   revision: string;
   disabled: boolean;
+  runningTask?: WriterRunningTask;
   onMarkdownChange: (value: string) => void;
   onRevisionChange: (value: string) => void;
   onRevise: () => void;
@@ -1592,7 +1660,9 @@ function ArticleEditor({
         <input value={revision} onChange={(event) => onRevisionChange(event.target.value)} placeholder={language === "zh" ? "修订指令，例如：压缩开头，增强结论" : "Revision instruction"} />
         <button className="secondary-button" type="button" disabled={disabled} onClick={onRevise}>
           <Sparkles size={16} />
-          {language === "zh" ? "修订" : "Revise"}
+          <WriterRunningButtonLabel runningTask={runningTask}>
+            {language === "zh" ? "修订" : "Revise"}
+          </WriterRunningButtonLabel>
         </button>
       </div>
     </section>
@@ -1606,6 +1676,7 @@ function ImageSuggestionOptions({
   coverAspectRatio,
   contentAspectRatio,
   isRunning,
+  runningTask,
   hasSuggestions,
   onChange,
   onImageStylePresetChange,
@@ -1619,6 +1690,7 @@ function ImageSuggestionOptions({
   coverAspectRatio: string;
   contentAspectRatio: string;
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   hasSuggestions: boolean;
   onChange: (value: number) => void;
   onImageStylePresetChange: (value: string) => void;
@@ -1695,13 +1767,15 @@ function ImageSuggestionOptions({
         <div className="image-options-actions">
         <button className="secondary-button" type="button" disabled={isRunning} onClick={onSuggest}>
           <Sparkles size={16} />
-          {hasSuggestions
-            ? language === "zh"
-              ? "重新生成建议"
-              : "Refresh image suggestions"
-            : language === "zh"
-              ? "生成配图建议"
-              : "Suggest images"}
+          <WriterRunningButtonLabel runningTask={runningTask}>
+            {hasSuggestions
+              ? language === "zh"
+                ? "重新生成建议"
+                : "Refresh image suggestions"
+              : language === "zh"
+                ? "生成配图建议"
+                : "Suggest images"}
+          </WriterRunningButtonLabel>
         </button>
       </div>
     </section>
@@ -1761,6 +1835,7 @@ function ImageSection({
   errors,
   hasSuggestions,
   isRunning,
+  runningTask,
   onCoverPromptChange,
   onContentPromptsTextChange,
   onRetryTasks,
@@ -1778,6 +1853,7 @@ function ImageSection({
   errors?: Array<{ kind?: string; index?: number; message?: string }>;
   hasSuggestions: boolean;
   isRunning: boolean;
+  runningTask?: WriterRunningTask;
   onCoverPromptChange: (value: string) => void;
   onContentPromptsTextChange: (value: string) => void;
   onRetryTasks: (tasks?: WriterImageRetryTask[]) => void;
@@ -1811,7 +1887,9 @@ function ImageSection({
             </span>
           </div>
           <button className="secondary-button" type="button" disabled={isRunning} onClick={() => onRetryTasks(failedTasks.map(taskToRetryInput))}>
-            {language === "zh" ? "重试失败图片" : "Retry failed"}
+            <WriterRunningButtonLabel runningTask={runningTask}>
+              {language === "zh" ? "重试失败图片" : "Retry failed"}
+            </WriterRunningButtonLabel>
           </button>
         </div>
       ) : null}
@@ -1886,7 +1964,9 @@ function ImageSection({
                     disabled={isRunning || !task.prompt.trim()}
                     onClick={() => onRetryTasks([taskToRetryInput(task, { cover: coverAspectRatio, content: contentAspectRatio })])}
                   >
-                  {language === "zh" ? "重试这张" : "Retry"}
+                  <WriterRunningButtonLabel runningTask={runningTask}>
+                    {language === "zh" ? "重试这张" : "Retry"}
+                  </WriterRunningButtonLabel>
                 </button>
               ) : null}
             </div>

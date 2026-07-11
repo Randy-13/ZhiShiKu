@@ -17,6 +17,7 @@ import type {
   WechatPublisherBindingStatus,
   WorkbenchSettings,
 } from "./api";
+import type { XhsLoginStatus } from "./domain";
 
 type SettingsResult = { ok?: boolean; error?: string; message?: string };
 
@@ -59,18 +60,20 @@ export const settingsApi = {
   },
 
   async htmlGrabCheck(url = "") {
+    const body = url.trim() ? { url: url.trim() } : {};
     return unwrapV2(await requestJson<import("./apiCore").V2Payload<HtmlGrabCheckStatus>>("/api/v2/settings/html-grab-check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(body),
     }));
   },
 
-  async htmlGrabAuthorize(url = "about:blank") {
+  async htmlGrabAuthorize(url = "") {
+    const body = url.trim() ? { url: url.trim() } : {};
     return unwrapV2(await requestJson<import("./apiCore").V2Payload<{ ok?: boolean; message?: string; target_url?: string; error?: string }>>("/api/v2/settings/html-grab-authorize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(body),
     }));
   },
 
@@ -86,11 +89,25 @@ export const settingsApi = {
     })));
   },
 
+  async setActiveAsrSetting(id: string): Promise<AsrSettingsPayload> {
+    return ensureSettingsOk(unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>("/api/v2/settings/asr/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    })));
+  },
+
+  async deleteAsrSetting(id: string): Promise<AsrSettingsPayload> {
+    return ensureSettingsOk(unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>(`/api/v2/settings/asr/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    })));
+  },
+
   async testAsrSetting(setting: AsrSettingInput): Promise<AsrSettingsPayload> {
     return ensureSettingsOk(unwrapV2(await requestJson<import("./apiCore").V2Payload<AsrSettingsPayload>>("/api/v2/settings/asr/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(setting),
+      body: JSON.stringify({ setting }),
     })));
   },
 
@@ -184,6 +201,22 @@ export const settingsApi = {
 
   refreshWechatPublisherToken(): Promise<Record<string, unknown>> {
     return requestJson<Record<string, unknown>>("/api/settings/wechat-publisher/token/refresh", { method: "POST" });
+  },
+
+  xhsAuthStatus(): Promise<XhsLoginStatus> {
+    return requestJson<XhsLoginStatus>("/api/xhs/auth/status");
+  },
+
+  xhsAuthLogout(): Promise<XhsLoginStatus> {
+    return requestJson<XhsLoginStatus>("/api/xhs/auth/logout", { method: "POST" });
+  },
+
+  xhsAuthQrcode(): Promise<XhsLoginStatus> {
+    return requestJson<XhsLoginStatus>("/api/xhs/auth/qrcode", { method: "POST" });
+  },
+
+  xhsAuthWaitLogin(): Promise<XhsLoginStatus> {
+    return requestJson<XhsLoginStatus>("/api/xhs/auth/wait-login", { method: "POST" });
   },
 
   async clearTrash(): Promise<TrashStatus> {

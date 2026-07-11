@@ -43,13 +43,16 @@ def test_xhs_setup_requires_account_profile_before_project_creation():
     assert "XhsAccountProfile" in domain_source
 
 
-def test_xhs_project_name_validation_does_not_disable_create_button():
+def test_xhs_project_creation_allows_empty_name_with_selected_file_fallback():
     source = read_source("workspaces/XhsWorkspace.tsx")
     create_button = source[source.index('taskId="create_project"') - 420 : source.index('taskId="create_project"') + 220]
+    submit_block = source[source.index("const submitCreateProject") : source.index("useEffect(() =>", source.index("const submitCreateProject"))]
 
     assert "projectNameInputRef.current?.value.trim()" in source
-    assert "setProjectNameTouched(true)" in source
-    assert "projectNameMissingReason" in source
+    assert "selectedFiles[0]?.title" in submit_block
+    assert "selectedFiles[0]?.markdown_path" in submit_block
+    assert "Untitled XHS post" in submit_block
+    assert "if (!name)" not in submit_block
     assert "disabled={isRunning || Boolean(createDisabledReason)}" in create_button
     assert "Boolean(visibleCreateReason)" not in create_button
     assert "onClick={submitCreateProject}" in create_button
@@ -77,6 +80,19 @@ def test_xhs_flow_and_domain_types_are_wired():
     assert 'workspace: "xhs"' in flow_source
     assert "XhsProjectState" in domain_source
     assert "XhsLoginStatus" in domain_source
+
+
+def test_xhs_project_refresh_keeps_selected_workflow_state():
+    flow_source = read_source("hooks/useXhsFlow.ts")
+    refresh_block = flow_source[flow_source.index("const refreshXhsProjects") : flow_source.index("useEffect(() =>", flow_source.index("const refreshXhsProjects"))]
+    action_block = flow_source[flow_source.index("const runXhsAction") : flow_source.index("const requireProjectId")]
+
+    assert "useRef" in flow_source
+    assert "selectedXhsProjectIdRef" in flow_source
+    assert "rememberSelectedXhsProjectId(state.project.id)" in action_block
+    assert "selectedId ?? selectedXhsProjectIdRef.current" in refresh_block
+    assert "setXhsState(undefined)" not in refresh_block
+    assert "setSelectedXhsProjectId(undefined)" not in refresh_block
 
 
 def test_xhs_running_task_labels_are_wired_to_buttons():
@@ -112,7 +128,7 @@ def test_xhs_running_task_labels_are_wired_to_buttons():
 
 def test_xhs_running_topic_action_has_room_for_timer():
     styles = read_source("styles.css")
-    topic_context_styles = styles[styles.index(".xhs-topic-context {") : styles.index(".xhs-topic-context span")]
+    topic_context_styles = styles[styles.index(".xhs-topic-context {") : styles.index(".xhs-topic-context > div > span")]
 
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(188px, auto);" in topic_context_styles
     assert ".xhs-topic-context .primary-cta" in styles
@@ -185,6 +201,7 @@ def test_xhs_image_generation_is_split_from_draft_and_preview_is_modal():
     source = read_source("workspaces/XhsWorkspace.tsx")
     stage_start = source.index("function XhsStage")
     stage_source = source[stage_start : source.index("function ImageTextConfigPanel")]
+    stage_call = source[source.index("<XhsStage") : source.index("/>", source.index("<XhsStage"))]
     draft_block = stage_source[stage_source.index('if (step === "draft")') : stage_source.index('          <span>{language === "zh" ? "图片生成"')]
     image_panel = source[source.index("function ImageGenerationPanel") : source.index("function XhsPreviewDialog")]
 
@@ -198,6 +215,10 @@ def test_xhs_image_generation_is_split_from_draft_and_preview_is_modal():
     assert "生成图片" in image_panel
     assert "进入预检" in image_panel
     assert "执行发布预检" not in image_panel
+    assert "imageProgress={imageProgress}" in stage_call
+    assert "imageProgress," in stage_source
+    assert "imageProgress: XhsImageProgress;" in stage_source
+    assert "progress={imageProgress}" in stage_source
     assert "XhsPreviewDialog" in source
     assert "xhs-preview-modal" in source
     assert "xhs-phone-preview" in source[source.index("function XhsPreviewDialog") :]
@@ -223,6 +244,54 @@ def test_xhs_preview_control_is_visible_in_image_generation_panel():
     assert "预览" in image_panel
     assert ".xhs-preview-inline" in styles
     assert ".create-summary-bar.xhs-summary-bar" not in styles
+
+
+def test_xhs_image_stage_normalizes_optional_array_fields():
+    source = read_source("workspaces/XhsWorkspace.tsx")
+    image_panel = source[source.index("function ImageGenerationPanel") : source.index("function XhsPreviewDialog")]
+    preview_dialog = source[source.index("function XhsPreviewDialog") : source.index("function SlidePlan")]
+    slide_plan = source[source.index("function SlidePlan") : source.index("function PublishTools")]
+    retry_tasks = source[source.index("function xhsImageRetryTasks") : source.index("function xhsImageTaskTotal")]
+
+    assert "const contentPrompts = stringList(project.content_image_prompts);" in image_panel
+    assert "const errors = imageErrorItems(project);" in image_panel
+    assert "const slides = slidePlanItems(project);" in preview_dialog
+    assert "const slides = slidePlanItems(project);" in slide_plan
+    assert "stringList(project?.content_image_prompts)" in retry_tasks
+    assert "for (const error of imageErrorItems(project))" in retry_tasks
+    assert "function stringList(value: unknown): string[]" in source
+    assert "function slidePlanItems(project: XhsProject | undefined)" in source
+    assert "function imageErrorItems(project: XhsProject | undefined)" in source
+
+
+def test_xhs_project_detail_normalizes_legacy_project_fields():
+    source = read_source("workspaces/XhsWorkspace.tsx")
+    stage_source = source[source.index("function XhsStage") : source.index("function ImageTextConfigPanel")]
+    publish_tools = source[source.index("function PublishTools") : source.index("function xhsStageForStep")]
+    helpers = source[source.index("function recordValue") : source.index("function text")]
+
+    assert "libraryFileItems(project)" in stage_source
+    assert "topicItems(project)" in stage_source
+    assert "tagItems(project)" in stage_source
+    assert "preflightValue(project)" in publish_tools
+    assert "preflightCheckItems(project)" in publish_tools
+    assert "preflightBlockingItems(project, checks)" in publish_tools
+    assert "preflightImagePaths(project)" in publish_tools
+    assert "preflightTags(project)" in publish_tools
+    assert "function recordValue(value: unknown)" in helpers
+    assert "function recordList(value: unknown)" in helpers
+    assert "function libraryFileItems(project: XhsProject | undefined)" in helpers
+    assert "function topicItems(project: XhsProject | undefined)" in helpers
+    assert "function imageItems(project: XhsProject | undefined)" in source
+
+
+def test_xhs_visible_image_action_uses_saved_prompts_without_rationale():
+    source = read_source("workspaces/XhsWorkspace.tsx")
+    visible_action = source[source.index("function nextActionForVisibleXhsStep") : source.index("function imageGenerationHint")]
+
+    assert "hasImagePrompts(project)" in visible_action
+    assert '!project?.image_suggestion_rationale && !hasImagePrompts(project)' in visible_action
+    assert "function hasImagePrompts(project: XhsProject | undefined): boolean" in source
 
 
 def test_xhs_preview_modal_shows_full_carousel_image():
@@ -260,8 +329,10 @@ def test_xhs_stepper_can_review_completed_stages():
 def test_xhs_generated_images_make_preflight_stage_reachable():
     source = read_source("workspaces/XhsWorkspace.tsx")
     stage_function = source[source.index("function xhsStageForStep") : source.index("function xhsStepForStage")]
+    visible_action = source[source.index("function nextActionForVisibleXhsStep") : source.index("function imageGenerationHint")]
 
-    assert 'if (step === "images" && nextAction === "run_preflight" && imageItems(project).length) return "publish_check";' in stage_function
+    assert 'if (step === "images" && canRunXhsPreflight(project, nextAction)) return "publish_check";' in stage_function
+    assert "canRunXhsPreflight(project, backendNextAction)" in visible_action
     assert 'onEnterPreflight={() => setReviewStage("publish_check")}' in source
     assert "maxSelectableIndex={actualStageIndex}" in source
 

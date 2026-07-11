@@ -91,6 +91,7 @@ function WorkbenchApp({
     writerState,
     selectedWriterProjectId,
     isWriting,
+    writerRunningTask,
     createWriterProject,
     selectWriterProject,
     importWriterKnowledge,
@@ -577,6 +578,7 @@ function WorkbenchApp({
             selectedProjectId={selectedWriterProjectId}
             selectedKnowledgeFiles={selectedRailKnowledge}
             isRunning={isWriting}
+            runningTask={writerRunningTask}
             onCreateProject={createWriterProject}
             onSelectProject={selectWriterProject}
             onImportKnowledge={importWriterKnowledge}

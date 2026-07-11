@@ -85,8 +85,8 @@ type Props = {
   onReviseDraft: (instruction: string, content?: string) => void;
   onSuggestImages: (content?: string) => void;
   onConfirmImageSuggestions: () => void;
-  onGenerateImages: (coverPrompt?: string, contentImagePrompts?: string[]) => void;
-  onRetryImageItems: (tasks: XhsImageRetryTask[]) => void;
+  onGenerateImages: (coverPrompt?: string, contentImagePrompts?: string[], onProgress?: (done: number, total: number) => void) => void;
+  onRetryImageItems: (tasks: XhsImageRetryTask[], onProgress?: (done: number, total: number) => void) => void;
   onEnterPreflight?: () => void;
   onRefreshLogin: () => void;
   onPreflight: () => void;
@@ -97,6 +97,7 @@ type Props = {
 };
 
 type XhsAccountProfileInput = Omit<XhsAccountProfile, "id" | "created_at" | "updated_at">;
+type XhsImageProgress = { done: number; total: number } | null;
 
 function formatElapsedTime(totalSeconds: number) {
   const seconds = Math.max(0, Math.floor(totalSeconds));
@@ -185,6 +186,7 @@ export function XhsWorkspace({
   const [profileDialogMode, setProfileDialogMode] = useState<"create" | "edit" | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [reviewStage, setReviewStage] = useState<XhsWorkflowStage | null>(null);
+  const [imageProgress, setImageProgress] = useState<XhsImageProgress>(null);
   const [editingProfile, setEditingProfile] = useState<XhsAccountProfile | undefined>();
   const projectNameInputRef = useRef<HTMLInputElement>(null);
   const selectedFiles = useMemo(() => toWriterLibraryFiles(selectedKnowledgeFiles), [selectedKnowledgeFiles]);
@@ -209,14 +211,10 @@ export function XhsWorkspace({
       ? "请先选择或新建账号定位"
       : "Select or create an account profile first."
     : "";
-  const visibleCreateReason = createDisabledReason || (!projectName.trim() && projectNameTouched ? projectNameMissingReason : "");
+  const visibleCreateReason = createDisabledReason;
   const submitCreateProject = () => {
-    const name = projectNameInputRef.current?.value.trim() || projectName.trim();
-    if (!name) {
-      setProjectNameTouched(true);
-      projectNameInputRef.current?.focus();
-      return;
-    }
+    const fallbackName = selectedFiles[0]?.title || selectedFiles[0]?.markdown_path || (language === "zh" ? "未命名小红书图文" : "Untitled XHS post");
+    const name = projectNameInputRef.current?.value.trim() || projectName.trim() || fallbackName;
     if (createDisabledReason) return;
     onCreateProject(name, selectedAccountProfileId, selectedFiles);
     setProjectName("");
@@ -226,10 +224,15 @@ export function XhsWorkspace({
   useEffect(() => {
     if (project?.id) setCreateMode(false);
     setPendingTopic(null);
-    setImageTextConfig(project?.image_text_config && Object.keys(project.image_text_config).length ? project.image_text_config : defaultImageTextConfig(project?.topic ?? null));
+    const savedConfig = recordValue(project?.image_text_config);
+    setImageTextConfig(Object.keys(savedConfig).length ? savedConfig : defaultImageTextConfig(recordValue(project?.topic)));
     setRevision("");
     setReviewStage(null);
   }, [project?.id, project?.topic, project?.image_text_config]);
+
+  useEffect(() => {
+    setImageProgress(null);
+  }, [project?.id]);
 
   useEffect(() => {
     if (reviewStage && (stageIndex[reviewStage] ?? 0) > actualStageIndex) setReviewStage(null);
@@ -427,6 +430,7 @@ export function XhsWorkspace({
                 carouselStrategies={carouselStrategies}
                 revision={revision}
                 loginStatus={loginStatus}
+                imageProgress={imageProgress}
               isCloudMember={isCloudMember}
               isRunning={isRunning}
               runningTask={runningTask}
@@ -474,11 +478,16 @@ export function XhsWorkspace({
                 }}
                 onGenerateImages={() => {
                   clearReviewStage();
-                  onGenerateImages(project.cover_prompt, project.content_image_prompts ?? []);
+                  const contentPrompts = stringList(project.content_image_prompts);
+                  const total = xhsImageTaskTotal(project.cover_prompt, contentPrompts);
+                  setImageProgress({ done: 0, total });
+                  onGenerateImages(project.cover_prompt, contentPrompts, (done, total) => setImageProgress({ done, total }));
                 }}
                 onRetryImageItems={(tasks) => {
                   clearReviewStage();
-                  onRetryImageItems(tasks);
+                  if (!tasks.length) return;
+                  setImageProgress({ done: 0, total: tasks.length });
+                  onRetryImageItems(tasks, (done, total) => setImageProgress({ done, total }));
                 }}
                 onEnterPreflight={() => setReviewStage("publish_check")}
                 onPreview={() => setPreviewOpen(true)}
@@ -533,7 +542,7 @@ function AccountProfileSummary({ profile, language }: { profile: XhsAccountProfi
     <article className="xhs-profile-summary">
       <strong>{profile.positioning}</strong>
       <span>{language === "zh" ? "目标人群" : "Audience"}：{profile.target_audience}</span>
-      <span>{language === "zh" ? "内容支柱" : "Pillars"}：{(profile.content_pillars ?? []).join(" / ")}</span>
+      <span>{language === "zh" ? "内容支柱" : "Pillars"}：{stringList(profile.content_pillars).join(" / ")}</span>
       {profile.tone ? <span>{language === "zh" ? "语气人设" : "Tone"}：{profile.tone}</span> : null}
     </article>
   );
@@ -653,16 +662,16 @@ function profileToDraft(profile?: XhsAccountProfile): AccountProfileDraft {
     account_name: profile?.account_name ?? "",
     positioning: profile?.positioning ?? "",
     target_audience: profile?.target_audience ?? "",
-    audience_pain_points: (profile?.audience_pain_points ?? []).join("\n"),
-    content_pillars: (profile?.content_pillars ?? []).join("\n"),
+    audience_pain_points: stringList(profile?.audience_pain_points).join("\n"),
+    content_pillars: stringList(profile?.content_pillars).join("\n"),
     tone: profile?.tone ?? "",
     value_promise: profile?.value_promise ?? "",
-    content_formats: (profile?.content_formats ?? []).join("\n"),
-    broad_tags: (profile?.tag_strategy?.broad_tags ?? []).join("\n"),
-    niche_tags: (profile?.tag_strategy?.niche_tags ?? []).join("\n"),
-    trend_tags: (profile?.tag_strategy?.trend_tags ?? []).join("\n"),
-    branded_tags: (profile?.tag_strategy?.branded_tags ?? []).join("\n"),
-    avoid_topics: (profile?.avoid_topics ?? []).join("\n"),
+    content_formats: stringList(profile?.content_formats).join("\n"),
+    broad_tags: stringList(profile?.tag_strategy?.broad_tags).join("\n"),
+    niche_tags: stringList(profile?.tag_strategy?.niche_tags).join("\n"),
+    trend_tags: stringList(profile?.tag_strategy?.trend_tags).join("\n"),
+    branded_tags: stringList(profile?.tag_strategy?.branded_tags).join("\n"),
+    avoid_topics: stringList(profile?.avoid_topics).join("\n"),
     notes: profile?.notes ?? "",
   };
 }
@@ -700,6 +709,7 @@ function XhsStage({
   carouselStrategies,
   revision,
   loginStatus,
+  imageProgress,
   isCloudMember,
   isRunning,
   runningTask,
@@ -738,6 +748,7 @@ function XhsStage({
   carouselStrategies: XhsCarouselStrategy[];
   revision: string;
   loginStatus?: XhsLoginStatus;
+  imageProgress: XhsImageProgress;
   isCloudMember?: boolean;
   isRunning: boolean;
   runningTask?: XhsRunningTask;
@@ -777,14 +788,15 @@ function XhsStage({
             <RunningButtonLabel taskId="import_knowledge" runningTask={runningTask}>{language === "zh" ? `导入 ${selectedFiles.length} 个文件` : `Import ${selectedFiles.length} files`}</RunningButtonLabel>
           </button>
         </div>
-        <SourceList files={project.library_files ?? []} language={language} />
+        <SourceList files={libraryFileItems(project)} language={language} />
       </div>
     );
   }
 
   if (step === "knowledge_confirmed" || step === "topics") {
-    const topics = project.topics ?? [];
-    const sourceCount = project.library_files?.length ?? 0;
+    const topics = topicItems(project);
+    const libraryFiles = libraryFileItems(project);
+    const sourceCount = libraryFiles.length;
     return (
       <div className="xhs-topic-grid">
         <div className="xhs-topic-context">
@@ -796,7 +808,7 @@ function XhsStage({
           <div>
             <span>{language === "zh" ? "项目素材" : "Project sources"}</span>
             <strong>{language === "zh" ? `${sourceCount} 个文件` : `${sourceCount} files`}</strong>
-            <p>{(project.library_files ?? []).slice(0, 3).map((file) => file.title || file.markdown_path).join(" / ")}</p>
+            <p>{libraryFiles.slice(0, 3).map((file) => file.title || file.markdown_path).join(" / ")}</p>
           </div>
           <button className="primary-cta" type="button" disabled={isRunning || sourceCount === 0} onClick={onGenerateTopics}>
             <Sparkles size={16} />
@@ -880,7 +892,7 @@ function XhsStage({
           </div>
         )}
         <div className="xhs-tag-row">
-          {(project.tags ?? []).map((tag) => (
+          {tagItems(project).map((tag) => (
             <span key={tag}>#{tag}</span>
           ))}
         </div>
@@ -921,6 +933,7 @@ function XhsStage({
           language={language}
           project={project}
           nextAction={nextAction}
+          progress={imageProgress}
           isRunning={isRunning}
           runningTask={runningTask}
           onSuggestImages={onSuggestImages}
@@ -946,6 +959,7 @@ function XhsStage({
       <PublishTools
         language={language}
         step={step}
+        nextAction={nextAction}
         project={project}
         loginStatus={loginStatus}
         isCloudMember={Boolean(isCloudMember)}
@@ -1183,6 +1197,7 @@ function ImageGenerationPanel({
   language,
   project,
   nextAction,
+  progress,
   isRunning,
   runningTask,
   onSuggestImages,
@@ -1195,6 +1210,7 @@ function ImageGenerationPanel({
   language: "zh" | "en";
   project: XhsProject;
   nextAction: string;
+  progress: XhsImageProgress;
   isRunning: boolean;
   runningTask?: XhsRunningTask;
   onSuggestImages: () => void;
@@ -1204,9 +1220,10 @@ function ImageGenerationPanel({
   onEnterPreflight?: () => void;
   onPreview: () => void;
 }) {
-  const prompts = [project.cover_prompt, ...(project.content_image_prompts ?? [])].filter(Boolean);
+  const contentPrompts = stringList(project.content_image_prompts);
+  const prompts = [project.cover_prompt, ...contentPrompts].filter(Boolean);
   const images = imageItems(project);
-  const errors = project.images?.errors ?? [];
+  const errors = imageErrorItems(project);
   const retryTasks = xhsImageRetryTasks(project);
   return (
     <div className="xhs-image-generation">
@@ -1252,7 +1269,7 @@ function ImageGenerationPanel({
           </button>
         ) : null}
         {nextAction === "run_preflight" ? (
-          <button className="primary-cta" type="button" disabled={isRunning || !images.length || !onEnterPreflight} onClick={onEnterPreflight}>
+          <button className="primary-cta" type="button" disabled={isRunning || !xhsImagesComplete(project) || !onEnterPreflight} onClick={onEnterPreflight}>
             <CheckCircle2 size={16} />
             <strong>{language === "zh" ? "进入预检" : "Go to preflight"}</strong>
           </button>
@@ -1265,6 +1282,12 @@ function ImageGenerationPanel({
           {language === "zh" ? "预览" : "Preview"}
         </button>
       </div>
+      {progress ? (
+        <div className="xhs-image-progress">
+          <span>{language === "zh" ? "生成进度" : "Generation progress"}</span>
+          <strong>{progress.done} / {progress.total}</strong>
+        </div>
+      ) : null}
       {project.image_suggestion_rationale ? (
         <article className="xhs-image-suggestion xhs-image-suggestion-main">
           <strong>{language === "zh" ? "配图建议" : "Image suggestion"}</strong>
@@ -1314,7 +1337,7 @@ function ImageGenerationPanel({
 function XhsPreviewDialog({ language, project, onClose }: { language: "zh" | "en"; project: XhsProject; onClose: () => void }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const images = imageItems(project);
-  const slides = project.slide_plan ?? [];
+  const slides = slidePlanItems(project);
   const activeSlide = slides[activeIndex] ?? slides[0];
   const activeImage = images[activeIndex] ?? images[0];
   const total = Math.max(images.length, slides.length, 1);
@@ -1384,7 +1407,7 @@ function XhsPreviewDialog({ language, project, onClose }: { language: "zh" | "en
 }
 
 function SlidePlan({ project, language }: { project: XhsProject; language: "zh" | "en" }) {
-  const slides = project.slide_plan ?? [];
+  const slides = slidePlanItems(project);
   return (
     <div className="xhs-slide-plan">
       <h3>{language === "zh" ? "轮播脚本" : "Carousel plan"}</h3>
@@ -1405,6 +1428,7 @@ function SlidePlan({ project, language }: { project: XhsProject; language: "zh" 
 function PublishTools({
   language,
   step,
+  nextAction,
   project,
   loginStatus,
   isCloudMember,
@@ -1419,6 +1443,7 @@ function PublishTools({
 }: {
   language: "zh" | "en";
   step: XhsStep;
+  nextAction: string;
   project: XhsProject;
   loginStatus?: XhsLoginStatus;
   isCloudMember: boolean;
@@ -1431,12 +1456,13 @@ function PublishTools({
   onConfirmPublish: () => void;
   onSavePublishDraft: () => void;
 }) {
-  const checks = project.preflight?.checks ?? [];
-  const preflight = project.preflight;
+  const preflight = preflightValue(project);
+  const checks = preflightCheckItems(project);
   const hasPreflight = Boolean(preflight && checks.length);
-  const blocking = preflight?.blocking ?? checks.filter((check) => !check.ok);
+  const blocking = preflightBlockingItems(project, checks);
   const canFillPublish = step === "publish_check" && Boolean(preflight?.ok) && !isCloudMember;
-  const imagePaths = preflight?.image_paths ?? imageItems(project).map((item) => item.path || "").filter(Boolean);
+  const imagePaths = preflightImagePaths(project);
+  const canRunPreflight = canRunXhsPreflight(project, nextAction);
   const exportPackage = project.export_package;
   const canExport = Boolean(imagePaths.length);
   if (isCloudMember) {
@@ -1460,7 +1486,7 @@ function PublishTools({
           <p>{preflight?.ok ? (language === "zh" ? "标题、正文和图片已通过导出检查，可以生成小红书图文压缩包。" : "Title, caption, and images passed export checks. You can create the ZIP package.") : (language === "zh" ? "导出前需要先确认标题、正文和图片文件都可用。" : "Before exporting, confirm the title, caption, and image files are ready.")}</p>
         </div>
         <div className="xhs-publish-actions">
-          <button className="secondary-button" type="button" disabled={isRunning || !imageItems(project).length} onClick={onPreflight}>
+          <button className="secondary-button" type="button" disabled={isRunning || !canRunPreflight} onClick={onPreflight}>
             <CheckCircle2 size={16} />
             <strong>
               <RunningButtonLabel taskId="run_preflight" runningTask={runningTask}>
@@ -1522,7 +1548,7 @@ function PublishTools({
           </div>
           <div>
             <span>{language === "zh" ? "标签" : "Tags"}</span>
-            <strong>{(preflight?.tags ?? project.tags ?? []).map((tag) => `#${tag}`).join(" ") || "-"}</strong>
+            <strong>{preflightTags(project).map((tag) => `#${tag}`).join(" ") || "-"}</strong>
           </div>
         </div>
         {hasPreflight ? (
@@ -1562,7 +1588,7 @@ function PublishTools({
           <LogIn size={16} />
           <RunningButtonLabel taskId="refresh_login" runningTask={runningTask}>{loginStatus?.logged_in ? (language === "zh" ? "已登录" : "Logged in") : language === "zh" ? "检查登录" : "Check login"}</RunningButtonLabel>
         </button>
-        <button className="secondary-button" type="button" disabled={isRunning || !imageItems(project).length} onClick={onPreflight}>
+        <button className="secondary-button" type="button" disabled={isRunning || !canRunPreflight} onClick={onPreflight}>
           <CheckCircle2 size={16} />
           <RunningButtonLabel taskId="run_preflight" runningTask={runningTask}>{hasPreflight ? (language === "zh" ? "重新预检" : "Run again") : language === "zh" ? "执行发布预检" : "Run preflight"}</RunningButtonLabel>
         </button>
@@ -1605,7 +1631,7 @@ function PublishTools({
         </div>
         <div>
           <span>{language === "zh" ? "标签" : "Tags"}</span>
-          <strong>{(preflight?.tags ?? project.tags ?? []).map((tag) => `#${tag}`).join(" ") || "-"}</strong>
+          <strong>{preflightTags(project).map((tag) => `#${tag}`).join(" ") || "-"}</strong>
         </div>
       </div>
       {hasPreflight ? (
@@ -1626,23 +1652,23 @@ function xhsStageForStep(step: XhsStep, nextAction: string, project: XhsProject 
   if (step === "published") return "published";
   if (step === "publish_ready") return "publish_ready";
   if (step === "publish_check") return "publish_check";
-  if (step === "images" && nextAction === "run_preflight" && imageItems(project).length) return "publish_check";
+  if (step === "images" && canRunXhsPreflight(project, nextAction)) return "publish_check";
   if (step === "images") return "images";
   if (step === "draft") return "draft";
   if (step === "topic" || step === "topic_configured") return "draft";
   if (step === "knowledge_confirmed" || step === "topics") return "topics";
-  if (project?.topics?.length) return "topics";
+  if (topicItems(project).length) return "topics";
   if (nextAction === "generate_topics") return "topics";
   return "created";
 }
 
 function xhsStepForStage(stage: XhsWorkflowStage, actualStep: XhsStep, project: XhsProject | undefined): XhsStep {
   if (stage === "created") return "created";
-  if (stage === "topics") return project?.topics?.length ? "topics" : "knowledge_confirmed";
+  if (stage === "topics") return topicItems(project).length ? "topics" : "knowledge_confirmed";
   if (stage === "draft") {
     if (project?.content) return "draft";
-    if (project?.image_text_config && Object.keys(project.image_text_config).length) return "topic_configured";
-    return project?.topic ? "topic" : "topics";
+    if (Object.keys(recordValue(project?.image_text_config)).length) return "topic_configured";
+    return Object.keys(recordValue(project?.topic)).length ? "topic" : "topics";
   }
   if (stage === "images") return "images";
   if (stage === "publish_check") return "publish_check";
@@ -1665,14 +1691,19 @@ function nextActionForVisibleXhsStep(
   if (visibleStep === "topic_configured") return "generate_draft";
   if (visibleStep === "draft") return "confirm_draft";
   if (visibleStep === "images") {
-    if (imageItems(project).length) return "run_preflight";
-    if (!project?.image_suggestion_rationale) return "suggest_images";
+    if (canRunXhsPreflight(project, backendNextAction)) return "run_preflight";
+    if (!project?.image_suggestion_rationale && !hasImagePrompts(project)) return "suggest_images";
     if (!project?.image_suggestions_confirmed) return "confirm_image_suggestions";
     return "generate_images";
   }
   if (visibleStep === "publish_check") return project?.preflight?.ok ? "fill_publish" : "run_preflight";
   if (visibleStep === "publish_ready") return "confirm_publish";
   return backendNextAction;
+}
+
+function canRunXhsPreflight(project: XhsProject | undefined, nextAction?: string): boolean {
+  if (nextAction === "run_preflight" && xhsImagesComplete(project)) return true;
+  return xhsImagesComplete(project);
 }
 
 function imageGenerationHint(language: "zh" | "en", nextAction: string, project: XhsProject) {
@@ -1688,10 +1719,33 @@ function imageGenerationHint(language: "zh" | "en", nextAction: string, project:
   if (nextAction === "generate_images") {
     return language === "zh" ? "配图建议已确认，可以开始生成封面和轮播图。" : "Suggestions are confirmed. Image generation is ready.";
   }
-  if (imageItems(project).length) {
+  if (xhsImagesComplete(project)) {
     return language === "zh" ? "图片已生成，进入发布预检工作区后再执行检查。" : "Images are ready. Open the preflight workspace to run checks.";
   }
   return language === "zh" ? "请按顺序完成配图建议和图片生成。" : "Complete suggestions and generation in order.";
+}
+
+function hasImagePrompts(project: XhsProject | undefined): boolean {
+  return Boolean(text(project?.cover_prompt) || stringList(project?.content_image_prompts).length);
+}
+
+function xhsImagesComplete(project: XhsProject | undefined): boolean {
+  if (!project?.image_suggestions_confirmed) return false;
+  const coverPrompt = text(project.cover_prompt);
+  const contentPrompts = stringList(project.content_image_prompts);
+  if (!coverPrompt) return false;
+  const images = recordValue(project.images);
+  if (imageErrorItems(project).length) return false;
+  const cover = recordValue(images.cover);
+  if (!text(cover.path)) return false;
+  const contentImages = recordList(images.content_images);
+  const existingIndexes = new Set(
+    contentImages
+      .filter((item) => text(item.path))
+      .map((item) => Number(item.index || 0))
+      .filter(Boolean),
+  );
+  return contentPrompts.every((_, index) => existingIndexes.has(index + 1));
 }
 
 function toWriterLibraryFiles(items: KnowledgeItem[]): WriterLibraryFileInput[] {
@@ -1712,24 +1766,28 @@ function toWriterLibraryFiles(items: KnowledgeItem[]): WriterLibraryFileInput[] 
   return files;
 }
 
-function imageItems(project: XhsProject): Array<{ path?: string; prompt?: string }> {
-  const images = project.images;
-  if (!images) return [];
-  const cover = images.cover ? [images.cover] : [];
-  return [...cover, ...(images.content_images ?? []), ...(images.items ?? [])].filter((item, index, all) => {
-    const path = item.path || "";
+function imageItems(project: XhsProject | undefined): Array<{ path?: string; prompt?: string }> {
+  const images = project?.images;
+  if (!images || typeof images !== "object" || Array.isArray(images)) return [];
+  const cover = recordValue(images.cover);
+  const coverItems = Object.keys(cover).length ? [cover] : [];
+  const contentImages = recordList(images.content_images);
+  const extraItems = recordList(images.items);
+  return [...coverItems, ...contentImages, ...extraItems].filter((item, index, all) => {
+    const path = text(item.path);
     return path && all.findIndex((candidate) => candidate.path === path) === index;
   });
 }
 
-function xhsImageRetryTasks(project: XhsProject): XhsImageRetryTask[] {
+function xhsImageRetryTasks(project: XhsProject | undefined): XhsImageRetryTask[] {
   const tasks: XhsImageRetryTask[] = [];
-  const images = project.images;
-  const coverPrompt = text(project.cover_prompt);
-  const contentPrompts = (project.content_image_prompts ?? []).map((prompt) => text(prompt));
-  const hasCover = Boolean(images?.cover?.path);
+  const images = recordValue(project?.images);
+  const cover = recordValue(images.cover);
+  const coverPrompt = text(project?.cover_prompt);
+  const contentPrompts = stringList(project?.content_image_prompts).map((prompt) => text(prompt));
+  const hasCover = Boolean(cover.path);
   const existingContent = new Set(
-    (images?.content_images ?? [])
+    recordList(images.content_images)
       .filter((item) => item.path)
       .map((item) => Number(item.index || 0))
       .filter(Boolean),
@@ -1739,7 +1797,7 @@ function xhsImageRetryTasks(project: XhsProject): XhsImageRetryTask[] {
     if (!task.prompt.trim() || tasks.some((item) => `${item.kind}:${item.index ?? 0}` === key)) return;
     tasks.push({ ...task, aspectRatio: task.aspectRatio || "3:4" });
   };
-  for (const error of images?.errors ?? []) {
+  for (const error of imageErrorItems(project)) {
     const kind = error.kind === "cover" ? "cover" : error.kind === "content" ? "content" : "";
     if (kind === "cover" && coverPrompt && !hasCover) pushTask({ kind, prompt: coverPrompt });
     if (kind === "content") {
@@ -1748,7 +1806,7 @@ function xhsImageRetryTasks(project: XhsProject): XhsImageRetryTask[] {
       if (index > 0 && prompt && !existingContent.has(index)) pushTask({ kind, prompt, index });
     }
   }
-  if (images?.partial || images?.ok === false) {
+  if (images.partial || images.ok === false) {
     if (coverPrompt && !hasCover) pushTask({ kind: "cover", prompt: coverPrompt });
     contentPrompts.forEach((prompt, index) => {
       const contentIndex = index + 1;
@@ -1756,6 +1814,73 @@ function xhsImageRetryTasks(project: XhsProject): XhsImageRetryTask[] {
     });
   }
   return tasks;
+}
+
+function xhsImageTaskTotal(coverPrompt?: string, contentImagePrompts: string[] = []) {
+  const coverCount = coverPrompt?.trim() ? 1 : 0;
+  const contentCount = contentImagePrompts.filter((prompt) => prompt.trim()).length;
+  return Math.max(1, coverCount + contentCount);
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function recordList(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === "string") return lines(value);
+  return [];
+}
+
+function libraryFileItems(project: XhsProject | undefined): NonNullable<XhsProject["library_files"]> {
+  return recordList(project?.library_files) as NonNullable<XhsProject["library_files"]>;
+}
+
+function topicItems(project: XhsProject | undefined): Array<Record<string, unknown>> {
+  return recordList(project?.topics);
+}
+
+function tagItems(project: XhsProject | undefined): string[] {
+  return stringList(project?.tags);
+}
+
+function slidePlanItems(project: XhsProject | undefined): NonNullable<XhsProject["slide_plan"]> {
+  return recordList(project?.slide_plan) as NonNullable<XhsProject["slide_plan"]>;
+}
+
+function imageErrorItems(project: XhsProject | undefined): NonNullable<NonNullable<XhsProject["images"]>["errors"]> {
+  return recordList(recordValue(project?.images).errors) as NonNullable<NonNullable<XhsProject["images"]>["errors"]>;
+}
+
+function preflightValue(project: XhsProject | undefined): XhsProject["preflight"] | undefined {
+  const preflight = project?.preflight;
+  return preflight && typeof preflight === "object" && !Array.isArray(preflight) ? preflight : undefined;
+}
+
+function preflightCheckItems(project: XhsProject): NonNullable<NonNullable<XhsProject["preflight"]>["checks"]> {
+  return recordList(preflightValue(project)?.checks) as NonNullable<NonNullable<XhsProject["preflight"]>["checks"]>;
+}
+
+function preflightBlockingItems(
+  project: XhsProject,
+  checks: NonNullable<NonNullable<XhsProject["preflight"]>["checks"]>,
+): NonNullable<NonNullable<XhsProject["preflight"]>["checks"]> {
+  const blocking = preflightValue(project)?.blocking;
+  return Array.isArray(blocking) ? (recordList(blocking) as NonNullable<NonNullable<XhsProject["preflight"]>["checks"]>) : checks.filter((check) => !check.ok);
+}
+
+function preflightImagePaths(project: XhsProject): string[] {
+  const paths = preflightValue(project)?.image_paths;
+  return stringList(paths).length ? stringList(paths) : imageItems(project).map((item) => item.path || "").filter(Boolean);
+}
+
+function preflightTags(project: XhsProject): string[] {
+  const tags = preflightValue(project)?.tags;
+  return stringList(tags).length ? stringList(tags) : tagItems(project);
 }
 
 function text(...values: unknown[]) {

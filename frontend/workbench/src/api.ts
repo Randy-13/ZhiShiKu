@@ -458,6 +458,7 @@ export type ApiSettingsPayload = {
   active_id?: string | null;
   items?: ApiSettingItem[];
   templates?: ApiSettingTemplate[];
+  model_suggestions?: Record<string, string[]>;
   item?: ApiSettingItem;
 };
 
@@ -499,6 +500,8 @@ export type ImageApiSettingInput = Omit<ApiSettingInput, "max_retries"> & {
 export type ApiTestResult = Record<string, string | boolean | number | null | undefined>;
 
 export type AsrSettingItem = {
+  id: string;
+  name: string;
   provider: string;
   base_url: string;
   model: string;
@@ -522,6 +525,8 @@ export type AsrSettingTemplate = {
 
 export type AsrSettingsPayload = {
   ok?: boolean;
+  active_id?: string | null;
+  items?: AsrSettingItem[];
   item?: AsrSettingItem;
   templates?: AsrSettingTemplate[];
   message?: string;
@@ -529,11 +534,14 @@ export type AsrSettingsPayload = {
 };
 
 export type AsrSettingInput = {
+  id?: string | null;
+  name: string;
   provider: string;
   base_url: string;
   model: string;
   api_key?: string;
   timeout?: number;
+  make_active?: boolean;
 };
 
 type PerspectivePayload = Record<string, unknown> & {

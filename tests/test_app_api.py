@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import subprocess
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -92,6 +93,32 @@ def xhs_profile_payload(name="知识酷产业观察"):
 
 def create_xhs_profile(name="知识酷产业观察"):
     return xhs_tools.create_account_profile(xhs_profile_payload(name))
+
+
+def xhs_slide(index: int, title: str = "slide") -> xhs_tools.XhsSlide:
+    return xhs_tools.XhsSlide(index=index, role="cover" if index == 1 else "content", title=f"{title} {index}", body=f"body {index}", visual_prompt=f"visual {index}")
+
+
+def save_xhs_ready_draft(project_id: str, slide_count: int = 2) -> None:
+    xhs_tools.update_project(project_id, image_text_config={"mode": "listicle", "slide_count": slide_count})
+    xhs_tools.save_draft_artifacts(
+        project_id,
+        xhs_tools.XhsDraftResult(
+            title="Test title",
+            content="Body",
+            tags=["tag"],
+            slide_plan=[xhs_slide(index) for index in range(1, slide_count + 1)],
+        ),
+    )
+
+
+def set_xhs_image_suggestions(project_id: str, content_count: int = 1) -> None:
+    xhs_tools.update_project(
+        project_id,
+        cover_prompt="cover prompt",
+        content_image_prompts=[f"content prompt {index}" for index in range(1, content_count + 1)],
+        image_suggestion_rationale="image rationale",
+    )
 
 
 def test_public_beta_info_pages_and_favicon_are_available():
@@ -408,6 +435,28 @@ def test_structured_json_generation_repairs_invalid_first_response(monkeypatch):
     assert result.title == "修复后的视角解读"
     assert len(calls) == 2
     assert "上一条回复不是合法 JSON" in calls[1][-1]["content"]
+
+
+def test_curl_chat_completion_wraps_timeout(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=kwargs.get("args") or "curl.exe", timeout=12)
+
+    monkeypatch.setattr(deepseek_client.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        deepseek_client.curl_chat_completion(
+            [{"role": "user", "content": "Reply with ok."}],
+            setting={
+                "provider": "zhipu",
+                "api_key": "test-key",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "model": "glm-5v-turbo",
+                "timeout": 12,
+            },
+        )
+
+    assert "glm-5v-turbo" in str(exc_info.value)
+    assert "12" in str(exc_info.value)
 
 
 def test_mine_interpret_returns_ok_false_when_model_json_fails(tmp_path, monkeypatch):
@@ -1482,6 +1531,27 @@ def test_media_resolve_url_examples(tmp_path, monkeypatch):
     assert "7645662793240815025" in douyin.json()["item"]["canonical_url"]
 
 
+def test_cloud_media_resolve_url_records_owner_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    monkeypatch.setattr(media_parser, "ytdlp_dump_json", lambda url: None)
+    monkeypatch.setattr(
+        media_parser,
+        "follow_redirect",
+        lambda url: "https://www.iesdouyin.com/share/video/7645662793240815025/?from=web_code_link",
+    )
+    client, payload = _register_app_cloud_member("MEDIA-URL-OWNER", "media-url@example.test", "media_url")
+
+    response = client.post("/api/media/resolve-url", json={"url": "https://v.douyin.com/zXGKv6QWCM4/"})
+
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert item["platform"] == "douyin"
+    assert item["owner_user_id"] == payload["user"]["id"]
+    assert item["workspace_id"] == payload["workspace"]["id"]
+
+
 def test_bilibili_cookie_settings_endpoints(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     cookie_file = tmp_path / "auth" / "bilibili.cookies.txt"
@@ -1898,6 +1968,21 @@ def test_api_settings_save_and_activate(tmp_path, monkeypatch):
     assert updated_body["item"]["name"] == "Relay Updated"
     assert updated_body["item"]["model"] == "relay-model-2"
     assert len(updated_body["items"]) == 1
+
+
+def test_api_settings_exposes_zhipu_model_suggestions(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_settings, "SETTINGS_PATH", tmp_path / "api_settings.json")
+    monkeypatch.setattr(api_settings, "_env_setting", lambda: None)
+    client = TestClient(app.app)
+
+    response = client.get("/api/v2/settings/api")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    template_models = {item["model"] for item in payload["templates"] if item["provider"] == "zhipu"}
+    assert "glm-5.2" in template_models
+    assert "glm-5v-turbo" in template_models
+    assert "glm-5v-turbo" in payload["model_suggestions"]["zhipu"]
 
 
 def test_api_settings_test_uses_form_payload_for_existing_setting(tmp_path, monkeypatch):
@@ -3860,6 +3945,27 @@ def test_publish_preflight_accepts_unseparated_content_image_alias(tmp_path, mon
     assert result["publish_inspection"]["local_image_paths"] == [str(image_path.resolve())]
 
 
+def test_publish_preflight_accepts_legacy_image_placeholder_alias(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("legacy-image-placeholder-alias")
+    image_path = workspace / "content-1.png"
+    image_path.write_bytes(PNG_1X1)
+    (workspace / "formatted.html").write_text(
+        '<html><body><p>body</p><img src="image1.png" /></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "article.md").write_text("# Title\n\nbody", encoding="utf-8")
+    (workspace / "cover.png").write_bytes(PNG_1X1)
+    monkeypatch.setattr(writer_tools, "wechat_config_file", lambda: tmp_path / "missing-wechat.json")
+
+    result = writer_tools.publish_preflight(workspace, "Title", digest="Digest")
+    check_map = {item["key"]: item for item in result["checks"]}
+
+    assert check_map["missing_images"]["ok"] is True
+    assert result["publish_inspection"]["missing_images"] == []
+    assert result["publish_inspection"]["local_image_paths"] == [str(image_path.resolve())]
+
+
 def test_ensure_content_images_removes_underscore_placeholders(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     workspace = writer_tools.dated_workspace("strip-content-image-alias")
@@ -3873,11 +3979,13 @@ def test_ensure_content_images_removes_underscore_placeholders(tmp_path, monkeyp
         "# Title\n\nbody paragraph.\n\n"
         "![stale placeholder](content_1.png)\n\n"
         "![stale compact placeholder](content1.png)\n"
+        "![legacy placeholder](image1.png)\n"
     )
     result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
 
     assert "content_1.png" not in result
     assert "content1.png" not in result
+    assert "image1.png" not in result
     assert result.count("content-1.png") == 1
 
 
@@ -3894,6 +4002,31 @@ def test_ensure_content_images_removes_cover_from_article_markdown(tmp_path, mon
     result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
 
     assert "cover.png" not in result
+    assert result.count("content-1.png") == 1
+
+
+def test_ensure_content_images_removes_unresolved_local_placeholders(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    workspace = writer_tools.dated_workspace("strip-unresolved-placeholders")
+    (workspace / "content-1.png").write_bytes(PNG_1X1)
+    (workspace / "kept-chart.png").write_bytes(PNG_1X1)
+    (workspace / "image_metadata.json").write_text(
+        json.dumps({"content_images": [{"filename": "content-1.png", "prompt": "body", "index": 1}]}),
+        encoding="utf-8",
+    )
+
+    markdown = (
+        "# Title\n\n"
+        "body paragraph.\n\n"
+        "![stale multiplier](multiplier.png)\n\n"
+        "![stale matrix](scenario_matrix.png)\n\n"
+        "![kept chart](kept-chart.png)\n"
+    )
+    result = writer_tools.ensure_content_images_in_markdown(workspace, markdown)
+
+    assert "multiplier.png" not in result
+    assert "scenario_matrix.png" not in result
+    assert "kept-chart.png" in result
     assert result.count("content-1.png") == 1
 
 
@@ -4006,15 +4139,9 @@ def test_xhs_preflight_blocks_project_without_images(tmp_path, monkeypatch):
 
     profile = create_xhs_profile()
     project = xhs_tools.create_project("小红书测试", account_profile_id=profile["id"])
-    draft = xhs_tools.XhsDraftResult(
-        title="测试标题",
-        content="正文内容",
-        tags=["知识酷"],
-        cover_prompt="封面提示词",
-        content_image_prompts=["正文图提示词"],
-    )
-    xhs_tools.save_draft_artifacts(project["id"], draft)
+    save_xhs_ready_draft(project["id"], slide_count=2)
     xhs_tools.confirm_draft(project["id"])
+    set_xhs_image_suggestions(project["id"], content_count=1)
     xhs_tools.confirm_image_suggestions(project["id"])
 
     result = xhs_tools.publish_preflight(project["id"])
@@ -4030,15 +4157,9 @@ def test_xhs_generate_images_falls_back_to_saved_prompts_and_persists_failures(t
     setup_storage(tmp_path, monkeypatch)
     profile = create_xhs_profile()
     project = xhs_tools.create_project("xhs image failure test", account_profile_id=profile["id"])
-    draft = xhs_tools.XhsDraftResult(
-        title="Test title",
-        content="Body",
-        tags=["tag"],
-        cover_prompt="cover prompt",
-        content_image_prompts=["content prompt"],
-    )
-    xhs_tools.save_draft_artifacts(project["id"], draft)
+    save_xhs_ready_draft(project["id"], slide_count=2)
     xhs_tools.confirm_draft(project["id"])
+    set_xhs_image_suggestions(project["id"], content_count=1)
     xhs_tools.confirm_image_suggestions(project["id"])
 
     def fake_generate_image(prompt, output_path, setting=None):
@@ -4074,20 +4195,15 @@ def test_xhs_draft_and_image_suggestion_confirmations_gate_generation(tmp_path, 
     setup_storage(tmp_path, monkeypatch)
     profile = create_xhs_profile()
     project = xhs_tools.create_project("xhs staged image flow", account_profile_id=profile["id"])
-    draft = xhs_tools.XhsDraftResult(
-        title="Test title",
-        content="Body",
-        tags=["tag"],
-        cover_prompt="old cover prompt",
-        content_image_prompts=["old content prompt"],
-    )
-    xhs_tools.save_draft_artifacts(project["id"], draft)
+    save_xhs_ready_draft(project["id"], slide_count=2)
     client = TestClient(app.app)
 
     loaded = client.get(f"/api/xhs/projects/{project['id']}")
     assert loaded.status_code == 200
     assert loaded.json()["step"] == "draft"
     assert loaded.json()["next_action"] == "confirm_draft"
+    assert loaded.json()["project"]["cover_prompt"] == ""
+    assert loaded.json()["project"]["content_image_prompts"] == []
 
     blocked_suggestion = client.post(f"/api/xhs/projects/{project['id']}/image-suggestions", json={})
     assert blocked_suggestion.status_code == 400
@@ -4097,6 +4213,8 @@ def test_xhs_draft_and_image_suggestion_confirmations_gate_generation(tmp_path, 
     assert confirmed_draft.status_code == 200
     assert confirmed_draft.json()["step"] == "images"
     assert confirmed_draft.json()["next_action"] == "suggest_images"
+    assert confirmed_draft.json()["project"]["cover_prompt"] == ""
+    assert confirmed_draft.json()["project"]["content_image_prompts"] == []
 
     monkeypatch.setattr(
         deepseek_client,
@@ -4124,6 +4242,54 @@ def test_xhs_draft_and_image_suggestion_confirmations_gate_generation(tmp_path, 
     assert confirmed_suggestions.json()["project"]["image_suggestions_confirmed"] is True
 
 
+def test_xhs_rejects_incomplete_image_suggestions_and_partial_generation(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = create_xhs_profile()
+    project = xhs_tools.create_project("xhs complete image gate", account_profile_id=profile["id"])
+    save_xhs_ready_draft(project["id"], slide_count=4)
+    xhs_tools.confirm_draft(project["id"])
+
+    set_xhs_image_suggestions(project["id"], content_count=2)
+    with pytest.raises(ValueError):
+        xhs_tools.confirm_image_suggestions(project["id"])
+
+    set_xhs_image_suggestions(project["id"], content_count=3)
+    xhs_tools.confirm_image_suggestions(project["id"])
+    project_dir = xhs_tools.resolve_project_workspace(project["id"])
+    cover_path = project_dir / "cover.png"
+    cover_path.write_bytes(PNG_1X1)
+    xhs_tools._write_json(
+        project_dir / "image_metadata.json",
+        {"cover": {"path": storage.storage_relative(cover_path), "prompt": "cover prompt"}, "content_images": [], "items": [], "errors": []},
+    )
+
+    partial = xhs_tools.load_project(project["id"])
+    assert xhs_tools.project_step(partial) == "images"
+    assert xhs_tools.next_action(partial) == "generate_images"
+    assert xhs_tools.image_completion_status(partial)["ok"] is False
+
+    for index in range(1, 4):
+        image_path = project_dir / writer_tools.canonical_content_image_filename(index)
+        image_path.write_bytes(PNG_1X1)
+    xhs_tools._write_json(
+        project_dir / "image_metadata.json",
+        {
+            "cover": {"path": storage.storage_relative(cover_path), "prompt": "cover prompt"},
+            "content_images": [
+                {"path": storage.storage_relative(project_dir / writer_tools.canonical_content_image_filename(index)), "prompt": f"content prompt {index}", "index": index}
+                for index in range(1, 4)
+            ],
+            "items": [],
+            "errors": [],
+        },
+    )
+
+    complete = xhs_tools.load_project(project["id"])
+    assert xhs_tools.next_action(complete) == "run_preflight"
+    preflight = xhs_tools.publish_preflight(project["id"], check_login=False)
+    assert preflight["ok"] is True
+
+
 def test_xhs_fill_publish_uses_files_and_absolute_image_paths(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     monkeypatch.setattr(xhs_tools, "login_status", lambda: {"ok": True, "logged_in": True})
@@ -4138,7 +4304,10 @@ def test_xhs_fill_publish_uses_files_and_absolute_image_paths(tmp_path, monkeypa
         cover_prompt="封面提示词",
         content_image_prompts=[],
     )
-    xhs_tools.save_draft_artifacts(project["id"], draft)
+    save_xhs_ready_draft(project["id"], slide_count=1)
+    xhs_tools.confirm_draft(project["id"])
+    set_xhs_image_suggestions(project["id"], content_count=0)
+    xhs_tools.confirm_image_suggestions(project["id"])
     project_dir = xhs_tools.resolve_project_workspace(project["id"])
     image_path = project_dir / "cover.png"
     image_path.write_bytes(PNG_1X1)
@@ -4172,19 +4341,69 @@ def test_xhs_fill_publish_uses_files_and_absolute_image_paths(tmp_path, monkeypa
     assert (project_dir / "publish_result.json").exists()
 
 
+def test_xhs_auth_api_wraps_allowed_cli_commands(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run(args, timeout=180):
+        calls.append((args, timeout))
+        if args == ["check-login"]:
+            return {"ok": True, "logged_in": True, "nickname": "Creator"}
+        if args == ["get-qrcode"]:
+            return {
+                "ok": True,
+                "logged_in": False,
+                "qrcode_image_url": "file:///tmp/xhs-qr.png",
+                "qrcode_path": "C:/tmp/xhs-qr.png",
+                "qr_login_url": "https://www.xiaohongshu.com/login",
+            }
+        if args == ["wait-login", "--timeout", "120"]:
+            return {"ok": True, "logged_in": True}
+        if args == ["delete-cookies"]:
+            return {"success": True}
+        raise AssertionError(f"unexpected XHS CLI args: {args}")
+
+    monkeypatch.setattr(xhs_tools, "_run_xhs_cli", fake_run)
+    client = TestClient(app.app)
+
+    status = client.get("/api/xhs/auth/status")
+    assert status.status_code == 200
+    assert status.json()["logged_in"] is True
+    assert status.json()["message"]
+
+    qrcode = client.post("/api/xhs/auth/qrcode")
+    assert qrcode.status_code == 200
+    assert qrcode.json()["qrcode_image_url"] == "file:///tmp/xhs-qr.png"
+    assert qrcode.json()["qr_login_url"].startswith("https://")
+    assert qrcode.json()["message"]
+
+    wait_login = client.post("/api/xhs/auth/wait-login")
+    assert wait_login.status_code == 200
+    assert wait_login.json()["logged_in"] is True
+    assert wait_login.json()["message"]
+
+    logout = client.post("/api/xhs/auth/logout")
+    assert logout.status_code == 200
+    assert logout.json()["ok"] is True
+    assert logout.json()["message"]
+
+    assert calls == [
+        (["check-login"], 60),
+        (["get-qrcode"], 90),
+        (["wait-login", "--timeout", "120"], 150),
+        (["delete-cookies"], 120),
+    ]
+
 
 def test_xhs_export_package_contains_publish_assets(tmp_path, monkeypatch):
     setup_storage(tmp_path, monkeypatch)
     profile = create_xhs_profile()
     project = xhs_tools.create_project("xhs export package", account_profile_id=profile["id"])
-    draft = xhs_tools.XhsDraftResult(
-        title="Export title",
-        content="Export body",
-        tags=["tag1", "tag2"],
-        cover_prompt="cover prompt",
-        content_image_prompts=[],
-    )
-    xhs_tools.save_draft_artifacts(project["id"], draft)
+    save_xhs_ready_draft(project["id"], slide_count=1)
+    xhs_tools.update_project(project["id"], title="Export title", content="Export body", tags=["tag1", "tag2"])
+    xhs_tools.confirm_draft(project["id"])
+    set_xhs_image_suggestions(project["id"], content_count=0)
+    xhs_tools.confirm_image_suggestions(project["id"])
     project_dir = xhs_tools.resolve_project_workspace(project["id"])
     image_path = project_dir / "cover.png"
     image_path.write_bytes(PNG_1X1)
@@ -4237,8 +4456,11 @@ def test_cloud_member_can_export_xhs_package_but_not_use_bridge_publish(tmp_path
     project_response = client.post("/api/xhs/projects", json={"name": "??????", "account_profile_id": profile["id"]})
     assert project_response.status_code == 200
     project_id = project_response.json()["project"]["id"]
-    draft = xhs_tools.XhsDraftResult(title="Cloud export", content="Cloud body", tags=["cloud"], cover_prompt="cover")
-    xhs_tools.save_draft_artifacts(project_id, draft)
+    save_xhs_ready_draft(project_id, slide_count=1)
+    xhs_tools.update_project(project_id, title="Cloud export", content="Cloud body", tags=["cloud"])
+    xhs_tools.confirm_draft(project_id)
+    set_xhs_image_suggestions(project_id, content_count=0)
+    xhs_tools.confirm_image_suggestions(project_id)
     project_dir = xhs_tools.resolve_project_workspace(project_id)
     image_path = project_dir / "cover.png"
     image_path.write_bytes(PNG_1X1)
@@ -4248,6 +4470,9 @@ def test_cloud_member_can_export_xhs_package_but_not_use_bridge_publish(tmp_path
     )
 
     assert client.get("/api/xhs/auth/status").status_code == 403
+    assert client.post("/api/xhs/auth/logout").status_code == 403
+    assert client.post("/api/xhs/auth/qrcode").status_code == 403
+    assert client.post("/api/xhs/auth/wait-login").status_code == 403
     preflight = client.post("/api/xhs/publish/preflight", json={"project_id": project_id})
     assert preflight.status_code == 200
     assert preflight.json()["preflight"]["login"]["skipped"] is True
@@ -4331,6 +4556,95 @@ def test_xhs_project_creation_requires_and_snapshots_account_profile(tmp_path, m
     loaded = xhs_tools.load_project(project["id"])
 
     assert loaded["account_profile"]["positioning"] == profile["positioning"]
+
+
+def test_xhs_project_creation_accepts_visible_ownerless_profile_locally(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = xhs_tools.create_account_profile(xhs_profile_payload("本地旧账号定位"))
+    client = TestClient(app.app)
+
+    listed = client.get("/api/xhs/account-profiles")
+    assert listed.status_code == 200
+    assert any(item["id"] == profile["id"] for item in listed.json()["items"])
+
+    project_response = client.post(
+        "/api/xhs/projects",
+        json={"name": "本地旧定位项目", "account_profile_id": profile["id"]},
+    )
+
+    assert project_response.status_code == 200
+    payload = project_response.json()
+    assert payload["project"]["account_profile_id"] == profile["id"]
+    assert payload["project"]["account_profile"]["positioning"] == profile["positioning"]
+    assert payload["project"]["owner_user_id"]
+
+
+def test_xhs_project_creation_accepts_visible_legacy_owned_profile_locally(tmp_path, monkeypatch):
+    setup_storage(tmp_path, monkeypatch)
+    profile = xhs_tools.create_account_profile(
+        xhs_profile_payload("本地旧用户账号定位"),
+        owner_user_id="legacy-user-id",
+        workspace_id="legacy-workspace-id",
+    )
+    client = TestClient(app.app)
+
+    listed = client.get("/api/xhs/account-profiles")
+    assert listed.status_code == 200
+    assert any(item["id"] == profile["id"] for item in listed.json()["items"])
+
+    project_response = client.post(
+        "/api/xhs/projects",
+        json={"name": "本地旧用户定位项目", "account_profile_id": profile["id"]},
+    )
+
+    assert project_response.status_code == 200
+    payload = project_response.json()
+    assert payload["project"]["account_profile_id"] == profile["id"]
+    assert payload["project"]["account_profile"]["owner_user_id"] == "legacy-user-id"
+    assert payload["project"]["owner_user_id"]
+    assert payload["project"]["owner_user_id"] != "legacy-user-id"
+
+
+def test_cloud_member_cannot_create_xhs_project_from_ownerless_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    ownerless_profile = xhs_tools.create_account_profile(xhs_profile_payload("旧账号定位"))
+    client, _payload = _register_app_cloud_member("XHS-OWNERLESS", "xhs-ownerless@example.test", "xhs_ownerless")
+
+    listed = client.get("/api/xhs/account-profiles")
+    assert listed.status_code == 200
+    assert all(item["id"] != ownerless_profile["id"] for item in listed.json()["items"])
+
+    project_response = client.post(
+        "/api/xhs/projects",
+        json={"name": "越权旧定位项目", "account_profile_id": ownerless_profile["id"]},
+    )
+
+    assert project_response.status_code == 404
+
+
+def test_cloud_member_cannot_create_xhs_project_from_other_users_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIGURELEARNING_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("FIGURELEARNING_SESSION_COOKIE_SECURE", "false")
+    setup_storage(tmp_path, monkeypatch)
+    other_profile = xhs_tools.create_account_profile(
+        xhs_profile_payload("别人账号定位"),
+        owner_user_id="other-user-id",
+        workspace_id="other-workspace-id",
+    )
+    client, _payload = _register_app_cloud_member("XHS-OTHER-PROFILE", "xhs-other@example.test", "xhs_other")
+
+    listed = client.get("/api/xhs/account-profiles")
+    assert listed.status_code == 200
+    assert all(item["id"] != other_profile["id"] for item in listed.json()["items"])
+
+    project_response = client.post(
+        "/api/xhs/projects",
+        json={"name": "越权别人定位项目", "account_profile_id": other_profile["id"]},
+    )
+
+    assert project_response.status_code == 404
 
 
 def test_xhs_generate_topics_includes_account_profile_in_prompt(tmp_path, monkeypatch):

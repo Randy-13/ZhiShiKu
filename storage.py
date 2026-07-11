@@ -813,8 +813,11 @@ def create_remote_media_source(
     duration_seconds: float | None = None,
     status: str = "resolved",
     error_message: str | None = None,
+    owner_user_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    media_hash = hash_bytes(f"{platform}|{canonical_url}".encode("utf-8"))
+    content_hash = hash_bytes(f"{platform}|{canonical_url}".encode("utf-8"))
+    media_hash = scoped_content_hash(content_hash, owner_user_id)
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         existing = conn.execute("SELECT * FROM media_sources WHERE media_hash = ?", (media_hash,)).fetchone()
@@ -823,10 +826,23 @@ def create_remote_media_source(
                 """
                 UPDATE media_sources
                 SET source_url = ?, canonical_url = ?, title = ?, duration_seconds = ?,
-                    updated_at = ?, status = ?, error_message = ?
+                    updated_at = ?, status = ?, error_message = ?,
+                    owner_user_id = COALESCE(?, owner_user_id),
+                    workspace_id = COALESCE(?, workspace_id)
                 WHERE media_hash = ?
                 """,
-                (source_url, canonical_url, title, duration_seconds, now, status, error_message, media_hash),
+                (
+                    source_url,
+                    canonical_url,
+                    title,
+                    duration_seconds,
+                    now,
+                    status,
+                    error_message,
+                    owner_user_id,
+                    workspace_id,
+                    media_hash,
+                ),
             )
             conn.commit()
             item = get_media_by_hash(media_hash)
@@ -838,10 +854,24 @@ def create_remote_media_source(
             """
             INSERT INTO media_sources (
                 source_kind, platform, source_url, canonical_url, media_hash, title,
-                duration_seconds, transcript_kind, created_at, updated_at, status, error_message
-            ) VALUES ('remote_url', ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?)
+                duration_seconds, transcript_kind, created_at, updated_at, status, error_message,
+                owner_user_id, workspace_id
+            ) VALUES ('remote_url', ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?)
             """,
-            (platform, source_url, canonical_url, media_hash, title, duration_seconds, now, now, status, error_message),
+            (
+                platform,
+                source_url,
+                canonical_url,
+                media_hash,
+                title,
+                duration_seconds,
+                now,
+                now,
+                status,
+                error_message,
+                owner_user_id,
+                workspace_id,
+            ),
         )
         conn.commit()
         item = get_media_source(cursor.lastrowid)

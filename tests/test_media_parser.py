@@ -1,4 +1,6 @@
 import media_parser
+import sys
+import types
 
 
 def test_identify_media_platforms():
@@ -86,6 +88,92 @@ def test_douyin_detail_excludes_chapter_recommendations_from_subtitle():
     assert media_parser.extract_douyin_audio_url(detail) == "https://example.com/audio.mp3"
 
 
+def test_douyin_scraper_detail_is_cached_and_exposes_video_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(media_parser.storage, "MEDIA_DIR", tmp_path / "media")
+
+    class FakeScraper:
+        async def hybrid_parsing(self, url):
+            return {
+                "status": "success",
+                "type": "video",
+                "platform": "douyin",
+                "aweme_id": "7645662793240815025",
+                "desc": "scraper title",
+                "author": {"nickname": "author"},
+                "music": {"play_url": {"url_list": ["https://example.com/music.mp3"]}},
+                "video_data": {"nwm_video_url": "https://example.com/video.mp4"},
+            }
+
+    fake_module = types.SimpleNamespace(Scraper=FakeScraper)
+    monkeypatch.setitem(sys.modules, "douyin_tiktok_scraper.scraper", fake_module)
+
+    detail = media_parser.fetch_douyin_detail_with_scraper("https://www.douyin.com/video/7645662793240815025")
+
+    assert detail["desc"] == "scraper title"
+    assert media_parser.extract_douyin_audio_url(detail) == "https://example.com/music.mp3"
+    cached = tmp_path / "media" / "douyin_detail" / "7645662793240815025.json"
+    assert cached.exists()
+
+
+def test_douyin_detail_url_downloads_then_transcribes(monkeypatch, tmp_path):
+    monkeypatch.setattr(media_parser.storage, "MEDIA_DIR", tmp_path / "media")
+    updates = {}
+    monkeypatch.setattr(media_parser.storage, "storage_relative", lambda path: str(path.relative_to(tmp_path)))
+    monkeypatch.setattr(media_parser.storage, "update_media_source", lambda media_id, **fields: updates.update(fields))
+
+    downloaded = tmp_path / "media" / "douyin_audio" / "douyin_7.mp4"
+    monkeypatch.setattr(media_parser, "download_douyin_audio", lambda item, url: downloaded)
+    monkeypatch.setattr(media_parser, "transcribe_audio", lambda path: f"transcribed from {path.name}")
+
+    detail = {
+        "aweme_id": "7645662793240815025",
+        "video": {"play_addr": {"url_list": ["https://example.com/video.mp4"]}},
+    }
+    media_parser.write_douyin_detail_cache("7645662793240815025", detail)
+
+    transcript = media_parser.transcript_from_douyin(
+        {
+            "id": 7,
+            "platform": "douyin",
+            "source_url": "https://www.douyin.com/video/7645662793240815025",
+            "canonical_url": "https://www.douyin.com/video/7645662793240815025",
+            "title": "douyin clip",
+        }
+    )
+
+    assert transcript == "transcribed from douyin_7.mp4"
+    assert updates["transcript_kind"] == "asr"
+    assert updates["transcript_path"].startswith("media")
+
+
+def test_douyin_missing_sources_reports_actionable_error(monkeypatch):
+    monkeypatch.setattr(media_parser.storage, "MEDIA_DIR", media_parser.Path("__missing_test_media__"))
+    monkeypatch.setattr(media_parser, "douyin_detail_from_cache", lambda item: None)
+    monkeypatch.setattr(media_parser, "fetch_douyin_detail_with_scraper", lambda url: (_ for _ in ()).throw(RuntimeError("sdk unavailable")))
+    monkeypatch.setattr(media_parser, "fetch_douyin_detail_with_downloader_api", lambda video_id: (_ for _ in ()).throw(RuntimeError("api unavailable")))
+    monkeypatch.setattr(media_parser, "download_douyin_media_with_cli", lambda item: (_ for _ in ()).throw(RuntimeError("config missing")))
+
+    try:
+        media_parser.transcript_from_douyin(
+            {
+                "id": 8,
+                "platform": "douyin",
+                "source_url": "https://www.douyin.com/video/7645662793240815025",
+                "canonical_url": "https://www.douyin.com/video/7645662793240815025",
+            }
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert "抖音链接暂时没有提取到" in message
+    assert "SDK解析失败" in message
+    assert "下载器API解析失败" in message
+    assert "下载器兜底失败" in message
+    assert "ASR 设置" in message
+
+
 def test_ytdlp_cookie_source_reuses_project_auth_file(monkeypatch, tmp_path):
     monkeypatch.delenv(media_parser.YTDLP_COOKIES_FILE_ENV, raising=False)
     monkeypatch.delenv(media_parser.YTDLP_COOKIES_FROM_BROWSER_ENV, raising=False)
@@ -154,6 +242,56 @@ def test_write_transcript_uses_storage_relative_path(monkeypatch, tmp_path):
     assert updates["transcript_path"].startswith("media")
     assert not updates["transcript_path"].startswith(str(tmp_path))
     assert updates["status"] == "transcribed"
+
+
+def test_garbled_transcript_detection_keeps_readable_text():
+    garbled = "�" * 20 + "hu" + "�" * 40 + "\n" + "�L�Cz�ʒ" * 20
+    readable = "[00:00:01 - 00:00:03] 股市指标与AI芯片相关讨论 H100 B300 MACD KDJ"
+
+    assert media_parser.looks_like_garbled_transcript(garbled)
+    assert not media_parser.looks_like_garbled_transcript(readable)
+
+
+def test_ensure_transcript_discards_garbled_cache_and_retranscribes(monkeypatch, tmp_path):
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    video_path = media_dir / "clip.mp3"
+    video_path.write_bytes(b"audio")
+    transcript_path = media_dir / "clip.txt"
+    transcript_path.write_text("�" * 120, encoding="utf-8")
+    updates = []
+    item = {
+        "id": 42,
+        "source_kind": "local_file",
+        "platform": "local",
+        "title": "clip",
+        "file_path": "media/clip.mp3",
+        "transcript_path": "media/clip.txt",
+        "transcript_kind": "asr",
+        "status": "ready",
+    }
+
+    monkeypatch.setattr(media_parser.storage, "ROOT", tmp_path)
+    monkeypatch.setattr(media_parser.storage, "STORAGE_ROOT", tmp_path)
+    monkeypatch.setattr(media_parser.storage, "MEDIA_DIR", media_dir)
+    monkeypatch.setattr(media_parser.storage, "storage_relative", lambda path: str(path.relative_to(tmp_path)))
+
+    def fake_update(media_id, **fields):
+        updates.append(fields)
+        item.update(fields)
+        return dict(item)
+
+    monkeypatch.setattr(media_parser.storage, "update_media_source", fake_update)
+    monkeypatch.setattr(media_parser.storage, "get_media_source", lambda media_id: dict(item))
+    monkeypatch.setattr(media_parser, "transcribe_audio", lambda path: "重新识别后的可读文本")
+
+    transcript, kind = media_parser.ensure_transcript(dict(item))
+
+    assert transcript == "重新识别后的可读文本"
+    assert kind == "asr"
+    assert updates[0]["transcript_path"] is None
+    assert updates[-1]["transcript_kind"] == "asr"
+    assert not media_parser.looks_like_garbled_transcript((tmp_path / updates[-1]["transcript_path"]).read_text(encoding="utf-8"))
 
 
 def test_bilibili_cookie_status_validates_required_keys(monkeypatch, tmp_path):

@@ -60,6 +60,8 @@ from src.shared.responses import success_payload
 router = APIRouter(prefix="/api/v2", tags=["v2-contracts"])
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+HTML_GRAB_AUTHORIZATION_DEFAULT_URL = "https://example.com/"
 logger = logging.getLogger(__name__)
 
 SCREENSHOT_POLISH_TIMEOUT_SECONDS = 45.0
@@ -369,11 +371,26 @@ class ImageApiSettingTestRequest(BaseModel):
 
 
 class AsrSettingRequest(BaseModel):
+    id: str | None = None
+    name: str = ""
     provider: str = "compatible"
     base_url: str = ""
     model: str = ""
     api_key: str | None = None
     timeout: float | None = None
+    make_active: bool = True
+
+
+class AsrSettingTestRequest(BaseModel):
+    id: str | None = None
+    setting: AsrSettingRequest | None = None
+    name: str = ""
+    provider: str = "compatible"
+    base_url: str = ""
+    model: str = ""
+    api_key: str | None = None
+    timeout: float | None = None
+    make_active: bool = True
 
 
 class HtmlGrabCheckRequest(BaseModel):
@@ -381,7 +398,7 @@ class HtmlGrabCheckRequest(BaseModel):
 
 
 class HtmlGrabAuthorizeRequest(BaseModel):
-    url: HttpUrl | None = None
+    url: str | None = None
 
 
 @auth_router.get("/me")
@@ -667,12 +684,14 @@ def save_settings_web(request: WebSettingsRequest) -> dict[str, object]:
 
 
 @router.get("/settings/api")
-def settings_api() -> dict[str, object]:
+def settings_api(request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能查看 API 配置")
     return success_payload(data=api_settings.list_payload())
 
 
 @router.post("/settings/api")
-def save_settings_api(request: ApiSettingRequest) -> dict[str, object]:
+def save_settings_api(request: ApiSettingRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能保存 API 配置")
     try:
         return success_payload(data={"ok": True, **save_list_setting(api_settings, request.model_dump())})
     except (OSError, ValueError) as exc:
@@ -680,7 +699,8 @@ def save_settings_api(request: ApiSettingRequest) -> dict[str, object]:
 
 
 @router.post("/settings/api/active")
-def activate_settings_api(request: SettingActiveRequest) -> dict[str, object]:
+def activate_settings_api(request: SettingActiveRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能启用 API 配置")
     try:
         return success_payload(data={"ok": True, **activate_list_setting(api_settings, request.id)})
     except (KeyError, ValueError) as exc:
@@ -688,7 +708,8 @@ def activate_settings_api(request: SettingActiveRequest) -> dict[str, object]:
 
 
 @router.delete("/settings/api/{setting_id}")
-def delete_settings_api(setting_id: str) -> dict[str, object]:
+def delete_settings_api(setting_id: str, request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能删除 API 配置")
     try:
         return success_payload(data={"ok": True, **delete_list_setting(api_settings, setting_id)})
     except KeyError as exc:
@@ -696,7 +717,8 @@ def delete_settings_api(setting_id: str) -> dict[str, object]:
 
 
 @router.post("/settings/api/test")
-def test_settings_api(request: ApiSettingTestRequest) -> dict[str, object]:
+def test_settings_api(request: ApiSettingTestRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能测试 API 配置")
     try:
         setting = resolve_api_test_setting(request, not_found_message="API 配置不存在")
         diagnostic = deepseek_client.diagnose(setting)
@@ -706,12 +728,14 @@ def test_settings_api(request: ApiSettingTestRequest) -> dict[str, object]:
 
 
 @router.get("/settings/image")
-def settings_image() -> dict[str, object]:
+def settings_image(request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能查看图片 API 配置")
     return success_payload(data=image_api_settings.list_payload())
 
 
 @router.post("/settings/image")
-def save_settings_image(request: ImageApiSettingRequest) -> dict[str, object]:
+def save_settings_image(request: ImageApiSettingRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能保存图片 API 配置")
     try:
         return success_payload(data={"ok": True, **save_list_setting(image_api_settings, request.model_dump())})
     except (OSError, ValueError) as exc:
@@ -719,7 +743,8 @@ def save_settings_image(request: ImageApiSettingRequest) -> dict[str, object]:
 
 
 @router.post("/settings/image/active")
-def activate_settings_image(request: SettingActiveRequest) -> dict[str, object]:
+def activate_settings_image(request: SettingActiveRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能启用图片 API 配置")
     try:
         return success_payload(data={"ok": True, **activate_list_setting(image_api_settings, request.id)})
     except (KeyError, ValueError) as exc:
@@ -727,7 +752,8 @@ def activate_settings_image(request: SettingActiveRequest) -> dict[str, object]:
 
 
 @router.delete("/settings/image/{setting_id}")
-def delete_settings_image(setting_id: str) -> dict[str, object]:
+def delete_settings_image(setting_id: str, request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能删除图片 API 配置")
     try:
         return success_payload(data={"ok": True, **delete_list_setting(image_api_settings, setting_id)})
     except KeyError as exc:
@@ -735,7 +761,8 @@ def delete_settings_image(setting_id: str) -> dict[str, object]:
 
 
 @router.post("/settings/image/test")
-def test_settings_image(request: ImageApiSettingTestRequest) -> dict[str, object]:
+def test_settings_image(request: ImageApiSettingTestRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能测试图片 API 配置")
     try:
         setting = resolve_image_api_test_setting(request, not_found_message="图片 API 配置不存在")
         diagnostic = image_api_settings.diagnose(setting)
@@ -760,20 +787,41 @@ def test_settings_image(request: ImageApiSettingTestRequest) -> dict[str, object
 
 
 @router.get("/settings/asr")
-def settings_asr() -> dict[str, object]:
+def settings_asr(request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能查看 ASR 配置")
     return success_payload(data=asr_settings.list_payload())
 
 
 @router.post("/settings/asr")
-def save_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
+def save_settings_asr(request: AsrSettingRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能保存 ASR 配置")
     try:
         return success_payload(data={"ok": True, **save_list_setting(asr_settings, request.model_dump())})
     except ValueError as exc:
         return success_payload(data={"ok": False, "error": str(exc)})
 
 
+@router.post("/settings/asr/active")
+def activate_settings_asr(request: SettingActiveRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能启用 ASR 配置")
+    try:
+        return success_payload(data={"ok": True, **activate_list_setting(asr_settings, request.id)})
+    except (KeyError, ValueError) as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
+@router.delete("/settings/asr/{setting_id}")
+def delete_settings_asr(setting_id: str, request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(request), "云端普通用户不能删除 ASR 配置")
+    try:
+        return success_payload(data={"ok": True, **delete_list_setting(asr_settings, setting_id)})
+    except KeyError as exc:
+        return success_payload(data={"ok": False, "error": str(exc)})
+
+
 @router.post("/settings/asr/test")
-def test_settings_asr(request: AsrSettingRequest) -> dict[str, object]:
+def test_settings_asr(request: AsrSettingTestRequest, http_request: Request) -> dict[str, object]:
+    _require_local_or_admin(_request_context(http_request), "云端普通用户不能测试 ASR 配置")
     try:
         return success_payload(
             data={
@@ -807,7 +855,7 @@ def settings_html_grab_check(request: HtmlGrabCheckRequest) -> dict[str, object]
 
 @router.post("/settings/html-grab-authorize")
 def settings_html_grab_authorize(request: HtmlGrabAuthorizeRequest) -> dict[str, object]:
-    target_url = str(request.url).strip() if request.url else "about:blank"
+    target_url = _html_grab_authorize_target_url(request.url)
     try:
         _open_edge_remote_debugging_page(target_url)
         return success_payload(
@@ -3900,15 +3948,28 @@ def _ensure_media_transcript_with_platform_import(media_item: dict) -> tuple[str
     except Exception as exc:
         if media_item.get("platform") != "douyin":
             raise
+        errors = [str(exc)]
         video_id = media_parser.extract_douyin_video_id(
             str(media_item.get("canonical_url") or media_item.get("source_url") or "")
         )
-        if not video_id:
-            raise
-        _import_douyin_detail_with_browser(video_id, str(media_item.get("canonical_url") or media_item.get("source_url") or ""))
-        refreshed = storage.get_media_source(int(media_item["id"]))
         try:
+            _import_douyin_detail_with_browser(video_id, str(media_item.get("canonical_url") or media_item.get("source_url") or ""))
+            if not video_id:
+                video_id = _latest_douyin_detail_video_id()
+                if video_id:
+                    storage.update_media_source(
+                        int(media_item["id"]),
+                        canonical_url=f"https://www.douyin.com/video/{video_id}",
+                    )
+            refreshed = storage.get_media_source(int(media_item["id"]))
             return media_parser.ensure_transcript(refreshed)
+        except Exception as browser_exc:
+            errors.append(f"浏览器抓包失败：{browser_exc}")
+        try:
+            refreshed = storage.get_media_source(int(media_item["id"]))
+            transcript = media_parser.transcript_from_douyin_cli(refreshed, errors)
+            refreshed = storage.get_media_source(int(media_item["id"]))
+            return transcript, str(refreshed.get("transcript_kind") or "asr")
         except Exception as retry_exc:
             raise retry_exc from exc
 
@@ -4293,7 +4354,7 @@ def _extract_douyin_link_text(url: str) -> dict[str, str]:
     }
 
 
-def _import_douyin_detail_with_browser(video_id: str, url: str) -> Path:
+def _import_douyin_detail_with_browser(video_id: str | None, url: str) -> Path:
     command = _agent_browser_command()
     connection_args = _agent_browser_connection_args(command)
     subprocess.run(
@@ -4319,10 +4380,14 @@ def _import_douyin_detail_with_browser(video_id: str, url: str) -> Path:
         "200",
     )
     requests = payload.get("data", {}).get("requests", []) if isinstance(payload, dict) else []
-    matches = [request for request in requests if video_id in str(request.get("url") or "")]
+    matches = [
+        request
+        for request in requests
+        if not video_id or video_id in str(request.get("url") or "")
+    ]
     if not matches:
         raise RuntimeError(
-            f"No captured Douyin aweme/detail response found for {video_id}. "
+            f"No captured Douyin aweme/detail response found for {video_id or url}. "
             "Open the Douyin video in the browser first and wait until it finishes loading."
         )
     request_id = str(matches[-1].get("requestId") or "")
@@ -4331,11 +4396,27 @@ def _import_douyin_detail_with_browser(video_id: str, url: str) -> Path:
     if not body:
         raise RuntimeError(f"Captured Douyin request {request_id} has no response body.")
     data = json.loads(str(body))
+    detail = data.get("aweme_detail") if isinstance(data, dict) else None
+    if not video_id and isinstance(detail, dict):
+        video_id = str(detail.get("aweme_id") or detail.get("group_id") or "").strip()
+    if not video_id:
+        video_id = media_parser.extract_douyin_video_id(str(data)) or "latest"
     output_dir = storage.MEDIA_DIR / "douyin_detail"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{video_id}.json"
     output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_path
+
+
+def _latest_douyin_detail_video_id() -> str:
+    detail_dir = storage.MEDIA_DIR / "douyin_detail"
+    if not detail_dir.exists():
+        return ""
+    files = [path for path in detail_dir.glob("*.json") if path.is_file()]
+    if not files:
+        return ""
+    latest = max(files, key=lambda path: path.stat().st_mtime)
+    return latest.stem if latest.stem != "latest" else ""
 
 
 def _agent_browser_json(command: str, connection_args: list[str], *args: str) -> dict[str, object]:
@@ -4460,6 +4541,7 @@ def _browser_extract_article_payload(
     scroll_pause_ms: int = 800,
     selector: str = "",
 ) -> dict[str, object]:
+    _assert_browser_extract_url(url)
     try:
         return _browser_harness_extract_article_payload(url, wait_ms, scroll_times, scroll_pause_ms, selector)
     except (FileNotFoundError, subprocess.CalledProcessError):
@@ -4473,6 +4555,7 @@ def _browser_harness_extract_article_payload(
     scroll_pause_ms: int = 800,
     selector: str = "",
 ) -> dict[str, object]:
+    _assert_browser_extract_url(url)
     wait_seconds = _bounded_int(wait_ms, 0, 30000) / 1000
     scroll_count = _bounded_int(scroll_times, 0, 30)
     pause_seconds = _bounded_int(scroll_pause_ms, 0, 5000) / 1000
@@ -4541,6 +4624,7 @@ def _agent_browser_extract_article_payload(
     scroll_pause_ms: int = 800,
     selector: str = "",
 ) -> dict[str, object]:
+    _assert_browser_extract_url(url)
     command = _agent_browser_command()
     connection_args = _agent_browser_connection_args(command)
     wait_value = str(_bounded_int(wait_ms, 0, 30000))
@@ -4616,6 +4700,12 @@ def _agent_browser_extract_article_payload(
     return _parse_agent_browser_json(completed.stdout)
 
 
+def _assert_browser_extract_url(url: str) -> None:
+    parsed = urllib.parse.urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Browser HTML extraction requires an http/https article URL.")
+
+
 def _agent_browser_command() -> str:
     found = shutil.which("agent-browser")
     if found:
@@ -4675,6 +4765,16 @@ def _open_edge_remote_debugging_page(url: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _html_grab_authorize_target_url(url: str | None) -> str:
+    target_url = (url or "").strip()
+    if not target_url or target_url == "about:blank":
+        return HTML_GRAB_AUTHORIZATION_DEFAULT_URL
+    parsed = urllib.parse.urlparse(target_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("HTML grab authorization URL must be an http/https URL.")
+    return target_url
 
 
 def _agent_browser_open_new_page(command: str, connection_args: list[str], url: str) -> None:

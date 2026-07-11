@@ -118,6 +118,7 @@
 - 设置页要展示依赖检查，当前至少包括 B 站 Cookie 状态。
 - API 请求必须放在 `frontend/workbench/src/api.ts`。
 - “登录获取 Cookie”等按钮必须调用真实后端接口，不要只做前端提示。
+- 设置页新增或改动任何临时窗口 / 弹窗（例如 API 设置、依赖检查、创作者账号、本地数据、垃圾箱）时，必须同时检查深色模式配色：外层 `.modal-panel` 不能继承浅色纸面背景，内部卡片、列表行、输入框、textarea、select、状态徽标、错误提示和危险按钮都要有 `:root:not([data-theme="light"])` 覆盖，并优先复用 `--info-tile-*`、`--workbench-*`、`--gold-soft` 等现有深色 token。
 
 ## 知识库规则
 

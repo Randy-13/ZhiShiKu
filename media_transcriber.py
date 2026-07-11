@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -13,18 +18,79 @@ import asr_settings
 def transcribe_audio(path: Path, provider: str = "local") -> str:
     setting = asr_settings.active_setting()
     provider = (provider if provider != "local" else setting.get("provider") or "").lower()
+    if provider == "local":
+        text = transcribe_with_local_whisper(path, setting)
+        asr_settings.mark_test_result(True, "最近一次本地语音转写成功。")
+        return text
     if provider in {"openai", "compatible", "minimax"}:
         text = transcribe_with_openai_compatible(path, setting)
         asr_settings.mark_test_result(True, "最近一次语音转写成功。")
         return text
     if provider == "dashscope":
         raise RuntimeError(
-            "DashScope Fun-ASR requires a reachable HTTP/HTTPS audio URL. "
-            "Use transcribe_audio_url() for remote media, or switch to an OpenAI-compatible ASR for local files."
+            "当前激活的 DashScope Fun-ASR 只能转写公网可访问的 HTTP/HTTPS 音频 URL，不能直接读取本地上传文件。"
+            "请在设置中心切换到本地 Whisper、OpenAI-compatible 或 MiniMax ASR 后重试，或上传字幕文件。"
         )
     raise RuntimeError(
         "ASR is not configured yet. Configure ASR API settings on the media page or upload a subtitle file."
     )
+
+
+def transcribe_with_local_whisper(path: Path, setting: dict) -> str:
+    if importlib.util.find_spec("whisper") is None:
+        raise RuntimeError(
+            "本地 ASR 需要安装 openai-whisper。当前环境已找到 ffmpeg，但未找到 whisper 包；"
+            "请在项目虚拟环境安装 openai-whisper，或切换到 OpenAI-compatible / MiniMax ASR。"
+        )
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import json, sys, whisper; "
+            "model = whisper.load_model(sys.argv[2]); "
+            "result = model.transcribe(sys.argv[1], language=sys.argv[3] or None, fp16=False); "
+            "print(json.dumps({'text': result.get('text', '')}, ensure_ascii=False))"
+        ),
+        str(path),
+        str(setting.get("model") or "base"),
+        str(setting.get("language") or "zh"),
+    ]
+    env = None
+    ffmpeg_dir = local_ffmpeg_dir()
+    if ffmpeg_dir:
+        env = dict(os.environ)
+        env["PATH"] = str(ffmpeg_dir) + os.pathsep + env.get("PATH", "")
+    completed = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=float(setting.get("timeout") or 1800),
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"本地 Whisper 转写失败：{message[-1000:]}")
+    try:
+        data = json.loads(completed.stdout.splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"本地 Whisper 没有返回可读结果：{completed.stdout[-1000:]}") from exc
+    text = str(data.get("text") or "").strip()
+    if not text:
+        raise RuntimeError("本地 Whisper 转写完成，但没有识别到文字。")
+    return text
+
+
+def local_ffmpeg_dir() -> Path | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return Path(ffmpeg).resolve().parent
+    candidate = Path.home() / ".agent-reach" / "tools" / "ffmpeg" / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+    if candidate.exists():
+        return candidate.parent
+    return None
 
 
 def transcribe_with_openai_compatible(path: Path, setting: dict) -> str:

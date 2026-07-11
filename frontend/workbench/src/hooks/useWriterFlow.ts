@@ -18,11 +18,64 @@ export type WriterImageRetryTask = {
   aspectRatio?: string;
 };
 
+export type WriterRunningTask = {
+  id: string;
+  label: string;
+  runningLabel: string;
+  startedAt: number;
+};
+
+type WriterTaskMeta = {
+  id: string;
+  title: string;
+  runningLabel: string;
+};
+
+type WriterRunningLabelKey =
+  | "creating"
+  | "opening"
+  | "importing"
+  | "generating"
+  | "confirming"
+  | "revising"
+  | "checking"
+  | "publishing"
+  | "saving";
+
+function writerRunningLabel(language: Language, key: WriterRunningLabelKey) {
+  const labels: Record<WriterRunningLabelKey, { zh: string; en: string }> = {
+    creating: { zh: "创建中", en: "Creating" },
+    opening: { zh: "打开中", en: "Opening" },
+    importing: { zh: "导入中", en: "Importing" },
+    generating: { zh: "生成中", en: "Generating" },
+    confirming: { zh: "确认中", en: "Confirming" },
+    revising: { zh: "修订中", en: "Revising" },
+    checking: { zh: "检查中", en: "Checking" },
+    publishing: { zh: "发布中", en: "Publishing" },
+    saving: { zh: "保存中", en: "Saving" },
+  };
+  return language === "zh" ? labels[key].zh : labels[key].en;
+}
+
+function inferWriterRunningLabelKey(title: string): WriterRunningLabelKey {
+  const lower = title.toLowerCase();
+  if (title.includes("创建") || lower.includes("create")) return "creating";
+  if (title.includes("打开") || lower.includes("open")) return "opening";
+  if (title.includes("导入") || lower.includes("import")) return "importing";
+  if (title.includes("选择") || title.includes("确认") || lower.includes("select") || lower.includes("confirm")) return "confirming";
+  if (title.includes("修订") || lower.includes("revise")) return "revising";
+  if (title.includes("检查") || lower.includes("preflight") || lower.includes("check")) return "checking";
+  if (title.includes("发布") || lower.includes("publish")) return "publishing";
+  if (title.includes("保存") || lower.includes("save")) return "saving";
+  return "generating";
+}
+
 export function useWriterFlow({ language, addActivity, selectWorkspace }: Options) {
   const [writerProjects, setWriterProjects] = useState<WriterProject[]>([]);
   const [writerState, setWriterState] = useState<WriterProjectState>();
   const [selectedWriterProjectId, setSelectedWriterProjectId] = useState<string>();
-  const [isWriting, setIsWriting] = useState(false);
+  const [writerRunningTask, setWriterRunningTask] = useState<WriterRunningTask>();
+  const isWriting = Boolean(writerRunningTask);
 
   const refreshWriterProjects = useCallback(
     async (selectedId?: string) => {
@@ -54,26 +107,30 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
   }, [addActivity, language, refreshWriterProjects]);
 
   const runWriterAction = useCallback(
-    async (title: string, action: () => Promise<WriterProjectState>) => {
-      setIsWriting(true);
+    async (taskOrTitle: WriterTaskMeta | string, action: () => Promise<WriterProjectState>) => {
+      const task =
+        typeof taskOrTitle === "string"
+          ? { id: "writer_action", title: taskOrTitle, runningLabel: writerRunningLabel(language, inferWriterRunningLabelKey(taskOrTitle)) }
+          : taskOrTitle;
+      setWriterRunningTask({ id: task.id, label: task.title, runningLabel: task.runningLabel, startedAt: Date.now() });
       try {
         const state = await action();
         setWriterState(state);
         setSelectedWriterProjectId(state.project.id);
         await refreshWriterProjects(state.project.id);
-        addActivity({ title, detail: state.project.workspace, workspace: "create", status: "done" });
+        addActivity({ title: task.title, detail: state.project.workspace, workspace: "create", status: "done" });
       } catch (error) {
         addActivity({
-          title,
+          title: task.title,
           detail: error instanceof Error ? error.message : "Writer project action failed",
           workspace: "create",
           status: "error",
         });
       } finally {
-        setIsWriting(false);
+        setWriterRunningTask(undefined);
       }
     },
-    [addActivity, refreshWriterProjects],
+    [addActivity, language, refreshWriterProjects],
   );
 
   const createWriterProject = useCallback(
@@ -261,6 +318,7 @@ export function useWriterFlow({ language, addActivity, selectWorkspace }: Option
     writerState,
     selectedWriterProjectId,
     isWriting,
+    writerRunningTask,
     createWriterProject,
     selectWriterProject,
     importWriterKnowledge,

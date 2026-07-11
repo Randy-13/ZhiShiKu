@@ -105,6 +105,41 @@ TEMPLATES = [
         "model": "MiniMax-M3",
         "api_key_placeholder": "MiniMax API Key",
     },
+    {
+        "id": "zhipu-glm-5-2",
+        "name": "智谱 AI GLM-5.2",
+        "provider": "zhipu",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-5.2",
+        "api_key_placeholder": "智谱 AI API Key",
+    },
+    {
+        "id": "zhipu-glm-5v-turbo",
+        "name": "智谱 AI GLM-5V-Turbo",
+        "provider": "zhipu",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-5v-turbo",
+        "api_key_placeholder": "智谱 AI API Key",
+    },
+    {
+        "id": "zhipu-custom",
+        "name": "智谱 AI 自定义模型",
+        "provider": "zhipu",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-5v-turbo",
+        "api_key_placeholder": "智谱 AI API Key",
+    },
+]
+
+ZHIPU_MODEL_SUGGESTIONS = [
+    "glm-5v-turbo",
+    "glm-5.2",
+    "glm-4.5",
+    "glm-4.5-air",
+    "glm-4.5-flash",
+    "glm-4-plus",
+    "glm-4-air",
+    "glm-4-flash",
 ]
 
 
@@ -251,6 +286,7 @@ def list_payload() -> dict[str, Any]:
         "active_id": data.get("active_id"),
         "items": [sanitize(item) for item in data.get("settings", [])],
         "templates": TEMPLATES,
+        "model_suggestions": {"zhipu": ZHIPU_MODEL_SUGGESTIONS},
     }
 
 

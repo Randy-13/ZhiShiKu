@@ -43,7 +43,7 @@ import type {
 } from "../api";
 import { PrimaryTaskPanel } from "../components/PrimaryTaskPanel";
 import { StatusBadge } from "../components/StatusBadge";
-import type { ActivityEvent, Language, TextExtractionMode } from "../domain";
+import type { ActivityEvent, Language, TextExtractionMode, XhsLoginStatus } from "../domain";
 import type { Translator } from "../i18n";
 
 type StorageKey = keyof StorageLocations;
@@ -65,14 +65,6 @@ type ApiFormState = {
   response_format: string;
   real_image_test: boolean;
   make_active: boolean;
-};
-
-type AsrFormState = {
-  provider: string;
-  base_url: string;
-  model: string;
-  api_key: string;
-  timeout: string;
 };
 
 type WechatPublisherFormState = {
@@ -99,20 +91,56 @@ const emptyForm: ApiFormState = {
   make_active: true,
 };
 
-const emptyAsrForm: AsrFormState = {
-  provider: "compatible",
-  base_url: "",
-  model: "",
-  api_key: "",
-  timeout: "60",
-};
-
 const emptyWechatPublisherForm: WechatPublisherFormState = {
   appid: "",
   appsecret: "",
   accountName: "",
   author: "Bobo",
 };
+
+const SETTINGS_STATUS_CACHE_KEY = "figurelearning.settings.statusSnapshot.v1";
+
+type SettingsStatusCache = {
+  version: 1;
+  lastRefreshedAt?: string;
+  cookieStatus?: BilibiliCookieStatus;
+  dependencyStatus?: MediaDependencyStatus;
+  dependencyMessage?: string;
+  htmlGrabStatus?: HtmlGrabCheckStatus;
+  htmlGrabMessage?: string;
+  storageLocations?: StorageLocations;
+  trashStatus?: TrashStatus;
+  quotaStatus?: QuotaStatus;
+  quotaMessage?: string;
+  databaseStatus?: DatabaseStatus;
+  databaseMessage?: string;
+  wechatPublisherStatus?: WechatPublisherBindingStatus;
+  wechatPublisherMessage?: string;
+  xhsAuthStatus?: XhsLoginStatus;
+  xhsAuthMessage?: string;
+};
+
+function readSettingsStatusCache(): SettingsStatusCache | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STATUS_CACHE_KEY);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as Partial<SettingsStatusCache>;
+    if (parsed.version !== 1) return undefined;
+    return parsed as SettingsStatusCache;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSettingsStatusCache(snapshot: SettingsStatusCache) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SETTINGS_STATUS_CACHE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Local storage can be unavailable in privacy modes; the UI should still work.
+  }
+}
 
 const storageFields: Array<{
   key: StorageKey;
@@ -221,6 +249,8 @@ export function SettingsWorkspace({
 }) {
   const [apiModalOpen, setApiModalOpen] = useState(false);
   const [dependencyModalOpen, setDependencyModalOpen] = useState(false);
+  const [creatorAccountsModalOpen, setCreatorAccountsModalOpen] = useState(false);
+  const [localDataModalOpen, setLocalDataModalOpen] = useState(false);
   const [cookieStatus, setCookieStatus] = useState<BilibiliCookieStatus>();
   const [cookieLoading, setCookieLoading] = useState(false);
   const [cookieActionMessage, setCookieActionMessage] = useState("");
@@ -248,18 +278,67 @@ export function SettingsWorkspace({
   const [wechatPublisherForm, setWechatPublisherForm] = useState<WechatPublisherFormState>(emptyWechatPublisherForm);
   const [wechatPublisherLoading, setWechatPublisherLoading] = useState(false);
   const [wechatPublisherMessage, setWechatPublisherMessage] = useState("");
+  const [xhsAuthStatus, setXhsAuthStatus] = useState<XhsLoginStatus>();
+  const [xhsAuthLoading, setXhsAuthLoading] = useState(false);
+  const [xhsAuthMessage, setXhsAuthMessage] = useState("");
+  const [settingsStatusCache, setSettingsStatusCache] = useState<SettingsStatusCache>({ version: 1 });
+  const [globalRefreshLoading, setGlobalRefreshLoading] = useState(false);
+  const [globalRefreshMessage, setGlobalRefreshMessage] = useState("");
 
-  const localDiagnosticsVisible = authContext
+  const canManageSystemSettings = authContext
     ? authContext.deploymentMode !== "cloud" || authContext.user?.role === "admin"
     : false;
+  const canViewRuntimeLog = Boolean(authContext?.authenticated);
+  const localDiagnosticsVisible = canManageSystemSettings;
+
+  function updateSettingsStatusCache(patch: Partial<SettingsStatusCache>, options: { markRefreshed?: boolean } = {}) {
+    setSettingsStatusCache((current) => {
+      const next: SettingsStatusCache = {
+        ...current,
+        ...patch,
+        version: 1,
+        lastRefreshedAt: options.markRefreshed ? new Date().toISOString() : (patch.lastRefreshedAt ?? current.lastRefreshedAt),
+      };
+      writeSettingsStatusCache(next);
+      return next;
+    });
+  }
+
+  function applySettingsStatusCache(snapshot: SettingsStatusCache) {
+    setSettingsStatusCache(snapshot);
+    if (snapshot.cookieStatus) setCookieStatus(snapshot.cookieStatus);
+    if (snapshot.dependencyStatus) setDependencyStatus(snapshot.dependencyStatus);
+    if (typeof snapshot.dependencyMessage === "string") setDependencyMessage(snapshot.dependencyMessage);
+    if (snapshot.htmlGrabStatus) setHtmlGrabStatus(snapshot.htmlGrabStatus);
+    if (typeof snapshot.htmlGrabMessage === "string") setHtmlGrabMessage(snapshot.htmlGrabMessage);
+    if (snapshot.storageLocations) {
+      setStorageLocations(snapshot.storageLocations);
+      setStorageDraft(snapshot.storageLocations);
+    }
+    if (snapshot.trashStatus) setTrashStatus(snapshot.trashStatus);
+    if (snapshot.quotaStatus) setQuotaStatus(snapshot.quotaStatus);
+    if (typeof snapshot.quotaMessage === "string") setQuotaMessage(snapshot.quotaMessage);
+    if (snapshot.databaseStatus) setDatabaseStatus(snapshot.databaseStatus);
+    if (typeof snapshot.databaseMessage === "string") setDatabaseMessage(snapshot.databaseMessage);
+    if (snapshot.wechatPublisherStatus) applyWechatPublisherStatus(snapshot.wechatPublisherStatus);
+    if (typeof snapshot.wechatPublisherMessage === "string") setWechatPublisherMessage(snapshot.wechatPublisherMessage);
+    if (snapshot.xhsAuthStatus) setXhsAuthStatus(snapshot.xhsAuthStatus);
+    if (typeof snapshot.xhsAuthMessage === "string") setXhsAuthMessage(snapshot.xhsAuthMessage);
+  }
 
   async function refreshCookieStatus() {
     setCookieLoading(true);
     setCookieActionMessage("");
     try {
-      setCookieStatus(await settingsApi.bilibiliCookieStatus());
+      const status = await settingsApi.bilibiliCookieStatus();
+      setCookieStatus(status);
+      updateSettingsStatusCache({ cookieStatus: status });
+      return status;
     } catch (error) {
-      setCookieStatus({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      const status = { ok: false, message: error instanceof Error ? error.message : String(error) };
+      setCookieStatus(status);
+      updateSettingsStatusCache({ cookieStatus: status });
+      return status;
     } finally {
       setCookieLoading(false);
     }
@@ -269,20 +348,36 @@ export function SettingsWorkspace({
     setDependencyLoading(true);
     setDependencyMessage("");
     try {
-      setDependencyStatus(await settingsApi.mediaDependencies());
+      const status = await settingsApi.mediaDependencies();
+      setDependencyStatus(status);
+      updateSettingsStatusCache({ dependencyStatus: status, dependencyMessage: "" });
+      return status;
     } catch (error) {
-      setDependencyMessage(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setDependencyMessage(message);
+      updateSettingsStatusCache({ dependencyMessage: message });
+      return undefined;
     } finally {
       setDependencyLoading(false);
     }
   }
 
+  async function refreshAllDependencyStatus() {
+    await Promise.all([refreshDependencyStatus(), refreshCookieStatus(), refreshHtmlGrabStatus()]);
+  }
+
   async function refreshQuotaStatus() {
     setQuotaMessage("");
     try {
-      setQuotaStatus(await quotaApi.me());
+      const status = await quotaApi.me();
+      setQuotaStatus(status);
+      updateSettingsStatusCache({ quotaStatus: status, quotaMessage: "" });
+      return status;
     } catch (error) {
-      setQuotaMessage(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setQuotaMessage(message);
+      updateSettingsStatusCache({ quotaMessage: message });
+      return undefined;
     }
   }
 
@@ -290,9 +385,15 @@ export function SettingsWorkspace({
     setDatabaseLoading(true);
     setDatabaseMessage("");
     try {
-      setDatabaseStatus(await settingsApi.databaseStatus());
+      const status = await settingsApi.databaseStatus();
+      setDatabaseStatus(status);
+      updateSettingsStatusCache({ databaseStatus: status, databaseMessage: "" });
+      return status;
     } catch (error) {
-      setDatabaseMessage(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setDatabaseMessage(message);
+      updateSettingsStatusCache({ databaseMessage: message });
+      return undefined;
     } finally {
       setDatabaseLoading(false);
     }
@@ -312,9 +413,15 @@ export function SettingsWorkspace({
     setWechatPublisherLoading(true);
     setWechatPublisherMessage("");
     try {
-      applyWechatPublisherStatus(await settingsApi.wechatPublisherBinding());
+      const status = await settingsApi.wechatPublisherBinding();
+      applyWechatPublisherStatus(status);
+      updateSettingsStatusCache({ wechatPublisherStatus: status, wechatPublisherMessage: "" });
+      return status;
     } catch (error) {
-      setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setWechatPublisherMessage(message);
+      updateSettingsStatusCache({ wechatPublisherMessage: message });
+      return undefined;
     } finally {
       setWechatPublisherLoading(false);
     }
@@ -331,6 +438,7 @@ export function SettingsWorkspace({
         author: wechatPublisherForm.author.trim() || "Bobo",
       });
       applyWechatPublisherStatus(result);
+      updateSettingsStatusCache({ wechatPublisherStatus: result });
       setWechatPublisherMessage(language === "zh" ? "公众号绑定已保存。" : "WeChat account binding saved.");
     } catch (error) {
       setWechatPublisherMessage(error instanceof Error ? error.message : String(error));
@@ -352,13 +460,90 @@ export function SettingsWorkspace({
     }
   }
 
+  function applyXhsAuthStatus(status: XhsLoginStatus) {
+    setXhsAuthStatus(status);
+    setXhsAuthMessage(String(status.message || status.hint || status.error || status.stderr || ""));
+  }
+
+  async function refreshXhsAuthStatus() {
+    setXhsAuthLoading(true);
+    setXhsAuthMessage("");
+    try {
+      const status = await settingsApi.xhsAuthStatus();
+      applyXhsAuthStatus(status);
+      updateSettingsStatusCache({ xhsAuthStatus: status, xhsAuthMessage: String(status.message || status.hint || status.error || status.stderr || "") });
+      return status;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = { ok: false, logged_in: false, error: message };
+      setXhsAuthStatus(status);
+      setXhsAuthMessage(message);
+      updateSettingsStatusCache({ xhsAuthStatus: status, xhsAuthMessage: message });
+      return status;
+    } finally {
+      setXhsAuthLoading(false);
+    }
+  }
+
+  async function requestXhsQrcode() {
+    setXhsAuthLoading(true);
+    setXhsAuthMessage("");
+    try {
+      const status = await settingsApi.xhsAuthQrcode();
+      applyXhsAuthStatus(status);
+      updateSettingsStatusCache({ xhsAuthStatus: status, xhsAuthMessage: String(status.message || status.hint || status.error || status.stderr || "") });
+    } catch (error) {
+      setXhsAuthStatus((current) => ({ ...current, ok: false, error: error instanceof Error ? error.message : String(error) }));
+      setXhsAuthMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setXhsAuthLoading(false);
+    }
+  }
+
+  async function waitXhsLogin() {
+    setXhsAuthLoading(true);
+    setXhsAuthMessage("");
+    try {
+      const status = await settingsApi.xhsAuthWaitLogin();
+      applyXhsAuthStatus(status);
+      updateSettingsStatusCache({ xhsAuthStatus: status, xhsAuthMessage: String(status.message || status.hint || status.error || status.stderr || "") });
+    } catch (error) {
+      setXhsAuthStatus((current) => ({ ...current, ok: false, error: error instanceof Error ? error.message : String(error) }));
+      setXhsAuthMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setXhsAuthLoading(false);
+    }
+  }
+
+  async function logoutXhsAuth() {
+    setXhsAuthLoading(true);
+    setXhsAuthMessage("");
+    try {
+      const status = await settingsApi.xhsAuthLogout();
+      applyXhsAuthStatus(status);
+      updateSettingsStatusCache({ xhsAuthStatus: status, xhsAuthMessage: String(status.message || status.hint || status.error || status.stderr || "") });
+      await refreshXhsAuthStatus();
+    } catch (error) {
+      setXhsAuthStatus((current) => ({ ...current, ok: false, error: error instanceof Error ? error.message : String(error) }));
+      setXhsAuthMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setXhsAuthLoading(false);
+    }
+  }
+
   async function refreshHtmlGrabStatus() {
     setHtmlGrabLoading(true);
     setHtmlGrabMessage("");
     try {
-      setHtmlGrabStatus(await settingsApi.htmlGrabCheck());
+      const status = await settingsApi.htmlGrabCheck();
+      setHtmlGrabStatus(status);
+      updateSettingsStatusCache({ htmlGrabStatus: status, htmlGrabMessage: "" });
+      return status;
     } catch (error) {
-      setHtmlGrabStatus({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      const status = { ok: false, message: error instanceof Error ? error.message : String(error) };
+      setHtmlGrabStatus(status);
+      updateSettingsStatusCache({ htmlGrabStatus: status, htmlGrabMessage: status.message });
+      return status;
     } finally {
       setHtmlGrabLoading(false);
     }
@@ -400,8 +585,11 @@ export function SettingsWorkspace({
       const locations = settings.storage_locations ?? {};
       setStorageLocations(locations);
       setStorageDraft(locations);
+      updateSettingsStatusCache({ storageLocations: locations });
+      return locations;
     } catch (error) {
       setStorageMessage(error instanceof Error ? error.message : String(error));
+      return undefined;
     } finally {
       setStorageLoading(false);
     }
@@ -422,6 +610,7 @@ export function SettingsWorkspace({
       const locations = payload.storage_locations ?? {};
       setStorageLocations(locations);
       setStorageDraft(locations);
+      updateSettingsStatusCache({ storageLocations: locations });
       setStorageMessage(language === "zh" ? "本地存储位置已保存并生效。" : "Local storage locations saved and applied.");
       setTrashStatus((current) => (current ? { ...current, path: locations.trash ?? current.path } : current));
     } catch (error) {
@@ -435,9 +624,13 @@ export function SettingsWorkspace({
     setTrashLoading(true);
     setTrashMessage("");
     try {
-      setTrashStatus(await settingsApi.trashStatus());
+      const status = await settingsApi.trashStatus();
+      setTrashStatus(status);
+      updateSettingsStatusCache({ trashStatus: status });
+      return status;
     } catch (error) {
       setTrashMessage(error instanceof Error ? error.message : String(error));
+      return undefined;
     } finally {
       setTrashLoading(false);
     }
@@ -449,6 +642,7 @@ export function SettingsWorkspace({
     try {
       const result = await settingsApi.clearTrash();
       setTrashStatus(result);
+      updateSettingsStatusCache({ trashStatus: result });
       setTrashMessage(
         language === "zh"
           ? `已彻底删除 ${result.deleted_files ?? 0} 个垃圾箱文件。`
@@ -461,30 +655,35 @@ export function SettingsWorkspace({
     }
   }
 
+  async function refreshAllSettingsStatus() {
+    if (globalRefreshLoading) return;
+    setGlobalRefreshLoading(true);
+    setGlobalRefreshMessage("");
+    const tasks: Array<Promise<unknown>> = [
+      refreshQuotaStatus(),
+      refreshDependencyStatus(),
+      refreshCookieStatus(),
+      refreshHtmlGrabStatus(),
+      refreshWechatPublisherBinding(),
+    ];
+    if (canManageSystemSettings) {
+      tasks.push(refreshXhsAuthStatus(), refreshStorageLocations(), refreshTrashStatus(), refreshDatabaseStatus());
+    }
+    await Promise.allSettled(tasks);
+    updateSettingsStatusCache({}, { markRefreshed: true });
+    setGlobalRefreshMessage(language === "zh" ? "状态已刷新并保存。" : "Status refreshed and saved.");
+    setGlobalRefreshLoading(false);
+  }
+
   useEffect(() => {
+    const cached = readSettingsStatusCache();
+    if (cached) applySettingsStatusCache(cached);
     authApi
       .me()
       .then((context) => {
         setAuthContext(context);
-        const canSeeLocalDiagnostics = context.deploymentMode !== "cloud" || context.user?.role === "admin";
-        refreshCookieStatus();
-        refreshQuotaStatus();
-        refreshDependencyStatus();
-        refreshHtmlGrabStatus();
-        refreshWechatPublisherBinding();
-        if (canSeeLocalDiagnostics) {
-          refreshStorageLocations();
-          refreshTrashStatus();
-          refreshDatabaseStatus();
-        }
       })
-      .catch(() => {
-        refreshCookieStatus();
-        refreshQuotaStatus();
-        refreshDependencyStatus();
-        refreshHtmlGrabStatus();
-        refreshWechatPublisherBinding();
-      });
+      .catch(() => undefined);
   }, []);
 
   const dependencyItems = useMemo(() => Object.entries(dependencyStatus ?? {}), [dependencyStatus]);
@@ -500,14 +699,58 @@ export function SettingsWorkspace({
     [databaseStatus],
   );
   const readyCount = dependencyItems.filter(([, item]) => item.available || item.configured || item.verified).length;
+  const dependencyReadyCount = readyCount + (cookieStatus?.ok ? 1 : 0) + (htmlGrabStatus?.ok ? 1 : 0);
+  const dependencyTotalCount = dependencyItems.length + 2;
   const dependencySummary =
-    dependencyItems.length > 0
+    dependencyTotalCount > 2 || cookieStatus || htmlGrabStatus
       ? language === "zh"
-        ? `${readyCount}/${dependencyItems.length} 项可用`
-        : `${readyCount}/${dependencyItems.length} ready`
+        ? `${dependencyReadyCount}/${dependencyTotalCount} 项可用`
+        : `${dependencyReadyCount}/${dependencyTotalCount} ready`
       : language === "zh"
         ? "查看依赖状态"
         : "Review dependency status";
+  const dependencyHealthItems = [
+    {
+      key: "core",
+      label: language === "zh" ? "核心工具" : "Core tools",
+      ready: dependencyItems.length > 0 && readyCount === dependencyItems.length,
+      detail:
+        dependencyItems.length > 0
+          ? language === "zh"
+            ? `${readyCount}/${dependencyItems.length}`
+            : `${readyCount}/${dependencyItems.length}`
+          : language === "zh"
+            ? "未检查"
+            : "Not checked",
+    },
+    {
+      key: "cookie",
+      label: language === "zh" ? "B 站字幕" : "Bilibili subtitles",
+      ready: Boolean(cookieStatus?.ok),
+      detail: cookieStatus ? (cookieStatus.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed") : language === "zh" ? "未检查" : "Not checked",
+    },
+    {
+      key: "html",
+      label: language === "zh" ? "网页提取" : "Web extraction",
+      ready: Boolean(htmlGrabStatus?.ok),
+      detail: htmlGrabStatus ? (htmlGrabStatus.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed") : language === "zh" ? "未检查" : "Not checked",
+    },
+  ];
+  const lastRefreshedLabel = settingsStatusCache.lastRefreshedAt
+    ? new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(settingsStatusCache.lastRefreshedAt))
+    : "";
+  const globalRefreshHint = globalRefreshMessage || (settingsStatusCache.lastRefreshedAt
+    ? language === "zh"
+      ? `从缓存读取，上次刷新：${lastRefreshedLabel}`
+      : `Loaded from cache. Last refresh: ${lastRefreshedLabel}`
+    : language === "zh"
+      ? "尚未刷新。点击刷新获取当前状态。"
+      : "Not refreshed yet. Click refresh to get the current status.");
 
   return (
     <section className="workspace-layout">
@@ -527,6 +770,26 @@ export function SettingsWorkspace({
             </button>
           </div>
         </PrimaryTaskPanel>
+
+        <section className="content-panel settings-refresh-panel">
+          <div className="settings-refresh-copy">
+            <span>{language === "zh" ? "设置中心状态" : "Settings status"}</span>
+            <strong>
+              {settingsStatusCache.lastRefreshedAt
+                ? language === "zh"
+                  ? "已保存最近一次检查结果"
+                  : "Latest check is cached"
+                : language === "zh"
+                  ? "等待手动刷新"
+                  : "Waiting for manual refresh"}
+            </strong>
+            <p>{globalRefreshHint}</p>
+          </div>
+          <button className="primary-cta" type="button" onClick={refreshAllSettingsStatus} disabled={globalRefreshLoading}>
+            <strong>{globalRefreshLoading ? (language === "zh" ? "刷新中..." : "Refreshing...") : language === "zh" ? "刷新全部状态" : "Refresh all status"}</strong>
+            <RefreshCw size={17} className={globalRefreshLoading ? "spin-icon" : undefined} />
+          </button>
+        </section>
 
         <section className="content-panel settings-grid">
           <div className="style-settings-card">
@@ -573,98 +836,46 @@ export function SettingsWorkspace({
             </div>
           </div>
 
-          <div className="settings-action-card">
-            <div>
-              <h2>{t("settings.api")}</h2>
+          {canManageSystemSettings ? (
+            <div className="settings-action-card">
+              <div>
+                <h2>{t("settings.api")}</h2>
+              </div>
+              <button className="secondary-button" type="button" onClick={() => setApiModalOpen(true)}>
+                <Plug size={16} />
+                {language === "zh" ? "配置 API" : "Configure API"}
+              </button>
             </div>
-            <button className="secondary-button" type="button" onClick={() => setApiModalOpen(true)}>
-              <Plug size={16} />
-              {language === "zh" ? "配置 API" : "Configure API"}
-            </button>
-          </div>
+          ) : null}
 
-          <div className="wechat-publisher-card">
-            <div className="dependency-check-title">
-              <KeyRound size={17} />
-              <h2>{language === "zh" ? "公众号发布绑定" : "WeChat publishing"}</h2>
-              <StatusBadge tone={wechatPublisherStatus?.configured ? "done" : "error"}>
-                {wechatPublisherStatus?.configured ? (language === "zh" ? "已绑定" : "Bound") : language === "zh" ? "未绑定" : "Not bound"}
-              </StatusBadge>
+          <div className="settings-action-card creator-account-entry">
+            <div>
+              <h2>{language === "zh" ? "创作者账号" : "Creator accounts"}</h2>
+              <p className="hint">
+                {language === "zh"
+                  ? `公众号：${wechatPublisherStatus?.configured ? "已绑定" : "未绑定"}；小红书：${xhsAuthStatus?.logged_in ? "已登录" : "未登录"}`
+                  : `WeChat: ${wechatPublisherStatus?.configured ? "bound" : "not bound"}; XHS: ${xhsAuthStatus?.logged_in ? "logged in" : "not logged in"}`}
+              </p>
             </div>
-            <p className="hint">
-              {language === "zh"
-                ? `当前用户：${wechatPublisherStatus?.username || authContext?.user?.username || "-"}；发布会进入该用户绑定公众号的草稿箱。`
-                : `Current user: ${wechatPublisherStatus?.username || authContext?.user?.username || "-"}; drafts go to this user's bound WeChat account.`}
-            </p>
-            <div className="wechat-publisher-form">
-              <label>
-                <span>{language === "zh" ? "公众号名称" : "Account name"}</span>
-                <input
-                  value={wechatPublisherForm.accountName}
-                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, accountName: event.target.value }))}
-                  placeholder={language === "zh" ? "例如：Bobo 的公众号" : "Example: Bobo's account"}
-                  autoComplete="off"
-                  name="wechat-publisher-account-name"
-                />
-              </label>
-              <label>
-                <span>AppID</span>
-                <input
-                  value={wechatPublisherForm.appid}
-                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, appid: event.target.value }))}
-                  placeholder="wx..."
-                  autoComplete="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  name="wechat-publisher-appid"
-                />
-              </label>
-              <label>
-                <span>AppSecret</span>
-                <input
-                  type="password"
-                  value={wechatPublisherForm.appsecret}
-                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, appsecret: event.target.value }))}
-                  placeholder={wechatPublisherStatus?.configured ? (language === "zh" ? "留空表示不修改" : "Leave blank to keep current secret") : ""}
-                  autoComplete="new-password"
-                  name="wechat-publisher-appsecret-new"
-                />
-              </label>
-              <label>
-                <span>{language === "zh" ? "默认作者" : "Default author"}</span>
-                <input
-                  value={wechatPublisherForm.author}
-                  onChange={(event) => setWechatPublisherForm((current) => ({ ...current, author: event.target.value }))}
-                  autoComplete="off"
-                  name="wechat-publisher-author"
-                />
-              </label>
-            </div>
-            <div className="wechat-publisher-meta">
-              <span>Token: {wechatPublisherStatus?.token_cached ? (language === "zh" ? "已缓存" : "cached") : language === "zh" ? "未缓存" : "not cached"}</span>
-              {wechatPublisherStatus?.token_updated_at ? <span>{wechatPublisherStatus.token_updated_at}</span> : null}
-            </div>
-            {wechatPublisherMessage ? <p className={isErrorMessage(wechatPublisherMessage) ? "inline-error" : "hint"}>{wechatPublisherMessage}</p> : null}
-            <div className="dependency-actions">
-              <button className="secondary-button" type="button" onClick={refreshWechatPublisherBinding} disabled={wechatPublisherLoading}>
-                <RefreshCw size={16} />
-                {language === "zh" ? "刷新" : "Refresh"}
-              </button>
-              <button className="secondary-button" type="button" onClick={saveWechatPublisherBinding} disabled={wechatPublisherLoading || !wechatPublisherForm.appid.trim()}>
-                <Save size={16} />
-                {language === "zh" ? "保存绑定" : "Save binding"}
-              </button>
-              <button className="secondary-button" type="button" onClick={refreshWechatPublisherToken} disabled={wechatPublisherLoading || !wechatPublisherStatus?.configured}>
-                <CheckCircle2 size={16} />
-                {language === "zh" ? "检测 Token" : "Check token"}
-              </button>
-            </div>
+            <button className="secondary-button" type="button" onClick={() => setCreatorAccountsModalOpen(true)}>
+              <KeyRound size={16} />
+              {language === "zh" ? "管理账号" : "Manage accounts"}
+            </button>
           </div>
 
           <div className="settings-action-card">
             <div>
               <h2>{t("settings.dependencies")}</h2>
               <p className="hint">{dependencyMessage || dependencySummary}</p>
+              <div className="dependency-health-list">
+                {dependencyHealthItems.map((item) => (
+                  <span key={item.key} className={item.ready ? "dependency-health-pill ready" : "dependency-health-pill"}>
+                    <CheckCircle2 size={14} />
+                    <strong>{item.label}</strong>
+                    <em>{item.detail}</em>
+                  </span>
+                ))}
+              </div>
             </div>
             <button className="secondary-button" type="button" onClick={() => setDependencyModalOpen(true)}>
               <CheckCircle2 size={16} />
@@ -705,7 +916,7 @@ export function SettingsWorkspace({
             ) : null}
           </div>
 
-          {localDiagnosticsVisible ? (
+          {canManageSystemSettings ? (
             <>
               <div className="settings-action-card">
                 <div>
@@ -722,98 +933,19 @@ export function SettingsWorkspace({
                 </button>
               </div>
 
-              <div className="database-settings-card">
-                <div className="dependency-check-title">
-                  <Database size={17} />
-                  <h2>{language === "zh" ? "数据管理" : "Data management"}</h2>
-                  <StatusBadge tone={databaseStatus?.ok ? "done" : "error"}>
-                    {databaseStatus?.ok ? (language === "zh" ? "连接正常" : "Connected") : language === "zh" ? "需检查" : "Check"}
-                  </StatusBadge>
-                </div>
-                <div className="database-status-grid">
-                  <DatabaseMetric label={language === "zh" ? "数据库" : "Database"} value={databaseStatus?.backend ?? "unknown"} />
-                  <DatabaseMetric label="Schema" value={databaseStatus?.schema_version || "pending"} />
-                  <DatabaseMetric
-                    label="MySQL DSN"
-                    value={
-                      databaseStatus?.mysql_configured
-                        ? language === "zh"
-                          ? "已配置"
-                          : "Configured"
-                        : language === "zh"
-                          ? "未配置"
-                          : "Not set"
-                    }
-                  />
-                  <DatabaseMetric label={language === "zh" ? "重复 Hash" : "Duplicate hashes"} value={String(duplicateHashCount)} />
-                </div>
-                {databaseStatus?.sqlite_path ? <small className="dependency-path">{databaseStatus.sqlite_path}</small> : null}
-                {databaseStatus?.storage_root ? <small className="dependency-path">{databaseStatus.storage_root}</small> : null}
-                {databaseMessage || databaseStatus?.error ? (
-                  <p className="inline-error">{databaseMessage || databaseStatus?.error}</p>
-                ) : (
+              <div className="settings-action-card local-data-entry">
+                <div>
+                  <h2>{language === "zh" ? "本地数据" : "Local data"}</h2>
                   <p className="hint">
                     {language === "zh"
-                      ? "这里只做只读检查；迁移请在命令行使用 tools/migrate_sqlite_to_mysql.py。"
-                      : "Read-only status only. Run tools/migrate_sqlite_to_mysql.py from the command line for migration."}
+                      ? `数据库：${databaseStatus?.backend ?? "未检查"}；存储：${storageLocations.root ?? "未检查"}`
+                      : `Database: ${databaseStatus?.backend ?? "not checked"}; storage: ${storageLocations.root ?? "not checked"}`}
                   </p>
-                )}
-                {databaseTableItems.length ? (
-                  <div className="database-table-counts">
-                    {databaseTableItems.slice(0, 12).map(([table, count]) => (
-                      <span key={table}>
-                        <strong>{table}</strong>
-                        <em>{count}</em>
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="dependency-actions">
-                  <button className="secondary-button" type="button" onClick={refreshDatabaseStatus} disabled={databaseLoading}>
-                    <RefreshCw size={16} />
-                    {databaseLoading ? (language === "zh" ? "检查中" : "Checking") : language === "zh" ? "只读检查" : "Read-only check"}
-                  </button>
                 </div>
-              </div>
-
-              <div className="storage-settings-card">
-                <div className="dependency-check-title">
-                  <FolderOpen size={17} />
-                  <h2>{t("settings.storage")}</h2>
-                </div>
-                <div className="storage-location-list">
-                  {storageFields.map((field) => (
-                    <label key={field.key} className={field.editable ? "storage-location-row" : "storage-location-row readonly"}>
-                      <span>
-                        <strong>{language === "zh" ? field.zh : field.en}</strong>
-                        <small>{language === "zh" ? field.noteZh : field.noteEn}</small>
-                      </span>
-                      <input
-                        value={storageDraft[field.key] ?? storageLocations[field.key] ?? ""}
-                        readOnly={!field.editable}
-                        onChange={(event) =>
-                          setStorageDraft((current) => ({
-                            ...current,
-                            [field.key]: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                  ))}
-                </div>
-                {storageMessage ? (
-                  <p className={isErrorMessage(storageMessage) ? "inline-error" : "hint"}>{storageMessage}</p>
-                ) : null}
-                <div className="dependency-actions">
-                  <button className="secondary-button" type="button" onClick={refreshStorageLocations} disabled={storageLoading}>
-                    <RefreshCw size={16} />
-                    {language === "zh" ? "刷新位置" : "Refresh"}
-                  </button>
-                  <button className="secondary-button" type="button" onClick={saveStorageLocations} disabled={storageLoading}>
-                    <Save size={16} />
-                    {storageLoading ? (language === "zh" ? "处理中" : "Saving") : language === "zh" ? "保存位置" : "Save paths"}
-                  </button>
-                </div>
+                <button className="secondary-button" type="button" onClick={() => setLocalDataModalOpen(true)}>
+                  <Database size={16} />
+                  {language === "zh" ? "管理数据" : "Manage data"}
+                </button>
               </div>
             </>
           ) : null}
@@ -838,62 +970,9 @@ export function SettingsWorkspace({
             </div>
           </div>
 
-          <div>
-            <h2>{language === "zh" ? "B 站 Cookie" : "Bilibili cookies"}</h2>
-            <div className="dependency-check-row compact">
-              <div className="dependency-check-title">
-                <Cookie size={17} />
-                <strong>{language === "zh" ? "字幕提取登录状态" : "Subtitle login status"}</strong>
-                <StatusBadge tone={cookieStatus?.ok ? "done" : "error"}>
-                  {cookieStatus?.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed"}
-                </StatusBadge>
-              </div>
-              <p className="hint">{cookieStatus?.message}</p>
-              {cookieActionMessage ? <p className="hint">{cookieActionMessage}</p> : null}
-              <div className="dependency-actions">
-                <button className="secondary-button" type="button" onClick={refreshCookieStatus} disabled={cookieLoading}>
-                  <RefreshCw size={16} />
-                  {language === "zh" ? "重新检查" : "Recheck"}
-                </button>
-                {localDiagnosticsVisible ? (
-                  <button className="secondary-button" type="button" onClick={openCookieLogin} disabled={cookieLoading}>
-                    <ExternalLink size={16} />
-                    {language === "zh" ? "登录获取 Cookie" : "Log in"}
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <h2>{language === "zh" ? "HTML 抓取检查" : "HTML grabbing"}</h2>
-            <div className="dependency-check-row compact">
-              <div className="dependency-check-title">
-                <CheckCircle2 size={17} />
-                <strong>{language === "zh" ? "网页原文提取状态" : "Web article extraction status"}</strong>
-                <StatusBadge tone={htmlGrabStatus?.ok ? "done" : "error"}>
-                  {htmlGrabStatus?.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed"}
-                </StatusBadge>
-              </div>
-              <p className="hint">{htmlGrabMessage || htmlGrabStatus?.message}</p>
-              {htmlGrabStatus?.target_url ? <small className="dependency-path">{htmlGrabStatus.target_url}</small> : null}
-              <div className="dependency-actions">
-                <button className="secondary-button" type="button" onClick={refreshHtmlGrabStatus} disabled={htmlGrabLoading}>
-                  <RefreshCw size={16} />
-                  {language === "zh" ? "重新检查" : "Recheck"}
-                </button>
-                {localDiagnosticsVisible ? (
-                  <button className="secondary-button" type="button" onClick={openHtmlGrabAuthorize} disabled={htmlGrabLoading}>
-                    <ExternalLink size={16} />
-                    {language === "zh" ? "打开 Edge 授权页" : "Open Edge session"}
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          </div>
         </section>
 
-        {localDiagnosticsVisible ? (
+        {canViewRuntimeLog ? (
           <section className="content-panel runtime-log-panel">
             <div className="section-heading">
               <h2>{t("settings.runtimeLog")}</h2>
@@ -911,14 +990,16 @@ export function SettingsWorkspace({
                   </article>
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <p className="hint">{t("settings.runtimeLog.empty")}</p>
+            )}
           </section>
         ) : null}
       </div>
 
       {rightRail}
 
-      {apiModalOpen ? <ApiSettingsModal language={language} onClose={() => setApiModalOpen(false)} /> : null}
+      {apiModalOpen && canManageSystemSettings ? <ApiSettingsModal language={language} onClose={() => setApiModalOpen(false)} /> : null}
 
       {dependencyModalOpen ? (
         <DependencyStatusModal
@@ -934,7 +1015,7 @@ export function SettingsWorkspace({
           dependencyMessage={dependencyMessage}
           localDiagnosticsVisible={localDiagnosticsVisible}
           onClose={() => setDependencyModalOpen(false)}
-          onRefreshDependencies={refreshDependencyStatus}
+          onRefreshAllDependencies={refreshAllDependencyStatus}
           onRefreshCookies={refreshCookieStatus}
           onRefreshHtmlGrab={refreshHtmlGrabStatus}
           onOpenCookieLogin={localDiagnosticsVisible ? openCookieLogin : undefined}
@@ -942,7 +1023,51 @@ export function SettingsWorkspace({
         />
       ) : null}
 
-      {trashModalOpen && localDiagnosticsVisible ? (
+      {creatorAccountsModalOpen ? (
+        <CreatorAccountsModal
+          language={language}
+          authContext={authContext}
+          wechatStatus={wechatPublisherStatus}
+          wechatForm={wechatPublisherForm}
+          wechatLoading={wechatPublisherLoading}
+          wechatMessage={wechatPublisherMessage}
+          xhsStatus={xhsAuthStatus}
+          xhsLoading={xhsAuthLoading}
+          xhsMessage={xhsAuthMessage}
+          localDiagnosticsVisible={localDiagnosticsVisible}
+          onClose={() => setCreatorAccountsModalOpen(false)}
+          onWechatFormChange={setWechatPublisherForm}
+          onRefreshWechat={refreshWechatPublisherBinding}
+          onSaveWechat={saveWechatPublisherBinding}
+          onRefreshWechatToken={refreshWechatPublisherToken}
+          onRefreshXhs={refreshXhsAuthStatus}
+          onRequestXhsQrcode={requestXhsQrcode}
+          onWaitXhsLogin={waitXhsLogin}
+          onLogoutXhs={logoutXhsAuth}
+        />
+      ) : null}
+
+      {localDataModalOpen && canManageSystemSettings ? (
+        <LocalDataModal
+          language={language}
+          storageLocations={storageLocations}
+          storageDraft={storageDraft}
+          storageLoading={storageLoading}
+          storageMessage={storageMessage}
+          databaseStatus={databaseStatus}
+          databaseLoading={databaseLoading}
+          databaseMessage={databaseMessage}
+          databaseTableItems={databaseTableItems}
+          duplicateHashCount={duplicateHashCount}
+          onClose={() => setLocalDataModalOpen(false)}
+          onStorageDraftChange={setStorageDraft}
+          onRefreshStorage={refreshStorageLocations}
+          onSaveStorage={saveStorageLocations}
+          onRefreshDatabase={refreshDatabaseStatus}
+        />
+      ) : null}
+
+      {trashModalOpen && canManageSystemSettings ? (
         <TrashModal
           language={language}
           status={trashStatus}
@@ -957,6 +1082,7 @@ export function SettingsWorkspace({
             try {
               const result = await settingsApi.deleteTrashFiles(paths);
               setTrashStatus(result);
+              updateSettingsStatusCache({ trashStatus: result });
               setTrashMessage(
                 language === "zh"
                   ? `已彻底删除 ${result.deleted_files ?? paths.length} 个选中文件。`
@@ -974,6 +1100,7 @@ export function SettingsWorkspace({
             try {
               const result = await settingsApi.restoreTrashFiles(paths);
               setTrashStatus(result);
+              updateSettingsStatusCache({ trashStatus: result });
               setTrashMessage(
                 language === "zh"
                   ? `已恢复 ${result.restored?.length ?? paths.length} 个选中文件。`
@@ -991,6 +1118,346 @@ export function SettingsWorkspace({
   );
 }
 
+function CreatorAccountsModal({
+  language,
+  authContext,
+  wechatStatus,
+  wechatForm,
+  wechatLoading,
+  wechatMessage,
+  xhsStatus,
+  xhsLoading,
+  xhsMessage,
+  localDiagnosticsVisible,
+  onClose,
+  onWechatFormChange,
+  onRefreshWechat,
+  onSaveWechat,
+  onRefreshWechatToken,
+  onRefreshXhs,
+  onRequestXhsQrcode,
+  onWaitXhsLogin,
+  onLogoutXhs,
+}: {
+  language: Language;
+  authContext?: AuthContext;
+  wechatStatus?: WechatPublisherBindingStatus;
+  wechatForm: WechatPublisherFormState;
+  wechatLoading: boolean;
+  wechatMessage: string;
+  xhsStatus?: XhsLoginStatus;
+  xhsLoading: boolean;
+  xhsMessage: string;
+  localDiagnosticsVisible: boolean;
+  onClose: () => void;
+  onWechatFormChange: (form: WechatPublisherFormState | ((current: WechatPublisherFormState) => WechatPublisherFormState)) => void;
+  onRefreshWechat: () => Promise<void>;
+  onSaveWechat: () => Promise<void>;
+  onRefreshWechatToken: () => Promise<void>;
+  onRefreshXhs: () => Promise<void>;
+  onRequestXhsQrcode: () => Promise<void>;
+  onWaitXhsLogin: () => Promise<void>;
+  onLogoutXhs: () => Promise<void>;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel creator-account-modal" role="dialog" aria-modal="true" aria-label={language === "zh" ? "创作者账号" : "Creator accounts"}>
+        <div className="modal-title-row">
+          <div>
+            <span>{language === "zh" ? "设置" : "Settings"}</span>
+            <h2>{language === "zh" ? "创作者账号" : "Creator accounts"}</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label={language === "zh" ? "关闭" : "Close"} onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="creator-account-modal-grid">
+          <section className="wechat-publisher-card">
+            <div className="dependency-check-title">
+              <KeyRound size={17} />
+              <h3>{language === "zh" ? "公众号发布绑定" : "WeChat publishing"}</h3>
+              <StatusBadge tone={wechatStatus?.configured ? "done" : "error"}>
+                {wechatStatus?.configured ? (language === "zh" ? "已绑定" : "Bound") : language === "zh" ? "未绑定" : "Not bound"}
+              </StatusBadge>
+            </div>
+            <p className="hint">
+              {language === "zh"
+                ? `当前用户：${wechatStatus?.username || authContext?.user?.username || "-"}；发布会进入该用户绑定公众号的草稿箱。`
+                : `Current user: ${wechatStatus?.username || authContext?.user?.username || "-"}; drafts go to this user's bound WeChat account.`}
+            </p>
+            <div className="wechat-publisher-form">
+              <label>
+                <span>{language === "zh" ? "公众号名称" : "Account name"}</span>
+                <input
+                  value={wechatForm.accountName}
+                  onChange={(event) => onWechatFormChange((current) => ({ ...current, accountName: event.target.value }))}
+                  placeholder={language === "zh" ? "例如：Bobo 的公众号" : "Example: Bobo's account"}
+                  autoComplete="off"
+                  name="wechat-publisher-account-name"
+                />
+              </label>
+              <label>
+                <span>AppID</span>
+                <input
+                  value={wechatForm.appid}
+                  onChange={(event) => onWechatFormChange((current) => ({ ...current, appid: event.target.value }))}
+                  placeholder="wx..."
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  name="wechat-publisher-appid"
+                />
+              </label>
+              <label>
+                <span>AppSecret</span>
+                <input
+                  type="password"
+                  value={wechatForm.appsecret}
+                  onChange={(event) => onWechatFormChange((current) => ({ ...current, appsecret: event.target.value }))}
+                  placeholder={wechatStatus?.configured ? (language === "zh" ? "留空表示不修改" : "Leave blank to keep current secret") : ""}
+                  autoComplete="new-password"
+                  name="wechat-publisher-appsecret-new"
+                />
+              </label>
+              <label>
+                <span>{language === "zh" ? "默认作者" : "Default author"}</span>
+                <input
+                  value={wechatForm.author}
+                  onChange={(event) => onWechatFormChange((current) => ({ ...current, author: event.target.value }))}
+                  autoComplete="off"
+                  name="wechat-publisher-author"
+                />
+              </label>
+            </div>
+            <div className="wechat-publisher-meta">
+              <span>Token: {wechatStatus?.token_cached ? (language === "zh" ? "已缓存" : "cached") : language === "zh" ? "未缓存" : "not cached"}</span>
+              {wechatStatus?.token_updated_at ? <span>{wechatStatus.token_updated_at}</span> : null}
+            </div>
+            {wechatMessage ? <p className={isErrorMessage(wechatMessage) ? "inline-error" : "hint"}>{wechatMessage}</p> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshWechat} disabled={wechatLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "刷新" : "Refresh"}
+              </button>
+              <button className="secondary-button" type="button" onClick={onSaveWechat} disabled={wechatLoading || !wechatForm.appid.trim()}>
+                <Save size={16} />
+                {language === "zh" ? "保存绑定" : "Save binding"}
+              </button>
+              <button className="secondary-button" type="button" onClick={onRefreshWechatToken} disabled={wechatLoading || !wechatStatus?.configured}>
+                <CheckCircle2 size={16} />
+                {language === "zh" ? "检测 Token" : "Check token"}
+              </button>
+            </div>
+          </section>
+
+          <section className="xhs-auth-card">
+            <div className="dependency-check-title">
+              <KeyRound size={17} />
+              <h3>{language === "zh" ? "小红书账号" : "Xiaohongshu account"}</h3>
+              <StatusBadge tone={xhsStatus?.logged_in ? "done" : "error"}>
+                {xhsStatus?.logged_in ? (language === "zh" ? "已登录" : "Logged in") : language === "zh" ? "未登录" : "Not logged in"}
+              </StatusBadge>
+            </div>
+            <p className="hint">
+              {language === "zh"
+                ? "填入发布页会使用当前小红书网页登录账号。切换账号时先退出当前账号，再扫码登录新账号。"
+                : "Publish-page filling uses the current XHS web session. To switch accounts, log out first, then scan in with the new account."}
+            </p>
+            {xhsMessage ? <p className={isErrorMessage(xhsMessage) ? "inline-error" : "hint"}>{xhsMessage}</p> : null}
+            <div className="wechat-publisher-meta">
+              <span>{language === "zh" ? `会话：${xhsStatus?.logged_in ? "可用" : "未就绪"}` : `Session: ${xhsStatus?.logged_in ? "ready" : "not ready"}`}</span>
+              {xhsStatus?.login_method ? <span>{language === "zh" ? `登录方式：${xhsStatus.login_method}` : `Method: ${xhsStatus.login_method}`}</span> : null}
+              {typeof xhsStatus?.returncode === "number" ? <span>{language === "zh" ? `返回码：${xhsStatus.returncode}` : `Exit: ${xhsStatus.returncode}`}</span> : null}
+            </div>
+            {xhsStatus?.qrcode_image_url ? (
+              <div className="xhs-qrcode-panel xhs-qrcode-panel-modal">
+                <img src={xhsStatus.qrcode_image_url} alt={language === "zh" ? "小红书登录二维码" : "XHS login QR code"} />
+                <div>
+                  <strong>{language === "zh" ? "请使用小红书 App 扫码" : "Scan with the XHS app"}</strong>
+                  {xhsStatus.qr_login_url ? (
+                    <a href={xhsStatus.qr_login_url} target="_blank" rel="noreferrer">
+                      {language === "zh" ? "手机浏览器打开登录链接" : "Open login link on phone"}
+                    </a>
+                  ) : null}
+                  {xhsStatus.qrcode_path ? <small className="dependency-path">{xhsStatus.qrcode_path}</small> : null}
+                </div>
+              </div>
+            ) : null}
+            {!localDiagnosticsVisible ? (
+              <p className="disabled-reason">
+                {language === "zh" ? "云端普通用户不能操作本机小红书登录，请导出 ZIP 后自行上传。" : "Cloud users cannot control local XHS login. Export the ZIP and upload manually."}
+              </p>
+            ) : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshXhs} disabled={xhsLoading || !localDiagnosticsVisible}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "检查登录" : "Check login"}
+              </button>
+              <button className="secondary-button" type="button" onClick={onRequestXhsQrcode} disabled={xhsLoading || !localDiagnosticsVisible || Boolean(xhsStatus?.logged_in)}>
+                <ExternalLink size={16} />
+                {language === "zh" ? "扫码登录" : "QR login"}
+              </button>
+              <button className="secondary-button" type="button" onClick={onWaitXhsLogin} disabled={xhsLoading || !localDiagnosticsVisible || !xhsStatus?.qrcode_image_url}>
+                <CheckCircle2 size={16} />
+                {language === "zh" ? "等待登录完成" : "Wait for login"}
+              </button>
+              <button className="secondary-button danger-button" type="button" onClick={onLogoutXhs} disabled={xhsLoading || !localDiagnosticsVisible || !xhsStatus?.logged_in}>
+                <Trash2 size={16} />
+                {language === "zh" ? "退出当前账号" : "Log out"}
+              </button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function LocalDataModal({
+  language,
+  storageLocations,
+  storageDraft,
+  storageLoading,
+  storageMessage,
+  databaseStatus,
+  databaseLoading,
+  databaseMessage,
+  databaseTableItems,
+  duplicateHashCount,
+  onClose,
+  onStorageDraftChange,
+  onRefreshStorage,
+  onSaveStorage,
+  onRefreshDatabase,
+}: {
+  language: Language;
+  storageLocations: StorageLocations;
+  storageDraft: StorageLocations;
+  storageLoading: boolean;
+  storageMessage: string;
+  databaseStatus?: DatabaseStatus;
+  databaseLoading: boolean;
+  databaseMessage: string;
+  databaseTableItems: [string, number][];
+  duplicateHashCount: number;
+  onClose: () => void;
+  onStorageDraftChange: (draft: StorageLocations | ((current: StorageLocations) => StorageLocations)) => void;
+  onRefreshStorage: () => Promise<void>;
+  onSaveStorage: () => Promise<void>;
+  onRefreshDatabase: () => Promise<void>;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel local-data-modal" role="dialog" aria-modal="true" aria-label={language === "zh" ? "本地数据" : "Local data"}>
+        <div className="modal-title-row">
+          <div>
+            <span>{language === "zh" ? "设置" : "Settings"}</span>
+            <h2>{language === "zh" ? "本地数据" : "Local data"}</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label={language === "zh" ? "关闭" : "Close"} onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="local-data-modal-grid">
+          <section className="database-settings-card">
+            <div className="dependency-check-title">
+              <Database size={17} />
+              <h3>{language === "zh" ? "数据管理" : "Data management"}</h3>
+              <StatusBadge tone={databaseStatus?.ok ? "done" : "error"}>
+                {databaseStatus?.ok ? (language === "zh" ? "连接正常" : "Connected") : language === "zh" ? "需检查" : "Check"}
+              </StatusBadge>
+            </div>
+            <div className="database-status-grid">
+              <DatabaseMetric label={language === "zh" ? "数据库" : "Database"} value={databaseStatus?.backend ?? "unknown"} />
+              <DatabaseMetric label="Schema" value={databaseStatus?.schema_version || "pending"} />
+              <DatabaseMetric
+                label="MySQL DSN"
+                value={
+                  databaseStatus?.mysql_configured
+                    ? language === "zh"
+                      ? "已配置"
+                      : "Configured"
+                    : language === "zh"
+                      ? "未配置"
+                      : "Not set"
+                }
+              />
+              <DatabaseMetric label={language === "zh" ? "重复 Hash" : "Duplicate hashes"} value={String(duplicateHashCount)} />
+            </div>
+            {databaseStatus?.sqlite_path ? <small className="dependency-path">{databaseStatus.sqlite_path}</small> : null}
+            {databaseStatus?.storage_root ? <small className="dependency-path">{databaseStatus.storage_root}</small> : null}
+            {databaseMessage || databaseStatus?.error ? (
+              <p className="inline-error">{databaseMessage || databaseStatus?.error}</p>
+            ) : (
+              <p className="hint">
+                {language === "zh"
+                  ? "这里只做只读检查；迁移请在命令行使用 tools/migrate_sqlite_to_mysql.py。"
+                  : "Read-only status only. Run tools/migrate_sqlite_to_mysql.py from the command line for migration."}
+              </p>
+            )}
+            {databaseTableItems.length ? (
+              <div className="database-table-counts">
+                {databaseTableItems.slice(0, 12).map(([table, count]) => (
+                  <span key={table}>
+                    <strong>{table}</strong>
+                    <em>{count}</em>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshDatabase} disabled={databaseLoading}>
+                <RefreshCw size={16} />
+                {databaseLoading ? (language === "zh" ? "检查中" : "Checking") : language === "zh" ? "只读检查" : "Read-only check"}
+              </button>
+            </div>
+          </section>
+
+          <section className="storage-settings-card">
+            <div className="dependency-check-title">
+              <FolderOpen size={17} />
+              <h3>{language === "zh" ? "本地存储" : "Local storage"}</h3>
+            </div>
+            <div className="storage-location-list">
+              {storageFields.map((field) => (
+                <label key={field.key} className={field.editable ? "storage-location-row" : "storage-location-row readonly"}>
+                  <span>
+                    <strong>{language === "zh" ? field.zh : field.en}</strong>
+                    <small>{language === "zh" ? field.noteZh : field.noteEn}</small>
+                  </span>
+                  <input
+                    value={storageDraft[field.key] ?? storageLocations[field.key] ?? ""}
+                    readOnly={!field.editable}
+                    onChange={(event) =>
+                      onStorageDraftChange((current) => ({
+                        ...current,
+                        [field.key]: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+            {storageMessage ? <p className={isErrorMessage(storageMessage) ? "inline-error" : "hint"}>{storageMessage}</p> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshStorage} disabled={storageLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "刷新位置" : "Refresh"}
+              </button>
+              <button className="secondary-button" type="button" onClick={onSaveStorage} disabled={storageLoading}>
+                <Save size={16} />
+                {storageLoading ? (language === "zh" ? "处理中" : "Saving") : language === "zh" ? "保存位置" : "Save paths"}
+              </button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function DependencyStatusModal({
   language,
   cookieStatus,
@@ -1004,7 +1471,7 @@ function DependencyStatusModal({
   dependencyMessage,
   localDiagnosticsVisible,
   onClose,
-  onRefreshDependencies,
+  onRefreshAllDependencies,
   onRefreshCookies,
   onRefreshHtmlGrab,
   onOpenCookieLogin,
@@ -1022,13 +1489,18 @@ function DependencyStatusModal({
   dependencyMessage: string;
   localDiagnosticsVisible: boolean;
   onClose: () => void;
-  onRefreshDependencies: () => Promise<void>;
+  onRefreshAllDependencies: () => Promise<void>;
   onRefreshCookies: () => Promise<void>;
   onRefreshHtmlGrab: () => Promise<void>;
   onOpenCookieLogin?: () => Promise<void>;
   onOpenHtmlGrabAuthorize?: () => Promise<void>;
 }) {
   const items = Object.entries(dependencyStatus ?? {});
+  const readyCount = items.filter(([, item]) => item.available || item.configured || item.verified).length;
+  const totalCount = items.length + 2;
+  const availableCount = readyCount + (cookieStatus?.ok ? 1 : 0) + (htmlGrabStatus?.ok ? 1 : 0);
+  const issueCount = Math.max(0, totalCount - availableCount);
+  const isRefreshing = dependencyLoading || cookieLoading || htmlGrabLoading;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -1043,28 +1515,34 @@ function DependencyStatusModal({
           </button>
         </div>
 
+        <div className="dependency-modal-summary">
+          <span>
+            <strong>{availableCount}</strong>
+            {language === "zh" ? "可用" : "ready"}
+          </span>
+          <span>
+            <strong>{issueCount}</strong>
+            {language === "zh" ? "需处理" : "needs setup"}
+          </span>
+          <span>
+            <strong>{totalCount}</strong>
+            {language === "zh" ? "总项" : "total"}
+          </span>
+        </div>
+
         <div className="dependency-actions">
-          <button className="secondary-button" type="button" onClick={onRefreshDependencies} disabled={dependencyLoading}>
+          <button className="secondary-button" type="button" onClick={onRefreshAllDependencies} disabled={isRefreshing}>
             <RefreshCw size={16} />
-            {language === "zh" ? "刷新依赖" : "Refresh dependencies"}
+            {isRefreshing ? (language === "zh" ? "检查中" : "Checking") : language === "zh" ? "刷新全部" : "Refresh all"}
           </button>
-          <button className="secondary-button" type="button" onClick={onRefreshCookies} disabled={cookieLoading}>
-            <RefreshCw size={16} />
-            {language === "zh" ? "刷新 Cookie" : "Refresh cookies"}
-          </button>
-          {onOpenCookieLogin ? (
-            <button className="secondary-button" type="button" onClick={onOpenCookieLogin} disabled={cookieLoading}>
-              <ExternalLink size={16} />
-              {language === "zh" ? "登录获取 Cookie" : "Log in"}
-            </button>
-          ) : null}
         </div>
 
         <div className="dependency-summary-list">
+          <div className="dependency-group-label">{language === "zh" ? "HTML 抓取" : "HTML grabbing"}</div>
           <div className="dependency-check-row compact">
             <div className="dependency-check-title">
               <CheckCircle2 size={17} />
-              <strong>{language === "zh" ? "HTML 抓取检查" : "HTML grabbing"}</strong>
+              <strong>{language === "zh" ? "网页原文提取状态" : "Web article extraction status"}</strong>
               <StatusBadge tone={htmlGrabStatus?.ok ? "done" : "error"}>
                 {htmlGrabStatus?.ok ? (language === "zh" ? "可用" : "Ready") : language === "zh" ? "需处理" : "Action needed"}
               </StatusBadge>
@@ -1093,6 +1571,7 @@ function DependencyStatusModal({
             ))}
           </div>
 
+          <div className="dependency-group-label">{language === "zh" ? "B 站字幕" : "Bilibili subtitles"}</div>
           <div className="dependency-check-row compact">
             <div className="dependency-check-title">
               <Cookie size={17} />
@@ -1117,11 +1596,27 @@ function DependencyStatusModal({
               </p>
             ) : null}
             {cookieActionMessage ? <p className="hint">{cookieActionMessage}</p> : null}
+            <div className="dependency-actions">
+              <button className="secondary-button" type="button" onClick={onRefreshCookies} disabled={cookieLoading}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "重新检查 Cookie" : "Refresh cookies"}
+              </button>
+              {onOpenCookieLogin ? (
+                <button className="secondary-button" type="button" onClick={onOpenCookieLogin} disabled={cookieLoading}>
+                  <ExternalLink size={16} />
+                  {language === "zh" ? "登录获取 Cookie" : "Log in"}
+                </button>
+              ) : null}
+            </div>
           </div>
 
+          <div className="dependency-group-label">{language === "zh" ? "核心依赖" : "Core dependencies"}</div>
           {dependencyMessage ? <p className="inline-error">{dependencyMessage}</p> : null}
           {!dependencyMessage && !items.length && dependencyLoading ? (
             <p className="hint">{language === "zh" ? "正在读取依赖状态..." : "Loading dependency status..."}</p>
+          ) : null}
+          {!dependencyMessage && !items.length && !dependencyLoading ? (
+            <p className="hint">{language === "zh" ? "尚未读取核心依赖状态，点击刷新全部。" : "Core dependency status has not been loaded. Refresh all to check."}</p>
           ) : null}
           {items.map(([key, item]) => (
             <DependencyItemCard key={key} language={language} name={key} item={item} />
@@ -1306,7 +1801,6 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   const [imagePayload, setImagePayload] = useState<ImageApiSettingsPayload>({});
   const [asrPayload, setAsrPayload] = useState<AsrSettingsPayload>({});
   const [form, setForm] = useState<ApiFormState>(emptyForm);
-  const [asrForm, setAsrForm] = useState<AsrFormState>(emptyAsrForm);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -1314,11 +1808,16 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   const [testResult, setTestResult] = useState<ApiTestResult>();
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
 
-  const items = mode === "chat" ? chatPayload.items ?? [] : imagePayload.items ?? [];
-  const templates = mode === "chat" ? chatPayload.templates ?? [] : mode === "image" ? imagePayload.templates ?? [] : [];
-  const activeId = mode === "chat" ? chatPayload.active_id : imagePayload.active_id;
+  const items = mode === "chat" ? chatPayload.items ?? [] : mode === "image" ? imagePayload.items ?? [] : asrPayload.items ?? [];
+  const templates = mode === "chat" ? chatPayload.templates ?? [] : mode === "image" ? imagePayload.templates ?? [] : asrPayload.templates ?? [];
+  const activeId = mode === "chat" ? chatPayload.active_id : mode === "image" ? imagePayload.active_id : asrPayload.active_id;
   const selectedItem = useMemo(() => items.find((item) => item.id === form.id), [form.id, items]);
-  const isCreating = mode !== "audio" && !form.id;
+  const isZhipuTextSetting =
+    mode === "chat" &&
+    (form.provider.trim().toLowerCase() === "zhipu" || form.base_url.toLowerCase().includes("bigmodel.cn"));
+  const modelSuggestions =
+    isZhipuTextSetting && mode === "chat" ? chatPayload.model_suggestions?.zhipu ?? [] : [];
+  const isCreating = !form.id;
   const formModeTitle = isCreating
     ? language === "zh"
       ? "\u65b0\u5efa\u914d\u7f6e"
@@ -1344,7 +1843,6 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
         setImagePayload(image);
         setAsrPayload(asr);
         setForm(formFromItem(chat.items?.find((item) => item.id === chat.active_id) ?? chat.items?.[0], "chat"));
-        setAsrForm(formFromAsrItem(asr.item));
       })
       .catch((error) => {
         if (!alive) return;
@@ -1362,11 +1860,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setMessage("");
     setTestResult(undefined);
     setSelectedTemplateId("");
-    if (mode === "audio") {
-      setAsrForm(formFromAsrItem(asrPayload.item));
-      return;
-    }
-    const payload = mode === "chat" ? chatPayload : imagePayload;
+    const payload = mode === "chat" ? chatPayload : mode === "image" ? imagePayload : asrPayload;
     setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], mode));
   }, [asrPayload.item, chatPayload, imagePayload, mode]);
 
@@ -1374,7 +1868,8 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     if (nextMode === "audio") {
       const payload = await settingsApi.asrSettings();
       setAsrPayload(payload);
-      setAsrForm(formFromAsrItem(payload.item));
+      const selected = payload.items?.find((item) => item.id === selectedId) ?? payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0];
+      setForm(formFromItem(selected, "audio"));
       return payload;
     }
     const payload = nextMode === "chat" ? await settingsApi.apiSettings() : await settingsApi.imageApiSettings();
@@ -1390,10 +1885,13 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setMessage("");
     try {
       if (mode === "audio") {
-        const payload = await settingsApi.saveAsrSetting(toAsrInput(asrForm));
+        const payload = await settingsApi.saveAsrSetting(toAsrInput(form));
+        const saved = payload.item ?? payload.items?.find((item) => item.id === payload.active_id);
+        const savedId = saved?.id;
         setAsrPayload(payload);
-        setAsrForm(formFromAsrItem(payload.item));
-        setMessage(payload.message || (language === "zh" ? "\u97f3\u9891 API \u914d\u7f6e\u5df2\u4fdd\u5b58\u3002" : "Audio API setting saved."));
+        setForm(formFromItem(saved, "audio"));
+        await refresh("audio", savedId);
+        setMessage(payload.message || (language === "zh" ? "\u97f3\u9891 API \u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u5217\u8868\u5df2\u66f4\u65b0\u3002" : "Audio API setting saved and list refreshed."));
         return;
       }
       const payload =
@@ -1420,17 +1918,18 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setTestResult(undefined);
     try {
       if (mode === "audio") {
-        const payload = await settingsApi.testAsrSetting(toAsrInput(asrForm));
+        const payload = await settingsApi.testAsrSetting(toAsrInput(form));
         setAsrPayload((current) => ({ ...current, ...payload }));
         const result: ApiTestResult = {
           ok: payload.ok ?? false,
           message: payload.message ?? payload.error ?? "",
-          provider: payload.item?.provider ?? asrForm.provider,
-          model: payload.item?.model ?? asrForm.model,
+          provider: payload.item?.provider ?? form.provider,
+          model: payload.item?.model ?? form.model,
           last_test_ok: payload.item?.last_test_ok ?? payload.ok ?? false,
           last_test_at: payload.item?.last_test_at ?? "",
         };
         setTestResult(result);
+        if (payload.item?.id) await refresh("audio", payload.item.id);
         setMessage(payload.message || payload.error || (payload.ok ? (language === "zh" ? "\u6d4b\u8bd5\u901a\u8fc7\u3002" : "Test passed.") : ""));
         return;
       }
@@ -1455,7 +1954,7 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
     setForm(defaultForm(mode));
   }
 
-  function selectExistingSetting(item: ApiSettingItem | ImageApiSettingItem) {
+  function selectExistingSetting(item: ApiSettingItem | ImageApiSettingItem | AsrSettingItem) {
     setMessage("");
     setTestResult(undefined);
     setSelectedTemplateId("");
@@ -1475,9 +1974,15 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   async function activate(id: string) {
     setMessage("");
     try {
-      const payload = mode === "chat" ? await settingsApi.setActiveApiSetting(id) : await settingsApi.setActiveImageApiSetting(id);
+      const payload =
+        mode === "chat"
+          ? await settingsApi.setActiveApiSetting(id)
+          : mode === "image"
+            ? await settingsApi.setActiveImageApiSetting(id)
+            : await settingsApi.setActiveAsrSetting(id);
       if (mode === "chat") setChatPayload(payload);
-      else setImagePayload(payload);
+      else if (mode === "image") setImagePayload(payload);
+      else setAsrPayload(payload);
       setMessage(language === "zh" ? "已启用该配置。" : "Setting activated.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -1487,9 +1992,15 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
   async function remove(id: string) {
     setMessage("");
     try {
-      const payload = mode === "chat" ? await settingsApi.deleteApiSetting(id) : await settingsApi.deleteImageApiSetting(id);
+      const payload =
+        mode === "chat"
+          ? await settingsApi.deleteApiSetting(id)
+          : mode === "image"
+            ? await settingsApi.deleteImageApiSetting(id)
+            : await settingsApi.deleteAsrSetting(id);
       if (mode === "chat") setChatPayload(payload);
-      else setImagePayload(payload);
+      else if (mode === "image") setImagePayload(payload);
+      else setAsrPayload(payload);
       setForm(formFromItem(payload.items?.find((item) => item.id === payload.active_id) ?? payload.items?.[0], mode));
       setMessage(language === "zh" ? "配置已删除。" : "Setting deleted.");
     } catch (error) {
@@ -1499,12 +2010,15 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
 
   function applyTemplate(template: ApiSettingTemplate | AsrSettingTemplate) {
     if (mode === "audio") {
-      setAsrForm((current) => ({
+      setForm((current) => ({
         ...current,
+        id: undefined,
+        name: template.name,
         provider: template.provider,
         base_url: template.base_url,
         model: template.model,
         api_key: "",
+        make_active: true,
       }));
       return;
     }
@@ -1563,29 +2077,23 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
           <div className="api-settings-grid">
             <aside className="api-settings-list">
               <div className="section-heading">
-                <h3>{language === "zh" ? "当前音频配置" : "Current audio setting"}</h3>
+                <h3>{language === "zh" ? "已有配置" : "Saved settings"}</h3>
+                <button className="secondary-button" type="button" onClick={() => startNewSetting()}>
+                  {language === "zh" ? "新建" : "New"}
+                </button>
               </div>
               <article className="api-setting-row selected">
-                <button type="button">
-                  <strong>{asrPayload.item?.provider || asrForm.provider || (language === "zh" ? "未配置" : "Not configured")}</strong>
-                  <span>{asrPayload.item?.model || asrForm.model || (language === "zh" ? "未选择模型" : "No model selected")}</span>
-                  <small>{asrPayload.item?.api_key_masked || (language === "zh" ? "未显示 Key" : "Key hidden")}</small>
+                <button type="button" onClick={() => items[0] && selectExistingSetting(items.find((item) => item.id === activeId) ?? items[0])}>
+                  <strong>{items.find((item) => item.id === activeId)?.name || form.name || asrPayload.item?.name || (language === "zh" ? "未配置" : "Not configured")}</strong>
+                  <span>{items.find((item) => item.id === activeId)?.model || form.model || asrPayload.item?.model || (language === "zh" ? "未选择模型" : "No model selected")}</span>
+                  <small>{items.find((item) => item.id === activeId)?.api_key_masked || asrPayload.item?.api_key_masked || (language === "zh" ? "未显示 Key" : "Key hidden")}</small>
                 </button>
                 <div className="api-row-actions">
-                  <StatusBadge tone={asrPayload.item?.configured ? "done" : "error"}>
-                    {asrPayload.item?.configured ? (language === "zh" ? "已配置" : "Configured") : language === "zh" ? "待配置" : "Setup needed"}
+                  <StatusBadge tone={(items.find((item) => item.id === activeId) ?? asrPayload.item)?.configured ? "done" : "error"}>
+                    {(items.find((item) => item.id === activeId) ?? asrPayload.item)?.configured ? (language === "zh" ? "启用中" : "Active") : language === "zh" ? "待配置" : "Setup needed"}
                   </StatusBadge>
                 </div>
               </article>
-              <div className="api-template-list">
-                <h3>{language === "zh" ? "模板" : "Templates"}</h3>
-                {(asrPayload.templates ?? []).map((template) => (
-                  <button key={template.id} className="api-template-button" type="button" onClick={() => applyTemplate(template)}>
-                    <strong>{template.name}</strong>
-                    <span>{template.base_url}</span>
-                  </button>
-                ))}
-              </div>
             </aside>
 
             <form className="api-settings-form" onSubmit={(event) => event.preventDefault()}>
@@ -1593,34 +2101,74 @@ function ApiSettingsModal({ language, onClose }: { language: Language; onClose: 
                 <h3>{language === "zh" ? "编辑音频 ASR" : "Edit audio ASR"}</h3>
               </div>
               <div className="api-form-grid compact-form-grid">
+                {isCreating ? (
+                  <label className="wide-field api-template-select">
+                    <span>{language === "zh" ? "\u65b0\u5efa\u76ee\u6807" : "New setting target"}</span>
+                    <select value={selectedTemplateId} onChange={(event) => chooseTemplate(event.target.value)}>
+                      <option value="">{language === "zh" ? "\u81ea\u5b9a\u4e49\u914d\u7f6e" : "Custom setting"}</option>
+                      {templates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name} - {template.base_url}
+                        </option>
+                      ))}
+                    </select>
+                    <small className="field-hint">
+                      {language === "zh"
+                        ? "\u9009\u62e9\u76ee\u6807\u540e\u4f1a\u81ea\u52a8\u9884\u586b\u670d\u52a1\u5546\u3001Base URL \u548c\u6a21\u578b\uff0cAPI Key \u4ecd\u9700\u81ea\u5df1\u586b\u5199\u3002"
+                        : "Choosing a target pre-fills provider, Base URL, and model. You still need to enter your API key."}
+                    </small>
+                  </label>
+                ) : null}
+                <label>
+                  <span>{language === "zh" ? "配置名称" : "Name"}</span>
+                  <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+                </label>
                 <label>
                   <span>{language === "zh" ? "服务商" : "Provider"}</span>
-                  <input value={asrForm.provider} onChange={(event) => setAsrForm({ ...asrForm, provider: event.target.value })} />
+                  <input value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })} />
                 </label>
                 <label>
                   <span>{language === "zh" ? "模型" : "Model"}</span>
-                  <input value={asrForm.model} onChange={(event) => setAsrForm({ ...asrForm, model: event.target.value })} />
+                  <input
+                    value={form.model}
+                    onChange={(event) => setForm({ ...form, model: event.target.value })}
+                    list={modelSuggestions.length ? "zhipu-model-suggestions" : undefined}
+                  />
+                  {modelSuggestions.length ? (
+                    <>
+                      <datalist id="zhipu-model-suggestions">
+                        {modelSuggestions.map((model) => (
+                          <option key={model} value={model} />
+                        ))}
+                      </datalist>
+                      <small className="field-hint">
+                        {language === "zh"
+                          ? "可选择常用智谱模型，也可以直接输入控制台支持的其他模型名。"
+                          : "Choose a common Zhipu model or type any model name supported by your console."}
+                      </small>
+                    </>
+                  ) : null}
                 </label>
                 <label className="wide-field">
                   <span>Base URL</span>
                   <input
-                    value={asrForm.base_url}
-                    onChange={(event) => setAsrForm({ ...asrForm, base_url: event.target.value })}
+                    value={form.base_url}
+                    onChange={(event) => setForm({ ...form, base_url: event.target.value })}
                     placeholder="https://api.example.com/v1"
                   />
                 </label>
                 <label>
                   <span>API Key</span>
                   <input
-                    value={asrForm.api_key}
-                    onChange={(event) => setAsrForm({ ...asrForm, api_key: event.target.value })}
+                    value={form.api_key}
+                    onChange={(event) => setForm({ ...form, api_key: event.target.value })}
                     placeholder={asrPayload.item?.api_key_masked || "sk-..."}
                     type="password"
                   />
                 </label>
                 <label>
                   <span>{language === "zh" ? "超时秒数" : "Timeout seconds"}</span>
-                  <input value={asrForm.timeout} onChange={(event) => setAsrForm({ ...asrForm, timeout: event.target.value })} inputMode="decimal" />
+                  <input value={form.timeout} onChange={(event) => setForm({ ...form, timeout: event.target.value })} inputMode="decimal" />
                 </label>
               </div>
 
@@ -1916,8 +2464,9 @@ function DatabaseMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formFromItem(item: ApiSettingItem | ImageApiSettingItem | undefined, mode: Exclude<ApiMode, "audio">): ApiFormState {
+function formFromItem(item: ApiSettingItem | ImageApiSettingItem | AsrSettingItem | undefined, mode: ApiMode): ApiFormState {
   if (!item) return defaultForm(mode);
+  const api = item as ApiSettingItem;
   const image = item as ImageApiSettingItem;
   return {
     id: item.id,
@@ -1928,7 +2477,7 @@ function formFromItem(item: ApiSettingItem | ImageApiSettingItem | undefined, mo
     model: item.model ?? "",
     api_key: "",
     timeout: String(item.timeout ?? (mode === "image" ? 120 : 60)),
-    max_retries: String(item.max_retries ?? 2),
+    max_retries: String(api.max_retries ?? 2),
     size: image.size ?? "1024x1024",
     quality: image.quality ?? "auto",
     aspect_ratio: image.aspect_ratio ?? inferAspectRatio(image.size),
@@ -1938,18 +2487,7 @@ function formFromItem(item: ApiSettingItem | ImageApiSettingItem | undefined, mo
   };
 }
 
-function formFromAsrItem(item?: AsrSettingItem): AsrFormState {
-  if (!item) return { ...emptyAsrForm };
-  return {
-    provider: item.provider ?? "compatible",
-    base_url: item.base_url ?? "",
-    model: item.model ?? "",
-    api_key: "",
-    timeout: String(item.timeout ?? 60),
-  };
-}
-
-function defaultForm(mode: Exclude<ApiMode, "audio">): ApiFormState {
+function defaultForm(mode: ApiMode): ApiFormState {
   return {
     ...emptyForm,
     timeout: mode === "image" ? "120" : "60",
@@ -1976,6 +2514,7 @@ function toImageInput(form: ApiFormState): ImageApiSettingInput {
     id: form.id,
     name: form.name.trim(),
     provider: form.provider.trim() || "compatible",
+    protocol: form.protocol || "openai_compatible",
     base_url: form.base_url.trim(),
     model: form.model.trim(),
     api_key: form.api_key.trim(),
@@ -1988,13 +2527,16 @@ function toImageInput(form: ApiFormState): ImageApiSettingInput {
   };
 }
 
-function toAsrInput(form: AsrFormState): AsrSettingInput {
+function toAsrInput(form: ApiFormState): AsrSettingInput {
   return {
+    id: form.id,
+    name: form.name.trim(),
     provider: form.provider.trim() || "compatible",
     base_url: form.base_url.trim(),
     model: form.model.trim(),
     api_key: form.api_key.trim(),
     timeout: numberOrUndefined(form.timeout),
+    make_active: form.make_active,
   };
 }
 

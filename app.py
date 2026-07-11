@@ -312,11 +312,26 @@ class ImageApiSettingTestRequest(BaseModel):
 
 
 class AsrSettingSaveRequest(BaseModel):
+    id: str | None = None
+    name: str = ""
     provider: str = "compatible"
     base_url: str
     model: str
     api_key: str | None = None
     timeout: float | None = None
+    make_active: bool = True
+
+
+class AsrSettingTestRequest(BaseModel):
+    id: str | None = None
+    setting: AsrSettingSaveRequest | None = None
+    name: str = ""
+    provider: str = "compatible"
+    base_url: str = ""
+    model: str = ""
+    api_key: str | None = None
+    timeout: float | None = None
+    make_active: bool = True
 
 
 class WriterTopicRequest(BaseModel):
@@ -688,8 +703,26 @@ def save_asr_setting(request: AsrSettingSaveRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/asr-settings/active")
+def set_active_asr_setting(request: ApiSettingActiveRequest) -> dict[str, object]:
+    try:
+        return activate_list_setting(asr_settings, request.id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/asr-settings/{setting_id}")
+def delete_asr_setting(setting_id: str) -> dict[str, object]:
+    try:
+        return delete_list_setting(asr_settings, setting_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/api/asr-settings/test")
-def test_asr_setting(request: AsrSettingSaveRequest) -> dict[str, object]:
+def test_asr_setting(request: AsrSettingTestRequest) -> dict[str, object]:
     return _test_asr_setting_payload_or_400(request.model_dump())
 
 
@@ -890,9 +923,12 @@ def delete_media_transcripts(request: MediaDeleteRequest) -> dict[str, object]:
 
 
 @app.post("/api/media/resolve-url")
-def resolve_media_url(request: MediaUrlResolveRequest) -> dict[str, object]:
+def resolve_media_url(request: MediaUrlResolveRequest, http_request: Request) -> dict[str, object]:
     storage.init_storage()
     try:
+        with storage.connect() as conn:
+            context = current_context(http_request, conn)
+        owner_user_id, workspace_id = _context_owner_ids(context)
         resolved = media_parser.resolve_url(request.url)
         item = storage.create_remote_media_source(
             platform=resolved.platform,
@@ -902,6 +938,8 @@ def resolve_media_url(request: MediaUrlResolveRequest) -> dict[str, object]:
             duration_seconds=resolved.duration_seconds,
             status=resolved.status,
             error_message=resolved.error_message,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
         item["metadata"] = resolved.metadata or {}
         return {"item": item}
@@ -920,7 +958,7 @@ def transcribe_media(request: MediaTranscriptRequest) -> dict[str, object]:
         try:
             item = storage.get_media_source(media_id)
             storage.update_media_source(media_id, status="transcribing", error_message=None)
-            transcript, kind = media_parser.ensure_transcript(item)
+            transcript, kind = api_v2._ensure_media_transcript_with_platform_import(item)
             updated = storage.get_media_source(media_id)
             formatted = media_parser.format_media_transcript(updated, transcript)
             results.append({"item": updated, "transcript": formatted, "transcript_kind": kind, "ok": True})
@@ -3334,6 +3372,7 @@ def xhs_project_create(payload: XhsProjectCreateRequest, request: Request) -> di
         with storage.connect() as conn:
             context = current_context(request, conn)
         owner_user_id, workspace_id = _context_owner_ids(context)
+        owner_scope = _cloud_scoped_owner_id(context)
         files = _writer_library_files_from_refs(payload.library_files, request) if payload.library_files else []
         default_name = str(files[0]["title"]) if files else ""
         project = xhs_tools.create_project(
@@ -3342,10 +3381,12 @@ def xhs_project_create(payload: XhsProjectCreateRequest, request: Request) -> di
             account_profile_id=payload.account_profile_id,
             owner_user_id=owner_user_id,
             workspace_id=workspace_id,
+            include_ownerless=owner_scope is None,
+            restrict_account_profile_owner=owner_scope is not None,
         )
         if files:
             xhs_tools.set_project_library_files(str(project["id"]), files)
-        return _xhs_project_payload(str(project["id"]), owner_user_id=_cloud_scoped_owner_id(context))
+        return _xhs_project_payload(str(project["id"]), owner_user_id=owner_scope)
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -3552,6 +3593,24 @@ def xhs_project_image_item(project_id: str, payload: XhsProjectImageItemRequest,
 def xhs_auth_status(request: Request) -> dict[str, object]:
     _require_local_or_cloud_admin(request, "小红书登录检查需要在本机浏览器环境中运行；云端用户请导出图文压缩包后自行上传。")
     return xhs_tools.login_status()
+
+
+@app.post("/api/xhs/auth/logout")
+def xhs_auth_logout(request: Request) -> dict[str, object]:
+    _require_local_or_cloud_admin(request, "小红书退出登录需要在本机浏览器环境中运行；云端用户请导出图文压缩包后自行上传。")
+    return xhs_tools.logout_auth()
+
+
+@app.post("/api/xhs/auth/qrcode")
+def xhs_auth_qrcode(request: Request) -> dict[str, object]:
+    _require_local_or_cloud_admin(request, "小红书扫码登录需要在本机浏览器环境中运行；云端用户请导出图文压缩包后自行上传。")
+    return xhs_tools.auth_qrcode()
+
+
+@app.post("/api/xhs/auth/wait-login")
+def xhs_auth_wait_login(request: Request) -> dict[str, object]:
+    _require_local_or_cloud_admin(request, "小红书扫码登录需要在本机浏览器环境中运行；云端用户请导出图文压缩包后自行上传。")
+    return xhs_tools.wait_login()
 
 
 @app.post("/api/xhs/publish/preflight")

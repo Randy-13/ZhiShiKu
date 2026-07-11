@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { xhsApi } from "../apiXhs";
 import type { WriterLibraryFileInput } from "../api";
 import type { ActivityEvent, Language, WorkspaceId, XhsAccountProfile, XhsCarouselStrategy, XhsLoginStatus, XhsProject, XhsProjectState, XhsRunningTask } from "../domain";
@@ -79,24 +79,27 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
   const [selectedXhsAccountProfileId, setSelectedXhsAccountProfileId] = useState("");
   const [xhsRunningTask, setXhsRunningTask] = useState<XhsRunningTask>();
   const [xhsLoginStatus, setXhsLoginStatus] = useState<XhsLoginStatus>();
+  const selectedXhsProjectIdRef = useRef<string>();
   const isXhsRunning = Boolean(xhsRunningTask);
+
+  const rememberSelectedXhsProjectId = useCallback((projectId: string | undefined) => {
+    selectedXhsProjectIdRef.current = projectId;
+    setSelectedXhsProjectId(projectId);
+  }, []);
 
   const refreshXhsProjects = useCallback(
     async (selectedId?: string) => {
       const payload = await xhsApi.projects();
       const items = payload.items ?? [];
       setXhsProjects(items);
-      const nextId = selectedId ?? selectedXhsProjectId;
-      if (nextId && items.some((item) => item.id === nextId)) {
+      const nextId = selectedId ?? selectedXhsProjectIdRef.current;
+      if (nextId) {
         const state = await xhsApi.project(nextId);
         setXhsState(state);
-        setSelectedXhsProjectId(state.project.id);
-      } else {
-        setXhsState(undefined);
-        setSelectedXhsProjectId(undefined);
+        rememberSelectedXhsProjectId(state.project.id);
       }
     },
-    [selectedXhsProjectId],
+    [rememberSelectedXhsProjectId],
   );
 
   useEffect(() => {
@@ -168,7 +171,7 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
       try {
         const state = await runXhsTask(task, action);
         setXhsState(state);
-        setSelectedXhsProjectId(state.project.id);
+        rememberSelectedXhsProjectId(state.project.id);
         await refreshXhsProjects(state.project.id);
         addActivity({ title: task.title, detail: state.project.workspace, workspace: "xhs", status: "done" });
       } catch (error) {
@@ -180,7 +183,7 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
         });
       }
     },
-    [addActivity, refreshXhsProjects, runXhsTask],
+    [addActivity, refreshXhsProjects, rememberSelectedXhsProjectId, runXhsTask],
   );
 
   const requireProjectId = useCallback(() => {
@@ -367,16 +370,30 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
   }, [language, requireProjectId, runXhsAction]);
 
   const generateXhsImages = useCallback(
-    (coverPrompt?: string, contentImagePrompts: string[] = []) => {
-      runXhsAction({ id: "generate_images", title: language === "zh" ? "生成小红书轮播图" : "Generate XHS images", runningLabel: xhsRunningLabel(language, "generating") }, () =>
-        xhsApi.generateImages(requireProjectId(), coverPrompt, contentImagePrompts),
-      );
+    (coverPrompt?: string, contentImagePrompts: string[] = [], onProgress?: (done: number, total: number) => void) => {
+      runXhsAction({ id: "generate_images", title: language === "zh" ? "生成小红书轮播图" : "Generate XHS images", runningLabel: xhsRunningLabel(language, "generating") }, async () => {
+        const projectId = requireProjectId();
+        const cover = (coverPrompt ?? "").trim();
+        const prompts = contentImagePrompts.map((prompt) => prompt.trim()).filter(Boolean);
+        const tasks: XhsImageRetryTask[] = [];
+        if (cover) tasks.push({ kind: "cover", prompt: cover, aspectRatio: "3:4" });
+        prompts.forEach((prompt, index) => tasks.push({ kind: "content", prompt, index: index + 1, aspectRatio: "3:4" }));
+        if (!tasks.length) return xhsApi.generateImages(projectId, cover, prompts);
+        let latest: XhsProjectState | undefined;
+        onProgress?.(0, tasks.length);
+        for (const [index, task] of tasks.entries()) {
+          latest = await xhsApi.generateImageItem(projectId, task.kind, task.prompt, task.index, task.aspectRatio || "3:4");
+          setXhsState(latest);
+          onProgress?.(index + 1, tasks.length);
+        }
+        return latest ?? xhsApi.project(projectId);
+      });
     },
     [language, requireProjectId, runXhsAction],
   );
 
   const retryXhsImageItems = useCallback(
-    (tasks: XhsImageRetryTask[]) => {
+    (tasks: XhsImageRetryTask[], onProgress?: (done: number, total: number) => void) => {
       runXhsAction({ id: "retry_failed_images", title: language === "zh" ? "重试小红书失败图片" : "Retry failed XHS images", runningLabel: xhsRunningLabel(language, "generating") }, async () => {
         const projectId = requireProjectId();
         const runnable = tasks
@@ -384,9 +401,11 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
           .filter((task) => task.prompt && (task.kind === "cover" || (task.index ?? 0) > 0));
         if (!runnable.length) return xhsApi.project(projectId);
         let latest: XhsProjectState | undefined;
-        for (const task of runnable) {
+        onProgress?.(0, runnable.length);
+        for (const [index, task] of runnable.entries()) {
           latest = await xhsApi.generateImageItem(projectId, task.kind, task.prompt, task.index, task.aspectRatio || "3:4");
           setXhsState(latest);
+          onProgress?.(index + 1, runnable.length);
         }
         return latest ?? xhsApi.project(projectId);
       });
@@ -424,7 +443,7 @@ export function useXhsFlow({ language, addActivity, selectWorkspace }: Options) 
   }, [language, requireProjectId, runXhsAction]);
 
   const exportXhsPackage = useCallback(() => {
-    const title = language === "zh" ? "导出小红书图文压缩包" : "Export XHS package";
+    const title = language === "zh" ? "瀵煎嚭灏忕孩涔﹀浘鏂囧帇缂╁寘" : "Export XHS package";
     runXhsAction({ id: "export_package", title, runningLabel: xhsRunningLabel(language, "exporting") }, async () => {
       const state = await xhsApi.exportPackage(requireProjectId());
       downloadXhsPackage(state);

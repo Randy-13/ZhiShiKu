@@ -223,13 +223,17 @@ export type XhsPublishPreflight = {
 
 export type XhsLoginStatus = {
   ok?: boolean;
+  success?: boolean;
   logged_in?: boolean;
   login_method?: string;
   qrcode_image_url?: string;
   qrcode_path?: string;
   qr_login_url?: string;
+  hint?: string;
   message?: string;
   error?: string;
+  stderr?: string;
+  returncode?: number;
 };
 
 export type XhsAccountProfile = {

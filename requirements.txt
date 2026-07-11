@@ -4,6 +4,7 @@ cssutils>=2.9.0
 lxml>=4.9.0
 markdown>=3.4.0
 openai>=1.75.0
+openai-whisper>=20250625
 imageio-ffmpeg>=0.6.0
 paddleocr>=2.7.3
 paddlepaddle>=2.6.0
